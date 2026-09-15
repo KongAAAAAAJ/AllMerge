@@ -1,0 +1,297 @@
+import math
+import numpy as np
+import copy
+
+from highway_env.vehicle.dynamics_EightDoF_Model import dynamic_check
+import matplotlib.pyplot as plt
+from scipy.ndimage import gaussian_filter1d
+
+
+class PolyPlanner:
+    """
+    Polynomial path planning with selectable longitudinal speed prediction
+    """
+    """换道时间阈值"""
+    T_LC_MIN = 1
+    T_LC_MAX = 4
+
+    """间隔时间"""
+    DT = 0.1
+
+    """第二段轨迹规划时间"""
+    T_NEXT = 1
+
+    """单次规划轨迹数"""
+    NUM_PATHS = 5
+
+    def __init__(
+            self,
+            controlled_vehicle,
+            vehicle_type,
+            road,
+            target_lane_index,
+            lead_vehicle = None,
+            follow_index = None,
+            group = None,
+    ):
+        self.controlled_vehicle = controlled_vehicle
+        self.vehicle_type = vehicle_type
+        self.lead_vehicle = lead_vehicle
+        self.follow_index = follow_index
+        self.group = group
+        self.road = road
+        self.target_lane_index = target_lane_index
+
+    def planning(self):
+        """
+        Prepare for planning and evaluate planning results
+        """
+        lane_y_positions = {
+            0: 0,
+            1: 4,
+            2: 8,
+            3: 12,
+        }
+        target_y = lane_y_positions[self.target_lane_index[2]]
+        headings, speeds, steering_angles, x_positions, y_positions, LTR_values = self.lc_planning(target_y)
+        if headings is not None:
+            return headings, speeds, steering_angles, x_positions, y_positions, LTR_values
+
+        """All lane change trajectories are unsatisfied! Back to origin lane"""
+        target_y = lane_y_positions[self.controlled_vehicle.lane_index[2]]
+        headings, speeds, steering_angles, x_positions, y_positions, LTR_values = self.lc_planning(target_y)
+        if headings is not None:
+            return headings, speeds, steering_angles, x_positions, y_positions, LTR_values
+
+        """Back to origin lane failed! Keep current y"""
+        target_y = self.controlled_vehicle.position[1]
+        headings, speeds, steering_angles, x_positions, y_positions, LTR_values = self.lc_planning(target_y)
+        if headings is not None:
+            return headings, speeds, steering_angles, x_positions, y_positions, LTR_values
+
+    def lc_planning(self, target_y):
+        lc_coefficient = abs(self.controlled_vehicle.position[1] - target_y) / 4  # 换道系数
+        if lc_coefficient == 0:
+            lc_coefficient = 1
+        t_min = lc_coefficient * self.T_LC_MIN
+        t_max = lc_coefficient * self.T_LC_MAX
+        t_min = self.DT if t_min < self.DT else t_min
+        t_max = self.DT if t_max < self.DT else t_max
+
+        """01 原代码块 63-85"""
+        for t_lc in np.linspace(t_min, t_max, self.NUM_PATHS):
+            accelerations, x_speeds, x_positions = self.speed_planning(t_lc + self.T_NEXT)
+            headings, y_speeds, y_positions, speeds = self.path_planning(
+                t_lc, target_y, x_positions, x_speeds
+            )
+
+            # Generate steering angle
+            # Kinematics model: delta(k) = atan((L * (heading(k + 1) - heading(k))) / v(k) / T)
+            steering_angles = []
+            for i in range(1, len(headings)):
+                steering = math.atan(
+                    self.controlled_vehicle.LENGTH * (headings[i] - headings[i - 1]) / speeds[i - 1] / self.DT
+                )
+                steering_angles.append(steering)
+            times = np.linspace(0, t_lc, len(steering_angles))
+
+            # Evaluate if the planned path can meet rollover condition
+            isRollover, LTR_values = dynamic_check(
+                t=times, delta_f=np.array(steering_angles), vx=np.array(x_speeds[:-1]), ax=np.array(accelerations[:-1])
+            )
+            if isRollover:
+                return headings[:-1], speeds[:-1], steering_angles, x_positions[:-1], y_positions[:-1], LTR_values
+
+        """01 调试画图替换代码块 87-139"""
+        # if target_y != self.controlled_vehicle.position[1]:
+        #     fig, axs = plt.subplots(3, 1, constrained_layout=True)
+        #     axs[0].plot([0, t_max], [0.85, 0.85], color='red', linestyle='--', label='Maximum of $LTR$')
+        #     axs[1].plot([0, t_max], [np.pi / 4, np.pi / 4], color='red', linestyle='--', label='Maximum of $\delta_f$')
+        #     axs[1].plot([0, t_max], [-np.pi / 4, -np.pi / 4], color='red', linestyle='--', label='Minimum of $\delta_f$')
+        #     axs[2].plot([0, t_max], [3, 3], color='red', linestyle='--', label='Maximum of $a$')
+        #     axs[2].plot([0, t_max], [-6, -6], color='red', linestyle='--', label='Minimum of $a$')
+        # for t_lc in np.linspace(t_min, t_max, self.NUM_PATHS):
+        #     accelerations, x_speeds, x_positions = self.speed_planning(t_lc + self.T_NEXT)
+        #     headings, y_speeds, y_positions, speeds = self.path_planning(
+        #         t_lc, target_y, x_positions, x_speeds
+        #     )
+        #
+        #     # Generate steering angle
+        #     # Kinematics model: delta(k) = atan((L * (heading(k + 1) - heading(k))) / v(k) / T)
+        #     steering_angles = []
+        #     for i in range(1, len(headings)):
+        #         steering = math.atan(
+        #             self.controlled_vehicle.LENGTH * (headings[i] - headings[i - 1]) / speeds[i - 1] / self.DT
+        #         )
+        #         steering_angles.append(steering)
+        #     times = np.linspace(0, t_lc, len(steering_angles))
+        #
+        #     # Evaluate if the planned path can meet rollover condition
+        #     isRollover, LTR_values = dynamic_check(
+        #         t=times, delta_f=np.array(steering_angles), vx=np.array(x_speeds[:-1]), ax=np.array(accelerations[:-1])
+        #     )
+        #     if sum(LTR_values) > 0:
+        #         BUG = 1
+        #         LTR_values_smoothed = gaussian_filter1d(LTR_values, sigma=1)
+        #         axs[0].plot(np.linspace(0, t_lc, len(LTR_values)), LTR_values_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[0].set_title("LTR of Truck vs. Time")
+        #         axs[0].legend()
+        #         axs[0].set_xlabel("$t$ ($s$)")
+        #         axs[0].set_ylabel("$LTR$")
+        #
+        #         steering_angles_smoothed = gaussian_filter1d(steering_angles, sigma=1)
+        #         axs[1].plot(np.linspace(0, t_lc, len(steering_angles)), steering_angles_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[1].set_title("Steering Angle of Truck vs. Time")
+        #         axs[1].legend()
+        #         axs[1].set_xlabel("$t$ ($s$)")
+        #         axs[1].set_ylabel("$\delta_f$")
+        #
+        #         accelerations_smoothed = gaussian_filter1d(accelerations, sigma=1)
+        #         axs[2].plot(np.linspace(0, t_lc, len(accelerations)), accelerations_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[2].set_title("Accelerations of Truck vs. Time")
+        #         axs[2].legend()
+        #         axs[2].set_xlabel("$t$ ($s$)")
+        #         axs[2].set_ylabel("$a$ ($m/s_2$)")
+        # plt.show()
+        # if isRollover:
+        #     return headings[:-1], speeds[:-1], steering_angles, x_positions[:-1], y_positions[:-1], LTR_values
+
+    def speed_planning(self, t_lim) -> tuple:
+        """
+        Speed planning with the selected longitudinal controller
+        """
+        accelerations, x_speeds, x_positions = [], [], []
+        copy_controlled_vehicle = copy.deepcopy(self.controlled_vehicle)
+        context = getattr(copy_controlled_vehicle.road, "longitudinal_control", None)
+        use_lmpc = context is not None and context.kind == "lmpc"
+        if use_lmpc:
+            copy_controlled_vehicle._lon_dt = self.DT
+            ego_id = getattr(copy_controlled_vehicle, "_lon_id", None)
+            if ego_id is not None:
+                for index, vehicle in enumerate(copy_controlled_vehicle.road.vehicles):
+                    if getattr(vehicle, "_lon_id", None) == ego_id:
+                        copy_controlled_vehicle.road.vehicles[index] = copy_controlled_vehicle
+        lead_copy = self.lead_vehicle
+        if use_lmpc:
+            # Use references from the same copied road and advance that road's
+            # states. A follower's neighbour lookup must see moving references.
+            def planning_reference(original):
+                if original is None:
+                    return None
+                for index, vehicle in enumerate(self.road.vehicles):
+                    if vehicle is original:
+                        return copy_controlled_vehicle.road.vehicles[index]
+                return copy.deepcopy(original)
+            lead_copy = planning_reference(self.lead_vehicle)
+
+        front_v, _ = self.road.neighbour_vehicles(
+            vehicle=self.controlled_vehicle, lane_index=self.controlled_vehicle.lane_index
+        )
+        front_v_copy = planning_reference(front_v) if use_lmpc else copy.deepcopy(front_v)
+
+        for _ in np.linspace(0, t_lim, int(t_lim / self.DT) + 1):
+            # Is it a leader vehicle?
+            if self.vehicle_type == 'Leader':
+                acc = copy_controlled_vehicle.integrated_longitudinal_control(
+                    ego_vehicle=copy_controlled_vehicle if use_lmpc else self.controlled_vehicle, front_vehicle=front_v_copy
+                )
+            else:
+                acc = copy_controlled_vehicle.integrated_longitudinal_control(
+                    lead_vehicle=lead_copy, follow_index=self.follow_index, group=self.group
+                )
+            if use_lmpc:
+                copy_controlled_vehicle.action["acceleration"] = acc
+                # Planning uses a kinematic snapshot, not stale TruckSim feedback.
+                if hasattr(copy_controlled_vehicle, "measured_acceleration"):
+                    copy_controlled_vehicle.measured_acceleration[0] = acc
+            accelerations.append(acc)
+            x_speeds.append(copy_controlled_vehicle.speed)
+            x_positions.append(copy_controlled_vehicle.position[0])
+
+            # Update front vehicle, if it exits
+            if use_lmpc:
+                references = list(copy_controlled_vehicle.road.vehicles)
+                for reference in (lead_copy, front_v_copy):
+                    if reference is not None and all(reference is not other for other in references):
+                        references.append(reference)
+                for reference in references:
+                    if reference is copy_controlled_vehicle:
+                        continue
+                    reference_a = getattr(reference, "action", {}).get("acceleration", 0)
+                    reference.position[0] += reference.speed * self.DT + 0.5 * reference_a * self.DT ** 2
+                    reference.speed += reference_a * self.DT
+            elif front_v_copy is not None:
+                front_a = front_v_copy.action['acceleration']
+                front_v_copy.position[0] = front_v_copy.position[0] + front_v_copy.speed * self.DT + 0.5 * front_a * self.DT ** 2
+                front_v_copy.speed = front_v_copy.speed + front_a * self.DT
+
+            # Update ego vehicle
+            copy_controlled_vehicle.position[0] = copy_controlled_vehicle.position[0] + copy_controlled_vehicle.speed * self.DT + 0.5 * acc * self.DT ** 2
+            copy_controlled_vehicle.speed = copy_controlled_vehicle.speed + acc * self.DT
+
+        return accelerations, x_speeds, x_positions
+
+    def path_planning(self, t_lc, target_y, x_positions, x_speeds):
+        """
+        Path planning by polynomial
+        """
+        y_positions = []
+        y_speeds = []
+        headings = []
+        speeds = []
+
+        if self.controlled_vehicle.position[1] != target_y:
+            y0 = self.controlled_vehicle.position[1]
+            vy0 = 0
+            ay0 = self.controlled_vehicle.action["acceleration"]
+            t0 = 0
+            yf = target_y
+            vyf = 0
+            ayf = 0
+            tf = t_lc
+
+            T = np.array([
+                [1, t0, t0 ** 2, t0 ** 3, t0 ** 4, t0 ** 5],
+                [0, 1, 2 * t0, 3 * t0 ** 2, 4 * t0 ** 3, 5 * t0 ** 4],
+                [0, 0, 2, 6 * t0, 12 * t0 ** 2, 20 * t0 ** 3],
+                [1, tf, tf ** 2, tf ** 3, tf ** 4, tf ** 5],
+                [0, 1, 2 * tf, 3 * tf ** 2, 4 * tf ** 3, 5 * tf ** 4],
+                [0, 0, 2, 6 * tf, 12 * tf ** 2, 20 * tf ** 3]
+            ])
+            Y = np.array([
+                [y0],
+                [vy0],
+                [ay0],
+                [yf],
+                [vyf],
+                [ayf]
+            ])
+
+            # 求解系数矩阵
+            b = np.linalg.solve(T, Y)
+
+            # 换道路径规划
+            for t, vx in zip(np.linspace(0, t_lc, int(t_lc / self.DT) + 1), x_speeds[:int(t_lc / self.DT) + 1]):
+                acc_y = 2*b[2] + 6*b[3]*t + 12*b[4]*t**2 + 20*b[5]*t**3
+                vy = b[1] + 2*b[2]*t + 3*b[3]*t**2 + 4*b[4]*t**3 + 5*b[5]*t**4
+                y = b[0] + b[1]*t + b[2]*t**2 + b[3]*t**3 + b[4]*t**4 + b[5]*t**5
+                heading = math.atan(vy / vx)
+                speed = math.sqrt(vx ** 2 + vy ** 2)
+
+                headings.append(heading)
+                y_speeds.append(vy)
+                speeds.append(speed)
+                y_positions.append(y)
+            # 第二段路径规划
+            for t, vx in zip(np.linspace(t_lc, t_lc + self.T_NEXT, int(self.T_NEXT / self.DT) + 1), x_speeds[int(t_lc / self.DT) + 1:]):
+                headings.append(0)
+                y_speeds.append(0)
+                speeds.append(vx)
+                y_positions.append(yf)
+        else:
+            headings = [0] * len(x_positions)
+            y_speeds = [0] * len(x_positions)
+            speeds = x_speeds
+            y_positions = [self.controlled_vehicle.position[1]] * len(x_positions)
+
+        return headings, y_speeds, y_positions, speeds

@@ -1,0 +1,6 @@
+/ckpts/
+/infos/
+/tests/
+
+# Files larger than 5 MiB must be listed explicitly below.
+# Gitignore cannot filter files by size.
