@@ -444,7 +444,6 @@ class MultiAgentAction(ActionType):
 
     # A_matrix = split_A_matrix + merge_A_matrix + keep_A_matrix
     A_MATRIX = np.ones(4)
-
     SPLIT_A_MATRIX = np.array([[0, 0, 1, 0],
                                [0, 0, 1, 0],
                                [0, 0, 0, 0],
@@ -454,7 +453,6 @@ class MultiAgentAction(ActionType):
                                [1, 0, 0, 1],
                                [1, 1, 0, 1],
                                [0, 0, 0, 0]])
-
     SPLIT_AND_MERGE_MATRIX = np.array([[0, 1, 0, 0],
                                        [1, 0, 0, 0],
                                        [0, 0, 0, 0],
@@ -503,21 +501,59 @@ class MultiAgentAction(ActionType):
         #     """Rule Decision"""
         #     maker = RULE_MAKER(env=self.env)
         #     vehicle_actions = maker.group_action_to_vehicle_action(action)
-
         context = getattr(self.env.road, "longitudinal_control", None)
         if context is not None and context.kind == "lmpc":
             context.begin_frame(self.env.controlled_vehicles, self.GROUPS[int(action)])
+
         vehicle_actions = self.env.maker.group_action_to_vehicle_action(action)
 
         if context is not None and context.kind == "lmpc":
-            for vehicle, acceleration in zip(self.env.controlled_vehicles, vehicle_actions["acceleration"]):
+            for vehicle, acceleration in zip(
+                self.env.controlled_vehicles,
+                vehicle_actions["acceleration"],
+            ):
                 prediction = context.predictions.get(vehicle._lon_id)
                 if prediction is None or not np.isclose(prediction[1][0], acceleration):
                     context.publish(vehicle, acceleration)
+
         planner_flag = self.env.config["Planner"]
+
+        # --------------------------------------------------------------
+        # Diffusion planner feature construction.
+        #
+        # Important timing:
+        #   current state_t
+        #       -> RuleMaker target lane
+        #       -> build planner features_t
+        #       -> planner/controller action_t
+        #       -> vehicle dynamics state_{t+1}
+        #
+        # It is enabled for Polynomial as well, so the same preprocessing can
+        # later be used when collecting expert demonstrations.
+        # --------------------------------------------------------------
+        if planner_flag.get("state", True):
+            feature_config = planner_flag.get("features", {})
+            if feature_config.get("enabled", True):
+                feature_builder = getattr(
+                    self.env,
+                    "planner_feature_builder",
+                    None,
+                )
+                if feature_builder is None:
+                    from highway_env.planner.feature_builder import AllMergeFeatureBuilder
+
+                    feature_builder = AllMergeFeatureBuilder(
+                        env=self.env,
+                        config=feature_config,
+                    )
+                    self.env.planner_feature_builder = feature_builder
+
+                self.env.latest_planner_features = feature_builder.build_batch(
+                    target_lane_indices=vehicle_actions["lane index"],
+                )
+
         env_state = self.env.controlled_vehicles[0].env_state
         index_group = self.GROUPS[env_state]
-
         for lateral_action, lane_index, acceleration, action_type, car_id in zip(
                 vehicle_actions["lateral action"],
                 vehicle_actions["lane index"],
@@ -525,7 +561,15 @@ class MultiAgentAction(ActionType):
                 self.agents_action_types,
                 range(len(self.agents_action_types)),
         ):
-            action_type.act(lateral_action, lane_index, acceleration, planner_flag, index_group, car_id, self.env.controlled_vehicles)
+            action_type.act(
+                lateral_action,
+                lane_index,
+                acceleration,
+                planner_flag,
+                index_group,
+                car_id,
+                self.env.controlled_vehicles,
+            )
 
     def get_available_actions(self):
         return itertools.product(
@@ -534,6 +578,7 @@ class MultiAgentAction(ActionType):
                 for action_type in self.agents_action_types
             ]
         )
+
 
 def action_factory(env: "AbstractEnv", config: dict) -> ActionType:
     if config["type"] == "ContinuousAction":
