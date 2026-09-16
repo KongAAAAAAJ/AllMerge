@@ -1,3 +1,3 @@
 git add .
-git commit -m "update: build feature"
+git commit -m "update：build anchor"
 git push

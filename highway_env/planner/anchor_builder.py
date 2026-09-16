@@ -23,7 +23,7 @@ The implementation is adapted to AllMerge:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -40,6 +40,7 @@ from highway_env.planner.mode_definitions import (
 class AnchorOutput:
     coarse_trajectories: np.ndarray
     mode_valid_mask: np.ndarray
+    diagnostics: Optional[Dict[int, Dict[str, Any]]] = None
 
 
 def _polyline_arc_lengths(polyline: np.ndarray) -> np.ndarray:
@@ -197,6 +198,11 @@ class AllMergeAnchorBuilder:
         # KEEP_LOW and STOP remain available as fallback modes.
         "keep_low_always_valid": True,
         "stop_always_valid": True,
+
+        # Collision diagnosis is debug-only and is disabled by default.
+        # When enabled, the first concrete collision evidence for each
+        # traffic-invalid mode is saved in self.last_diagnostics.
+        "diagnostics_enabled": False,
     }
 
     def __init__(self, config: Optional[dict] = None) -> None:
@@ -221,6 +227,11 @@ class AllMergeAnchorBuilder:
             raise ValueError("horizon_steps must be positive")
         if self.dt <= 0.0:
             raise ValueError("trajectory_dt must be positive")
+
+        # List[ego_idx -> Dict[mode_idx -> diagnostic record]]
+        # Updated after every build_batch(). Kept outside planner features
+        # so model inputs remain clean.
+        self.last_diagnostics = []
 
     @property
     def num_modes(self) -> int:
@@ -256,6 +267,7 @@ class AllMergeAnchorBuilder:
             (batch_size, self.num_modes),
             dtype=bool,
         )
+        diagnostics_batch = []
 
         for b in range(batch_size):
             out = self.build_single(
@@ -268,6 +280,11 @@ class AllMergeAnchorBuilder:
             )
             coarse[b] = out.coarse_trajectories
             valid[b] = out.mode_valid_mask
+            diagnostics_batch.append(
+                out.diagnostics if out.diagnostics is not None else {}
+            )
+
+        self.last_diagnostics = diagnostics_batch
 
         self._validate_batch(coarse, valid, batch_size)
 
@@ -331,6 +348,10 @@ class AllMergeAnchorBuilder:
             dtype=np.float32,
         )
         valid = np.zeros((self.num_modes,), dtype=bool)
+        diagnostics_enabled = bool(
+            self.config.get("diagnostics_enabled", False)
+        )
+        mode_diagnostics: Dict[int, Dict[str, Any]] = {}
 
         for slot in MODE_SLOTS:
             if slot.semantic_group == "STOP":
@@ -382,16 +403,32 @@ class AllMergeAnchorBuilder:
                 is_valid = False
 
             if trajectory is None:
+                if diagnostics_enabled:
+                    mode_diagnostics[slot.index] = {
+                        "mode_index": int(slot.index),
+                        "mode_name": slot.name,
+                        "semantic_group": slot.semantic_group,
+                        "geometry_exists": False,
+                        "valid": False,
+                        "invalid_reason": "geometry_unavailable",
+                        "collision": None,
+                    }
                 continue
 
+            collision_record = None
+            invalid_reason = None
+
             if is_valid and self._should_collision_filter(slot):
-                if not self._is_collision_free(
+                collision_free, collision_record = self._is_collision_free(
                     trajectory,
                     ego_state,
                     agent_states,
                     agent_valid_mask,
-                ):
+                    collect_diagnostic=diagnostics_enabled,
+                )
+                if not collision_free:
                     is_valid = False
+                    invalid_reason = "collision"
 
             # KEEP_LOW and STOP are retained as fallback modes.
             if (
@@ -399,23 +436,39 @@ class AllMergeAnchorBuilder:
                 and bool(self.config["keep_low_always_valid"])
             ):
                 is_valid = True
+                invalid_reason = None
+                collision_record = None
 
             if (
                 slot.semantic_group == "STOP"
                 and bool(self.config["stop_always_valid"])
             ):
                 is_valid = True
+                invalid_reason = None
+                collision_record = None
 
             # Keep geometry and selectability as two separate concepts.
             #
             # A geometrically existing mode always retains its trajectory,
-            # even when traffic makes it invalid. This prevents the model
-            # from learning the shortcut "all-zero anchor == invalid mode".
-            #
-            # Only modes that do not geometrically exist (for example a
-            # LEFT_LC mode when there is no left lane) remain all-zero.
+            # even when traffic makes it invalid.
             coarse[slot.index] = trajectory
             valid[slot.index] = bool(is_valid)
+
+            if diagnostics_enabled:
+                if collision_record is not None:
+                    collision_record["mode_index"] = int(slot.index)
+                    collision_record["mode_name"] = slot.name
+                    collision_record["semantic_group"] = slot.semantic_group
+
+                mode_diagnostics[slot.index] = {
+                    "mode_index": int(slot.index),
+                    "mode_name": slot.name,
+                    "semantic_group": slot.semantic_group,
+                    "geometry_exists": True,
+                    "valid": bool(is_valid),
+                    "invalid_reason": invalid_reason,
+                    "collision": collision_record,
+                }
 
         # Guarantee at least one valid nonzero trajectory.
         if not np.any(valid):
@@ -433,6 +486,7 @@ class AllMergeAnchorBuilder:
         return AnchorOutput(
             coarse_trajectories=coarse,
             mode_valid_mask=valid,
+            diagnostics=mode_diagnostics if diagnostics_enabled else None,
         )
 
     # ------------------------------------------------------------------
@@ -749,41 +803,58 @@ class AllMergeAnchorBuilder:
         ego_state: np.ndarray,
         agent_states: np.ndarray,
         agent_valid_mask: np.ndarray,
-    ) -> bool:
+        *,
+        collect_diagnostic: bool = False,
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
-        Lightweight oriented-rectangle collision test.
+        Oriented longitudinal/lateral rectangle collision test.
 
-        1. Predict each agent with constant velocity in the initial
-           ego-centric frame.
-        2. For every future anchor point, construct the local
-           longitudinal/lateral frame from the anchor tangent heading.
-        3. Project the relative agent position into this frame.
-        4. Project the agent rectangle half extents into the same frame
-           using the relative heading.
-        5. Declare overlap only when BOTH longitudinal and lateral
-           intervals overlap.
+        Returns:
+            collision_free:
+                True when no overlap is found.
 
-        This is still an approximation (not a full SAT polygon test),
-        but it avoids the severe false positives caused by the previous
-        circumscribed-circle distance test for adjacent-lane vehicles.
+            diagnostic:
+                None in normal operation.
+
+                When collect_diagnostic=True and an overlap is found,
+                the first concrete collision evidence is returned. The
+                evidence is sufficient to inspect why mode_valid_mask
+                became False:
+
+                    agent_idx
+                    future step / time
+                    signed longitudinal/lateral separation
+                    longitudinal/lateral overlap thresholds
+                    overlap penetration margins
+                    anchor and predicted-agent points
+                    anchor and agent headings
+                    agent dimensions / controlled flag
+
+        The test remains a lightweight predictor:
+            agent motion = constant velocity in the initial ego frame.
+
+        It is deliberately separate from the later Risk-PACT / execution
+        surrogate safety model.
         """
         trajectory = np.asarray(
             trajectory,
             dtype=np.float32,
         )
-
-        valid_agents = np.asarray(
-            agent_states[
-                np.asarray(
-                    agent_valid_mask,
-                    dtype=bool,
-                )
-            ],
+        agent_states = np.asarray(
+            agent_states,
             dtype=np.float32,
         )
+        agent_valid_mask = np.asarray(
+            agent_valid_mask,
+            dtype=bool,
+        )
 
-        if valid_agents.size == 0:
-            return True
+        valid_agent_indices = np.flatnonzero(
+            agent_valid_mask
+        )
+
+        if valid_agent_indices.size == 0:
+            return True, None
 
         times = (
             np.arange(
@@ -793,12 +864,10 @@ class AllMergeAnchorBuilder:
             + 1.0
         ) * self.dt
 
-        # agent_states stores:
-        #   vx_rel = vx_agent - vx_ego
-        #   vy_rel = vy_agent - vy_ego
+        # agent_states stores relative velocity:
+        #     v_agent - v_ego
         #
-        # Convert back to the agent velocity represented in the
-        # initial ego frame for constant-velocity prediction.
+        # Recover agent velocity represented in the initial ego frame.
         ego_velocity_local = np.asarray(
             [
                 ego_state[0],
@@ -807,28 +876,18 @@ class AllMergeAnchorBuilder:
             dtype=np.float32,
         )
 
-        anchor_headings = (
-            self._trajectory_headings(
-                trajectory
-            )
+        anchor_headings = self._trajectory_headings(
+            trajectory
         )
 
-        ego_half_length = (
-            0.5
-            * float(
-                self.config[
-                    "ego_length_m"
-                ]
-            )
+        ego_length = float(
+            self.config["ego_length_m"]
         )
-        ego_half_width = (
-            0.5
-            * float(
-                self.config[
-                    "ego_width_m"
-                ]
-            )
+        ego_width = float(
+            self.config["ego_width_m"]
         )
+        ego_half_length = 0.5 * ego_length
+        ego_half_width = 0.5 * ego_width
 
         longitudinal_margin = float(
             self.config[
@@ -841,7 +900,9 @@ class AllMergeAnchorBuilder:
             ]
         )
 
-        for agent in valid_agents:
+        for agent_idx in valid_agent_indices:
+            agent = agent_states[int(agent_idx)]
+
             initial_position = (
                 agent[0:2].astype(
                     np.float32,
@@ -849,8 +910,15 @@ class AllMergeAnchorBuilder:
                 )
             )
 
+            agent_relative_velocity = (
+                agent[2:4].astype(
+                    np.float32,
+                    copy=False,
+                )
+            )
+
             agent_velocity_local = (
-                agent[2:4]
+                agent_relative_velocity
                 + ego_velocity_local
             )
 
@@ -878,7 +946,7 @@ class AllMergeAnchorBuilder:
                 0.5 * agent_width
             )
 
-            # agent heading relative to the initial ego frame.
+            # Agent heading relative to the initial ego frame.
             agent_heading = float(
                 np.arctan2(
                     agent[6],
@@ -895,13 +963,16 @@ class AllMergeAnchorBuilder:
                     ]
                 )
 
+                anchor_point = trajectory[
+                    step_idx
+                ]
+                agent_point = predicted_positions[
+                    step_idx
+                ]
+
                 delta = (
-                    predicted_positions[
-                        step_idx
-                    ]
-                    - trajectory[
-                        step_idx
-                    ]
+                    agent_point
+                    - anchor_point
                 )
 
                 c = float(
@@ -911,8 +982,6 @@ class AllMergeAnchorBuilder:
                     np.sin(anchor_heading)
                 )
 
-                # Transform relative position into the instantaneous
-                # local longitudinal/lateral frame of the anchor.
                 longitudinal = (
                     c * float(delta[0])
                     + s * float(delta[1])
@@ -942,8 +1011,8 @@ class AllMergeAnchorBuilder:
                     )
                 )
 
-                # Agent OBB projected onto the anchor longitudinal and
-                # lateral axes.
+                # Project the agent oriented box onto the instantaneous
+                # anchor longitudinal/lateral axes.
                 agent_longitudinal_extent = (
                     cr * agent_half_length
                     + sr * agent_half_width
@@ -964,12 +1033,19 @@ class AllMergeAnchorBuilder:
                     + lateral_margin
                 )
 
+                abs_longitudinal = abs(
+                    longitudinal
+                )
+                abs_lateral = abs(
+                    lateral
+                )
+
                 longitudinal_overlap = (
-                    abs(longitudinal)
+                    abs_longitudinal
                     < longitudinal_threshold
                 )
                 lateral_overlap = (
-                    abs(lateral)
+                    abs_lateral
                     < lateral_threshold
                 )
 
@@ -977,9 +1053,132 @@ class AllMergeAnchorBuilder:
                     longitudinal_overlap
                     and lateral_overlap
                 ):
-                    return False
+                    if not collect_diagnostic:
+                        return False, None
 
-        return True
+                    diagnostic = {
+                        "agent_idx": int(agent_idx),
+                        "agent_is_controlled": bool(
+                            agent[10] > 0.5
+                        ),
+                        "future_step": int(
+                            step_idx + 1
+                        ),
+                        "step_index": int(
+                            step_idx
+                        ),
+                        "time_s": float(
+                            times[step_idx]
+                        ),
+
+                        "longitudinal_m": float(
+                            longitudinal
+                        ),
+                        "lateral_m": float(
+                            lateral
+                        ),
+                        "abs_longitudinal_m": float(
+                            abs_longitudinal
+                        ),
+                        "abs_lateral_m": float(
+                            abs_lateral
+                        ),
+
+                        "longitudinal_threshold_m": float(
+                            longitudinal_threshold
+                        ),
+                        "lateral_threshold_m": float(
+                            lateral_threshold
+                        ),
+
+                        # Positive values mean penetration into the
+                        # forbidden rectangle-overlap region.
+                        "longitudinal_penetration_m": float(
+                            longitudinal_threshold
+                            - abs_longitudinal
+                        ),
+                        "lateral_penetration_m": float(
+                            lateral_threshold
+                            - abs_lateral
+                        ),
+
+                        "anchor_point": [
+                            float(anchor_point[0]),
+                            float(anchor_point[1]),
+                        ],
+                        "agent_predicted_point": [
+                            float(agent_point[0]),
+                            float(agent_point[1]),
+                        ],
+                        "agent_initial_point": [
+                            float(initial_position[0]),
+                            float(initial_position[1]),
+                        ],
+
+                        "anchor_heading_rad": float(
+                            anchor_heading
+                        ),
+                        "agent_heading_rad": float(
+                            agent_heading
+                        ),
+                        "relative_heading_rad": float(
+                            relative_heading
+                        ),
+
+                        "ego_length_m": float(
+                            ego_length
+                        ),
+                        "ego_width_m": float(
+                            ego_width
+                        ),
+                        "agent_length_m": float(
+                            agent_length
+                        ),
+                        "agent_width_m": float(
+                            agent_width
+                        ),
+
+                        "agent_velocity_local_mps": [
+                            float(
+                                agent_velocity_local[0]
+                            ),
+                            float(
+                                agent_velocity_local[1]
+                            ),
+                        ],
+                    }
+
+                    return False, diagnostic
+
+        return True, None
+
+    def set_diagnostics_enabled(
+        self,
+        enabled: bool = True,
+    ) -> None:
+        """Enable/disable collision evidence collection at runtime."""
+        self.config["diagnostics_enabled"] = bool(
+            enabled
+        )
+
+    def get_last_diagnostics(self):
+        """
+        Return diagnostics from the most recent build_batch().
+
+        Structure:
+            List[
+                ego_idx -> {
+                    mode_idx -> {
+                        mode_name,
+                        geometry_exists,
+                        valid,
+                        invalid_reason,
+                        collision
+                    }
+                }
+            ]
+        """
+        return self.last_diagnostics
 
     # ------------------------------------------------------------------
     # Validation
