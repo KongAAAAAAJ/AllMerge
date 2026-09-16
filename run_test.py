@@ -25,7 +25,23 @@ def main(episodes=1, seed=SEED):
             while True:
                 mode = set_platoon_mode()
                 action = decide(obs, mode)
+
                 obs, reward, done, infos = video_env.step(action)
+
+                # ----------------------------------------------------------
+                # Check features for the planner
+                if steps == 5:
+                    from tests.debug_planner_features import debug_planner_features, get_planner_features
+                    debug_planner_features(env, ego_idx=0, show=True)
+                    features = get_planner_features(env)
+                    for key, value in features.items():
+                        print(
+                            f"{key:24s}",
+                            value.shape,
+                            value.dtype,
+                        )
+                # ----------------------------------------------------------
+
                 reward_sum += float(reward[0])
                 steps += 1
                 data_saver.record_step(infos[0], action[0])

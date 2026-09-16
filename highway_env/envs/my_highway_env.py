@@ -50,7 +50,7 @@ class MyHighwayEnv(AbstractEnv):
 
                 "Controller": {
                     "type": "lqr", # lqr / lmpc (longitudinal only)
-                    "vehicle_model": "kinematics",  # kinematics / trucksim
+                    "vehicle_model": "trucksim",  # kinematics / trucksim
                 },
 
                 "TruckSim": {

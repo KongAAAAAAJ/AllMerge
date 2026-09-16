@@ -180,7 +180,7 @@ class AllMergeFeatureBuilder:
     def _build_ego_state(self, ego) -> np.ndarray:
         body = self._vehicle_body_state(ego)
         lane_offset = np.asarray(ego.lane_offset, dtype=np.float32)
-        heading_error = float(lane_offset[2])
+        heading_error = -float(lane_offset[2])
 
         state = np.asarray(
             [
