@@ -57,19 +57,6 @@ class MyHighwayEnv(AbstractEnv):
                     # ========================================================
                     "type": "Polynomial",
 
-
-                    # Polynomial benchmark / expert shared mode.
-                    "Polynomial": {
-                        "mode": "aligned",
-                        "aligned_horizon_s": 4.0,
-                    },
-
-                    # One-frame expert / Dynamic-Anchor alignment.
-                    "ExpertAlignment": {
-                        "enabled": True,
-                        "require_aligned_polynomial": True,
-                    },
-
                     # ========================================================
                     # AllMerge structured planner features
                     # ========================================================

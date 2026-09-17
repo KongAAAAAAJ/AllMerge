@@ -56,6 +56,7 @@ class PolyPlanner:
             raise ValueError("aligned_horizon_s must be positive")
 
         self.last_time_s = None
+
     def planning(self):
         """
         Prepare for planning and evaluate planning results
@@ -84,138 +85,92 @@ class PolyPlanner:
             return headings, speeds, steering_angles, x_positions, y_positions, LTR_values
 
     def lc_planning(self, target_y):
-        lc_coefficient = abs(
-            self.controlled_vehicle.position[1] - target_y
-        ) / 4
-
+        lc_coefficient = abs(self.controlled_vehicle.position[1] - target_y) / 4  # 换道系数
         if lc_coefficient == 0:
             lc_coefficient = 1
-
         t_min = lc_coefficient * self.T_LC_MIN
         t_max = lc_coefficient * self.T_LC_MAX
         t_min = self.DT if t_min < self.DT else t_min
         t_max = self.DT if t_max < self.DT else t_max
 
-        # Keep legacy candidate selection unchanged.
+        """01 原代码块 63-85"""
         for t_lc in np.linspace(t_min, t_max, self.NUM_PATHS):
-            legacy_total_horizon = t_lc + self.T_NEXT
-
-            accelerations, x_speeds, x_positions = self.speed_planning(
-                legacy_total_horizon
-            )
-
+            accelerations, x_speeds, x_positions = self.speed_planning(t_lc + self.T_NEXT)
             headings, y_speeds, y_positions, speeds = self.path_planning(
-                t_lc,
-                target_y,
-                x_positions,
-                x_speeds,
-                post_horizon_s=self.T_NEXT,
+                t_lc, target_y, x_positions, x_speeds
             )
 
+            # Generate steering angle
+            # Kinematics model: delta(k) = atan((L * (heading(k + 1) - heading(k))) / v(k) / T)
             steering_angles = []
-
             for i in range(1, len(headings)):
                 steering = math.atan(
-                    self.controlled_vehicle.LENGTH
-                    * (headings[i] - headings[i - 1])
-                    / speeds[i - 1]
-                    / self.DT
+                    self.controlled_vehicle.LENGTH * (headings[i] - headings[i - 1]) / speeds[i - 1] / self.DT
                 )
                 steering_angles.append(steering)
-
             times = np.linspace(0, t_lc, len(steering_angles))
 
+            # Evaluate if the planned path can meet rollover condition
             isRollover, LTR_values = dynamic_check(
-                t=times,
-                delta_f=np.array(steering_angles),
-                vx=np.array(x_speeds[:-1]),
-                ax=np.array(accelerations[:-1]),
+                t=times, delta_f=np.array(steering_angles), vx=np.array(x_speeds[:-1]), ax=np.array(accelerations[:-1])
             )
-
             if isRollover:
-                if self.planner_mode == "legacy":
-                    returned_count = max(len(x_positions) - 1, 0)
+                return headings[:-1], speeds[:-1], steering_angles, x_positions[:-1], y_positions[:-1], LTR_values
 
-                    self.last_time_s = (
-                        np.arange(
-                            returned_count,
-                            dtype=np.float32,
-                        )
-                        * self.DT
-                    )
+        """01 调试画图替换代码块 87-139"""
+        # if target_y != self.controlled_vehicle.position[1]:
+        #     fig, axs = plt.subplots(3, 1, constrained_layout=True)
+        #     axs[0].plot([0, t_max], [0.85, 0.85], color='red', linestyle='--', label='Maximum of $LTR$')
+        #     axs[1].plot([0, t_max], [np.pi / 4, np.pi / 4], color='red', linestyle='--', label='Maximum of $\delta_f$')
+        #     axs[1].plot([0, t_max], [-np.pi / 4, -np.pi / 4], color='red', linestyle='--', label='Minimum of $\delta_f$')
+        #     axs[2].plot([0, t_max], [3, 3], color='red', linestyle='--', label='Maximum of $a$')
+        #     axs[2].plot([0, t_max], [-6, -6], color='red', linestyle='--', label='Minimum of $a$')
+        # for t_lc in np.linspace(t_min, t_max, self.NUM_PATHS):
+        #     accelerations, x_speeds, x_positions = self.speed_planning(t_lc + self.T_NEXT)
+        #     headings, y_speeds, y_positions, speeds = self.path_planning(
+        #         t_lc, target_y, x_positions, x_speeds
+        #     )
+        #
+        #     # Generate steering angle
+        #     # Kinematics model: delta(k) = atan((L * (heading(k + 1) - heading(k))) / v(k) / T)
+        #     steering_angles = []
+        #     for i in range(1, len(headings)):
+        #         steering = math.atan(
+        #             self.controlled_vehicle.LENGTH * (headings[i] - headings[i - 1]) / speeds[i - 1] / self.DT
+        #         )
+        #         steering_angles.append(steering)
+        #     times = np.linspace(0, t_lc, len(steering_angles))
+        #
+        #     # Evaluate if the planned path can meet rollover condition
+        #     isRollover, LTR_values = dynamic_check(
+        #         t=times, delta_f=np.array(steering_angles), vx=np.array(x_speeds[:-1]), ax=np.array(accelerations[:-1])
+        #     )
+        #     if sum(LTR_values) > 0:
+        #         BUG = 1
+        #         LTR_values_smoothed = gaussian_filter1d(LTR_values, sigma=1)
+        #         axs[0].plot(np.linspace(0, t_lc, len(LTR_values)), LTR_values_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[0].set_title("LTR of Truck vs. Time")
+        #         axs[0].legend()
+        #         axs[0].set_xlabel("$t$ ($s$)")
+        #         axs[0].set_ylabel("$LTR$")
+        #
+        #         steering_angles_smoothed = gaussian_filter1d(steering_angles, sigma=1)
+        #         axs[1].plot(np.linspace(0, t_lc, len(steering_angles)), steering_angles_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[1].set_title("Steering Angle of Truck vs. Time")
+        #         axs[1].legend()
+        #         axs[1].set_xlabel("$t$ ($s$)")
+        #         axs[1].set_ylabel("$\delta_f$")
+        #
+        #         accelerations_smoothed = gaussian_filter1d(accelerations, sigma=1)
+        #         axs[2].plot(np.linspace(0, t_lc, len(accelerations)), accelerations_smoothed, label=f'$t_c$={t_lc}')
+        #         axs[2].set_title("Accelerations of Truck vs. Time")
+        #         axs[2].legend()
+        #         axs[2].set_xlabel("$t$ ($s$)")
+        #         axs[2].set_ylabel("$a$ ($m/s_2$)")
+        # plt.show()
+        # if isRollover:
+        #     return headings[:-1], speeds[:-1], steering_angles, x_positions[:-1], y_positions[:-1], LTR_values
 
-                    return (
-                        headings[:-1],
-                        speeds[:-1],
-                        steering_angles,
-                        x_positions[:-1],
-                        y_positions[:-1],
-                        LTR_values,
-                    )
-
-                # The same candidate is already selected. Only extend
-                # the returned benchmark path to the common 4 s horizon.
-                aligned_total_horizon = max(
-                    float(self.aligned_horizon_s),
-                    float(legacy_total_horizon),
-                )
-
-                aligned_post_horizon = max(
-                    float(self.T_NEXT),
-                    aligned_total_horizon - float(t_lc),
-                )
-
-                (
-                    aligned_accelerations,
-                    aligned_x_speeds,
-                    aligned_x_positions,
-                ) = self.speed_planning(aligned_total_horizon)
-
-                (
-                    aligned_headings,
-                    aligned_y_speeds,
-                    aligned_y_positions,
-                    aligned_speeds,
-                ) = self.path_planning(
-                    t_lc,
-                    target_y,
-                    aligned_x_positions,
-                    aligned_x_speeds,
-                    post_horizon_s=aligned_post_horizon,
-                )
-
-                aligned_steering_angles = []
-
-                for i in range(1, len(aligned_headings)):
-                    steering = math.atan(
-                        self.controlled_vehicle.LENGTH
-                        * (
-                            aligned_headings[i]
-                            - aligned_headings[i - 1]
-                        )
-                        / aligned_speeds[i - 1]
-                        / self.DT
-                    )
-                    aligned_steering_angles.append(steering)
-
-                self.last_time_s = (
-                    np.arange(
-                        len(aligned_x_positions),
-                        dtype=np.float32,
-                    )
-                    * self.DT
-                )
-
-                return (
-                    aligned_headings,
-                    aligned_speeds,
-                    aligned_steering_angles,
-                    aligned_x_positions,
-                    aligned_y_positions,
-                    LTR_values,
-                )
-
-        return None, None, None, None, None, None
     def speed_planning(self, t_lim) -> tuple:
         """
         Speed planning with the selected longitudinal controller
@@ -291,17 +246,10 @@ class PolyPlanner:
 
         return accelerations, x_speeds, x_positions
 
-    def path_planning(
-            self,
-            t_lc,
-            target_y,
-            x_positions,
-            x_speeds,
-            post_horizon_s=None,
-    ):
-        if post_horizon_s is None:
-            post_horizon_s = self.T_NEXT
-
+    def path_planning(self, t_lc, target_y, x_positions, x_speeds):
+        """
+        Path planning by polynomial
+        """
         y_positions = []
         y_speeds = []
         headings = []
@@ -323,43 +271,25 @@ class PolyPlanner:
                 [0, 0, 2, 6 * t0, 12 * t0 ** 2, 20 * t0 ** 3],
                 [1, tf, tf ** 2, tf ** 3, tf ** 4, tf ** 5],
                 [0, 1, 2 * tf, 3 * tf ** 2, 4 * tf ** 3, 5 * tf ** 4],
-                [0, 0, 2, 6 * tf, 12 * tf ** 2, 20 * tf ** 3],
+                [0, 0, 2, 6 * tf, 12 * tf ** 2, 20 * tf ** 3]
             ])
-
             Y = np.array([
                 [y0],
                 [vy0],
                 [ay0],
                 [yf],
                 [vyf],
-                [ayf],
+                [ayf]
             ])
 
+            # 求解系数矩阵
             b = np.linalg.solve(T, Y)
 
-            lane_change_count = int(t_lc / self.DT) + 1
-
-            for t, vx in zip(
-                np.linspace(0, t_lc, lane_change_count),
-                x_speeds[:lane_change_count],
-            ):
-                vy = (
-                    b[1]
-                    + 2 * b[2] * t
-                    + 3 * b[3] * t ** 2
-                    + 4 * b[4] * t ** 3
-                    + 5 * b[5] * t ** 4
-                )
-
-                y = (
-                    b[0]
-                    + b[1] * t
-                    + b[2] * t ** 2
-                    + b[3] * t ** 3
-                    + b[4] * t ** 4
-                    + b[5] * t ** 5
-                )
-
+            # 换道路径规划
+            for t, vx in zip(np.linspace(0, t_lc, int(t_lc / self.DT) + 1), x_speeds[:int(t_lc / self.DT) + 1]):
+                acc_y = 2*b[2] + 6*b[3]*t + 12*b[4]*t**2 + 20*b[5]*t**3
+                vy = b[1] + 2*b[2]*t + 3*b[3]*t**2 + 4*b[4]*t**3 + 5*b[5]*t**4
+                y = b[0] + b[1]*t + b[2]*t**2 + b[3]*t**3 + b[4]*t**4 + b[5]*t**5
                 heading = math.atan(vy / vx)
                 speed = math.sqrt(vx ** 2 + vy ** 2)
 
@@ -367,19 +297,16 @@ class PolyPlanner:
                 y_speeds.append(vy)
                 speeds.append(speed)
                 y_positions.append(y)
-
-            for vx in x_speeds[lane_change_count:]:
+            # 第二段路径规划
+            for t, vx in zip(np.linspace(t_lc, t_lc + self.T_NEXT, int(self.T_NEXT / self.DT) + 1), x_speeds[int(t_lc / self.DT) + 1:]):
                 headings.append(0)
                 y_speeds.append(0)
                 speeds.append(vx)
                 y_positions.append(yf)
-
         else:
             headings = [0] * len(x_positions)
             y_speeds = [0] * len(x_positions)
             speeds = x_speeds
-            y_positions = [
-                self.controlled_vehicle.position[1]
-            ] * len(x_positions)
+            y_positions = [self.controlled_vehicle.position[1]] * len(x_positions)
 
         return headings, y_speeds, y_positions, speeds

@@ -1377,50 +1377,45 @@ class FOLLOWVehicle(ControlledVehicle):
         length: float = 5,
         width: float = 2,
         timer: float = None,
-        group_action: int = 3,
+        group_action: int = 3,  # 初始为merge状态
     ) -> None:
-        super().__init__(
-            road,
-            position,
-            heading,
-            speed,
-            target_lane_index,
-            target_speed,
-            route,
-        )
+        """
+        Initializes an FOLLOWERVehicle
 
+        :param road: the road on which the vehicle is driving
+        :param position: its position
+        :param heading: its heading angle
+        :param speed: its speed
+        :param target_lane_index: the index of the lane it is following
+        :param target_speed: the speed it is tracking
+        :param target_speeds: the discrete list of speeds the vehicle is able to track, through faster/slower actions
+        :param route: the planned route of the vehicle, to handle intersections
+        """
+        super().__init__(
+            road, position, heading, speed, target_lane_index, target_speed, route
+        )
         self.target_speeds = (
             np.array(target_speeds)
             if target_speeds is not None
             else self.DEFAULT_TARGET_SPEEDS
         )
-
         self.speed_index = self.speed_to_index(self.target_speed)
         self.target_speed = self.index_to_speed(self.speed_index)
-        self.timer = (
-            timer
-            or (np.sum(self.position) * np.pi)
-            % self.LANE_CHANGE_DELAY
-        )
-
+        self.timer = timer or (np.sum(self.position) * np.pi) % self.LANE_CHANGE_DELAY
         self.action_list = []
         self.env_state_list = []
         self.group_action = group_action
         self.env_state = group_action
         self.LENGTH = length
         self.WIDTH = width
-
         self.info = {
             "x": [],
             "y": [],
             "v": [],
             "a": [],
-            "delta": [],
+            "delta": []
         }
-
         self.path = None
-        self.latest_planner_trajectory = None
-
         self.best_cost = None
         self.jerk = 0
         self.ttc_f = self.TTC_MAX
@@ -1431,21 +1426,11 @@ class FOLLOWVehicle(ControlledVehicle):
         self.risk_value = 0
         self.risk_gradient = 0
         self.max_risk = 0
-    def polynomial_planning(
-            self,
-            index_group,
-            car_id,
-            controller_vehicles,
-            lane_index,
-            polynomial_config=None,
-    ) -> tuple:
-        polynomial_config = dict(polynomial_config or {})
 
-        planner_mode = polynomial_config.get("mode", "legacy")
-        aligned_horizon_s = float(
-            polynomial_config.get("aligned_horizon_s", 4.0)
-        )
-
+    def polynomial_planning(self, index_group, car_id, controller_vehicles, lane_index) -> tuple:
+        """
+        Using polynomial planner
+        """
         leader_v = LEADVehicle(
             road=self.road,
             position=self.position,
@@ -1454,11 +1439,9 @@ class FOLLOWVehicle(ControlledVehicle):
             timer=self.timer,
             target_lane_index=self.target_lane_index,
         )
-
         bind_longitudinal_source(leader_v, self)
-
         vehicle = leader_v
-        vehicle_type = "Leader"
+        vehicle_type = 'Leader'
         lead_v = None
         follow_idx = None
         group = None
@@ -1468,7 +1451,7 @@ class FOLLOWVehicle(ControlledVehicle):
                 for i in index:
                     if i == car_id and index.index(i) != 0:
                         vehicle = self
-                        vehicle_type = "Follower"
+                        vehicle_type = 'Follower'
                         lead_v = controller_vehicles[index[0]]
                         follow_idx = index.index(i)
 
@@ -1477,44 +1460,20 @@ class FOLLOWVehicle(ControlledVehicle):
                             group.append(controller_vehicles[j])
 
         poly_planner = PolyPlanner(
-            controlled_vehicle=vehicle,
-            vehicle_type=vehicle_type,
-            road=self.road,
-            target_lane_index=lane_index,
-            lead_vehicle=lead_v,
-            follow_index=follow_idx,
-            group=group,
-            planner_mode=planner_mode,
-            aligned_horizon_s=aligned_horizon_s,
+            controlled_vehicle=vehicle, vehicle_type=vehicle_type, road=self.road, target_lane_index=lane_index,
+            lead_vehicle=lead_v, follow_index=follow_idx, group=group
         )
-
-        (
-            ref_headings,
-            ref_speeds,
-            ref_steering_angles,
-            x_positions,
-            y_positions,
-            LTR_values,
-        ) = poly_planner.planning()
-
+        ref_headings, ref_speeds, ref_steering_angles, x_positions, y_positions, LTR_values = poly_planner.planning()
         path = {
             "x": x_positions,
             "y": y_positions,
             "steering": ref_steering_angles,
             "heading": ref_headings,
             "speed": ref_speeds,
-            "time_s": (
-                None
-                if poly_planner.last_time_s is None
-                else np.asarray(
-                    poly_planner.last_time_s,
-                    dtype=np.float32,
-                )
-            ),
-            "polynomial_mode": planner_mode,
         }
-
+        LTR = max(LTR_values) if LTR_values is not None else None
         return ref_steering_angles, path
+
     def act(
             self,
             lateral_action: Union[dict, str] = None,
@@ -1525,190 +1484,80 @@ class FOLLOWVehicle(ControlledVehicle):
             car_id: int = None,
             controlled_vehicles: list = None,
     ) -> None:
-        self.follow_road()
+        """
+        Perform a high-level action_num.
 
+        - If the action_num is a speed change, choose speed from the allowed discrete range.
+        - Else, forward action_num to the ControlledVehicle handler.
+
+        :param lateral_action: a high-level lateral action
+        :param lane_index: the target lane index
+        :param acceleration: the continuous acceleration
+        :param planner_flag: using planner or not
+        """
+        self.follow_road()
         if lateral_action is None:
             return
-
-        last_acc = self.action["acceleration"]
-        now_acc = acceleration
-        self.jerk = (now_acc - last_acc) / 0.1
-
-        target_lane_index = lane_index
-
-        if self.road.network.get_lane(
-            target_lane_index
-        ).is_reachable_from(
-            self.position
-        ):
-            self.target_lane_index = target_lane_index
-
-        if planner is not None and planner["state"] is True:
-            if planner["type"] == "Polynomial":
-                planning_origin_position = np.asarray(
-                    self.position,
-                    dtype=np.float32,
-                ).copy()
-
-                planning_origin_heading = float(self.heading)
-
-                polynomial_config = planner.get(
-                    "Polynomial",
-                    {},
-                )
-
-                ref_steering_angles, path = self.polynomial_planning(
-                    index_group=index_group,
-                    car_id=car_id,
-                    controller_vehicles=controlled_vehicles,
-                    lane_index=lane_index,
-                    polynomial_config=polynomial_config,
-                )
-
-                ref_y_postion = path["y"][10]
-                ref_heading = path["heading"][10]
-
-                action = {
-                    "steering": self.steering_pid_control(
-                        ref_y_postion,
-                        ref_heading,
-                    ),
-                    "acceleration": acceleration,
-                }
-
-                self.latest_planner_trajectory = None
-
-                if polynomial_config.get(
-                    "mode",
-                    "legacy",
-                ) == "aligned":
-                    from highway_env.planner.trajectory import (
-                        PlannerTrajectory,
-                    )
-
-                    anchor_config = (
-                        planner
-                        .get("features", {})
-                        .get("anchors", {})
-                    )
-
-                    source_time_s = path.get("time_s")
-
-                    if source_time_s is None:
-                        raise RuntimeError(
-                            "Polynomial aligned path has no explicit time axis"
-                        )
-
-                    # Polynomial path values can contain a mixture of
-                    # Python scalars and NumPy shape-(1,) values because the
-                    # quintic coefficient solve uses a column vector.
-                    #
-                    # Normalize each point to a scalar ONLY for the external
-                    # expert trajectory representation. This does not change
-                    # the Polynomial benchmark path/controller behavior.
-                    path_x_scalar = np.asarray(
-                        [
-                            float(
-                                np.asarray(value).reshape(-1)[0]
-                            )
-                            for value in path["x"]
-                        ],
-                        dtype=np.float32,
-                    )
-
-                    path_y_scalar = np.asarray(
-                        [
-                            float(
-                                np.asarray(value).reshape(-1)[0]
-                            )
-                            for value in path["y"]
-                        ],
-                        dtype=np.float32,
-                    )
-
-                    if path_x_scalar.shape != path_y_scalar.shape:
-                        raise RuntimeError(
-                            "Polynomial x/y path length mismatch: "
-                            f"x={path_x_scalar.shape}, "
-                            f"y={path_y_scalar.shape}"
-                        )
-
-                    world_xy = np.stack(
-                        [
-                            path_x_scalar,
-                            path_y_scalar,
-                        ],
-                        axis=-1,
-                    )
-
-                    planner_trajectory = PlannerTrajectory.from_world_path(
-                        source_time_s=source_time_s,
-                        world_xy=world_xy,
-                        ego_position_world=planning_origin_position,
-                        ego_heading_world=planning_origin_heading,
-                        horizon_steps=int(
-                            anchor_config.get("horizon_steps", 8)
-                        ),
-                        trajectory_dt=float(
-                            anchor_config.get("trajectory_dt", 0.5)
-                        ),
-                        source="Polynomial-aligned",
-                    )
-
-                    self.latest_planner_trajectory = (
-                        planner_trajectory.as_dict()
-                    )
-
-            else:
-                path = None
-                action = {
-                    "steering": 0,
-                    "acceleration": acceleration,
-                }
-
-            self.path = path
-
         else:
-            target_lane = self.road.network.get_lane(
-                target_lane_index
-            )
-            lane_coords = target_lane.local_coordinates(
-                self.position
-            )
-            lateral_speed_command = (
-                -self.KP_LATERAL * lane_coords[1]
-            )
-            heading_command = np.arcsin(
-                np.clip(
-                    lateral_speed_command
-                    / utils.not_zero(self.speed),
-                    -1,
-                    1,
+            # 计算jerk
+            last_acc = self.action["acceleration"]
+            now_acc = acceleration
+            self.jerk = (now_acc - last_acc) / 0.1
+
+            target_lane_index = lane_index
+            if self.road.network.get_lane(target_lane_index).is_reachable_from(
+                    self.position
+            ):
+                self.target_lane_index = target_lane_index
+
+            if planner is not None and planner["state"] is True:
+                if planner["type"] == "Polynomial":
+                    ref_steering_angles, path = self.polynomial_planning(
+                        index_group=index_group, car_id=car_id, controller_vehicles=controlled_vehicles,
+                        lane_index=lane_index
+                    )
+                    ref_y_postion = path["y"][10]
+                    ref_heading = path["heading"][10]
+                    action = {
+                        "steering": self.steering_pid_control(ref_y_postion, ref_heading),
+                        "acceleration": acceleration
+                    }
+                else:
+                    path = None
+                    action = {
+                        "steering": 0,
+                        "acceleration": acceleration
+                    }
+                # Update path
+                self.path = path
+            else:
+                # Lateral position control
+                target_lane = self.road.network.get_lane(target_lane_index)
+                lane_coords = target_lane.local_coordinates(self.position)
+                lateral_speed_command = -self.KP_LATERAL * lane_coords[1]
+                heading_command = np.arcsin(
+                    np.clip(lateral_speed_command / utils.not_zero(self.speed), -1, 1)
                 )
+
+                action = {
+                    "steering": self.steering_control(self.target_lane_index, heading_command),
+                    "acceleration": acceleration,
+                }
+
+            action["steering"] = np.clip(
+                action["steering"], -self.MAX_STEERING_ANGLE, self.MAX_STEERING_ANGLE
             )
 
-            action = {
-                "steering": self.steering_control(
-                    self.target_lane_index,
-                    heading_command,
-                ),
-                "acceleration": acceleration,
-            }
+            # Update
+            self.action = action
+            self.action_list.append(self.group_action)
+            self.env_state_list.append(self.env_state)
+            self.info["x"].append(self.position[0])
+            self.info["y"].append(self.position[1])
+            self.info["v"].append(self.speed)
+            self.info["a"].append(self.action["acceleration"])
+            self.info["delta"].append(self.action["steering"])
 
-        action["steering"] = np.clip(
-            action["steering"],
-            -self.MAX_STEERING_ANGLE,
-            self.MAX_STEERING_ANGLE,
-        )
-
-        self.action = action
-        self.action_list.append(self.group_action)
-        self.env_state_list.append(self.env_state)
-        self.info["x"].append(self.position[0])
-        self.info["y"].append(self.position[1])
-        self.info["v"].append(self.speed)
-        self.info["a"].append(self.action["acceleration"])
-        self.info["delta"].append(self.action["steering"])
     def steering_pid_control(self, ref_y, ref_heading):
         Ky = 0.05
         Kh = 1.15

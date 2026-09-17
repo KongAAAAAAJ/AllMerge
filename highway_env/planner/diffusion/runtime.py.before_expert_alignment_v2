@@ -216,15 +216,4 @@ class DiffusionPlannerRuntime:
             dtype=np.float32,
         )
 
-        numpy_output[
-            "trajectory_time_s"
-        ] = (
-            np.arange(
-                1,
-                self.config.horizon_steps + 1,
-                dtype=np.float32,
-            )
-            * float(self.config.trajectory_dt)
-        )
-
         return numpy_output

@@ -1599,44 +1599,10 @@ class FOLLOWVehicle(ControlledVehicle):
                             "Polynomial aligned path has no explicit time axis"
                         )
 
-                    # Polynomial path values can contain a mixture of
-                    # Python scalars and NumPy shape-(1,) values because the
-                    # quintic coefficient solve uses a column vector.
-                    #
-                    # Normalize each point to a scalar ONLY for the external
-                    # expert trajectory representation. This does not change
-                    # the Polynomial benchmark path/controller behavior.
-                    path_x_scalar = np.asarray(
-                        [
-                            float(
-                                np.asarray(value).reshape(-1)[0]
-                            )
-                            for value in path["x"]
-                        ],
-                        dtype=np.float32,
-                    )
-
-                    path_y_scalar = np.asarray(
-                        [
-                            float(
-                                np.asarray(value).reshape(-1)[0]
-                            )
-                            for value in path["y"]
-                        ],
-                        dtype=np.float32,
-                    )
-
-                    if path_x_scalar.shape != path_y_scalar.shape:
-                        raise RuntimeError(
-                            "Polynomial x/y path length mismatch: "
-                            f"x={path_x_scalar.shape}, "
-                            f"y={path_y_scalar.shape}"
-                        )
-
                     world_xy = np.stack(
                         [
-                            path_x_scalar,
-                            path_y_scalar,
+                            np.asarray(path["x"], dtype=np.float32),
+                            np.asarray(path["y"], dtype=np.float32),
                         ],
                         axis=-1,
                     )

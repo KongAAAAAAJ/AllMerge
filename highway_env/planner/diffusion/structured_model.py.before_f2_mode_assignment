@@ -706,52 +706,14 @@ class StructuredDiffusionPlanner(nn.Module):
         self,
         features: Dict[str, torch.Tensor],
         target_trajectory: torch.Tensor,
-        target_semantic: Optional[
-            torch.Tensor
-        ] = None,
     ) -> Dict[str, torch.Tensor]:
         """
-        Supervised multimodal pretraining with semantic-constrained
-        expert-to-anchor assignment.
+        Minimal supervised pretraining interface.
 
-        The network structure remains unchanged:
-            dynamic anchors
-            -> diffusion refinement per mode
-            -> mode logits
-            -> selected-mode regression + mode classification
-
-        As in DiffusionDrive, one expert trajectory is matched to a plan
-        anchor and that same mode supervises both:
-            1. trajectory regression;
-            2. mode classification.
-
-        F.2 changes ONLY how the target mode is constructed:
-
-            old:
-                global nearest among traffic-valid modes
-
-            new:
-                expected semantic
-                AND geometrically existing modes
-                -> nearest anchor by mean pointwise Euclidean distance
-
-        Traffic `mode_valid_mask` is intentionally NOT used for training
-        label assignment or classification masking. It remains active in
-        infer_multimodal() for online safety/selectability filtering.
-
-        `target_semantic` is optional:
-            None:
-                derive KEEP / LEFT_LC / RIGHT_LC from existing
-                current/left/right/target map flags.
-
-            explicit tensor [B]:
-                supports future explicit STOP supervision and unusual
-                topology without changing the model architecture.
+        One expert trajectory is assigned to the nearest valid dynamic
+        anchor. Regression is applied only to that selected mode, while
+        classification learns the selected anchor slot.
         """
-        from .mode_assignment import (
-            assign_expert_mode,
-        )
-
         scene = self.scene_encoder(
             features
         )
@@ -762,16 +724,35 @@ class StructuredDiffusionPlanner(nn.Module):
 
         target = target_trajectory
 
-        assignment = (
-            assign_expert_mode(
-                features=features,
-                target_trajectory=target,
-                target_semantic=target_semantic,
+        if target.shape != (
+            anchors.shape[0],
+            self.config.horizon_steps,
+            2,
+        ):
+            raise ValueError(
+                "target_trajectory must be [B,8,2]"
             )
+
+        # Closest valid anchor.
+        distance = (
+            (
+                anchors
+                - target[:, None, :, :]
+            )
+            ** 2
+        ).mean(
+            dim=(-1, -2)
         )
 
-        target_mode = (
-            assignment.target_mode
+        distance = distance.masked_fill(
+            ~features[
+                "mode_valid_mask"
+            ],
+            float("inf"),
+        )
+
+        target_mode = distance.argmin(
+            dim=-1
         )
 
         clean_anchor_norm = (
@@ -834,24 +815,23 @@ class StructuredDiffusionPlanner(nn.Module):
             index=gather_index,
         ).squeeze(1)
 
-        # Preserve the existing AllMerge regression loss so this patch
-        # isolates label correctness rather than changing two variables
-        # simultaneously.
         regression_loss = F.smooth_l1_loss(
             selected,
             target,
         )
 
-        # IMPORTANT:
-        # Training uses RAW logits.
-        #
-        # A correct expert target is allowed to be traffic-invalid according
-        # to the online safety heuristic (F.1 Ego 1 / Ego 2 demonstrated
-        # exactly this case). Masking that logit here would make the correct
-        # class impossible to learn.
+        masked_logits = (
+            self._masked_logits(
+                logits,
+                features[
+                    "mode_valid_mask"
+                ],
+            )
+        )
+
         classification_loss = (
             F.cross_entropy(
-                logits,
+                masked_logits,
                 target_mode,
             )
         )
@@ -861,78 +841,11 @@ class StructuredDiffusionPlanner(nn.Module):
             + classification_loss
         )
 
-        mode_valid_mask = features[
-            "mode_valid_mask"
-        ].bool()
-
-        target_mode_traffic_valid = (
-            torch.gather(
-                mode_valid_mask,
-                dim=1,
-                index=target_mode[
-                    :,
-                    None,
-                ],
-            )
-            .squeeze(1)
-        )
-
-        target_assignment_distance = (
-            torch.gather(
-                assignment.anchor_distance,
-                dim=1,
-                index=target_mode[
-                    :,
-                    None,
-                ],
-            )
-            .squeeze(1)
-        )
-
         return {
-            "loss":
-                loss,
-
-            "trajectory_regression_loss":
-                regression_loss,
-
-            "trajectory_classification_loss":
-                classification_loss,
-
-            "target_mode":
-                target_mode,
-
-            "target_semantic":
-                assignment.target_semantic,
-
-            "target_mode_assignment_distance":
-                target_assignment_distance,
-
-            "target_mode_geometry_valid":
-                torch.gather(
-                    assignment.geometry_mask,
-                    dim=1,
-                    index=target_mode[
-                        :,
-                        None,
-                    ],
-                ).squeeze(1),
-
-            "target_mode_traffic_valid":
-                target_mode_traffic_valid,
-
-            "mode_geometry_mask_train":
-                assignment.geometry_mask,
-
-            "mode_semantic_mask_train":
-                assignment.semantic_mask,
-
-            "mode_assignment_candidate_mask_train":
-                assignment.candidate_mask,
-
-            "trajectory_candidates_train":
-                candidates,
-
-            "trajectory_mode_logits_train":
-                logits,
+            "loss": loss,
+            "trajectory_regression_loss": regression_loss,
+            "trajectory_classification_loss": classification_loss,
+            "target_mode": target_mode,
+            "trajectory_candidates_train": candidates,
+            "trajectory_mode_logits_train": logits,
         }

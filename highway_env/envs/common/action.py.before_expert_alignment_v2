@@ -636,134 +636,6 @@ class MultiAgentAction(ActionType):
             output
         )
 
-    def _build_expert_alignment(
-        self,
-        features,
-        vehicle_actions,
-        planner_flag,
-    ):
-        alignment_config = planner_flag.get(
-            "ExpertAlignment",
-            {},
-        )
-
-        if not alignment_config.get("enabled", False):
-            return None
-
-        if features is None:
-            return None
-
-        if planner_flag.get("type") != "Polynomial":
-            return None
-
-        polynomial_config = planner_flag.get(
-            "Polynomial",
-            {},
-        )
-
-        if (
-            alignment_config.get(
-                "require_aligned_polynomial",
-                True,
-            )
-            and polynomial_config.get("mode", "legacy")
-            != "aligned"
-        ):
-            raise RuntimeError(
-                "ExpertAlignment requires "
-                "Planner.Polynomial.mode='aligned'"
-            )
-
-        trajectories = []
-
-        for ego_idx, vehicle in enumerate(
-            self.env.controlled_vehicles
-        ):
-            trajectory = getattr(
-                vehicle,
-                "latest_planner_trajectory",
-                None,
-            )
-
-            if trajectory is None:
-                raise RuntimeError(
-                    "Missing latest_planner_trajectory "
-                    f"for ego {ego_idx}"
-                )
-
-            trajectories.append(trajectory)
-
-        reference_time_s = np.asarray(
-            trajectories[0]["time_s"],
-            dtype=np.float32,
-        )
-
-        expert_xy = []
-
-        for ego_idx, trajectory in enumerate(
-            trajectories
-        ):
-            time_s = np.asarray(
-                trajectory["time_s"],
-                dtype=np.float32,
-            )
-
-            if not np.allclose(
-                time_s,
-                reference_time_s,
-                atol=1e-6,
-                rtol=0.0,
-            ):
-                raise RuntimeError(
-                    f"Planner time-grid mismatch for ego {ego_idx}"
-                )
-
-            expert_xy.append(
-                np.asarray(
-                    trajectory["xy"],
-                    dtype=np.float32,
-                )
-            )
-
-        expert_xy = np.stack(expert_xy, axis=0)
-
-        from highway_env.planner.expert_alignment import (
-            ExpertTrajectoryAligner,
-        )
-
-        aligner = getattr(
-            self.env,
-            "expert_trajectory_aligner",
-            None,
-        )
-
-        if aligner is None:
-            aligner = ExpertTrajectoryAligner()
-            self.env.expert_trajectory_aligner = aligner
-
-        current_lane_indices = [
-            vehicle.lane_index
-            for vehicle
-            in self.env.controlled_vehicles
-        ]
-
-        result = aligner.align_batch(
-            features=features,
-            expert_xy=expert_xy,
-            trajectory_time_s=reference_time_s,
-            current_lane_indices=current_lane_indices,
-            target_lane_indices=vehicle_actions["lane index"],
-        )
-
-        result["polynomial_mode"] = polynomial_config.get(
-            "mode",
-            "legacy",
-        )
-
-        self.env.latest_expert_alignment = result
-
-        return result
-
     def act(
         self,
         action: Action,
@@ -785,19 +657,28 @@ class MultiAgentAction(ActionType):
 
         vehicle_actions = (
             self.env.maker
-            .group_action_to_vehicle_action(action)
+            .group_action_to_vehicle_action(
+                action
+            )
         )
 
         if (
             context is not None
             and context.kind == "lmpc"
         ):
-            for vehicle, acceleration in zip(
+            for (
+                vehicle,
+                acceleration,
+            ) in zip(
                 self.env.controlled_vehicles,
-                vehicle_actions["acceleration"],
+                vehicle_actions[
+                    "acceleration"
+                ],
             ):
-                prediction = context.predictions.get(
-                    vehicle._lon_id
+                prediction = (
+                    context.predictions.get(
+                        vehicle._lon_id
+                    )
                 )
 
                 if (
@@ -812,22 +693,33 @@ class MultiAgentAction(ActionType):
                         acceleration,
                     )
 
-        planner_flag = self.env.config["Planner"]
+        planner_flag = self.env.config[
+            "Planner"
+        ]
 
-        features = self._build_planner_features(
-            vehicle_actions,
-            planner_flag,
+        features = (
+            self._build_planner_features(
+                vehicle_actions,
+                planner_flag,
+            )
         )
 
+        # Stage-1 network integration:
+        # keep Planner.type="Polynomial" and only run the neural planner
+        # in shadow mode.
         self._run_diffusion_shadow(
             features,
             planner_flag,
         )
 
         env_state = (
-            self.env.controlled_vehicles[0].env_state
+            self.env.controlled_vehicles[
+                0
+            ].env_state
         )
-        index_group = self.GROUPS[env_state]
+        index_group = self.GROUPS[
+            env_state
+        ]
 
         for (
             lateral_action,
@@ -836,11 +728,21 @@ class MultiAgentAction(ActionType):
             action_type,
             car_id,
         ) in zip(
-            vehicle_actions["lateral action"],
-            vehicle_actions["lane index"],
-            vehicle_actions["acceleration"],
+            vehicle_actions[
+                "lateral action"
+            ],
+            vehicle_actions[
+                "lane index"
+            ],
+            vehicle_actions[
+                "acceleration"
+            ],
             self.agents_action_types,
-            range(len(self.agents_action_types)),
+            range(
+                len(
+                    self.agents_action_types
+                )
+            ),
         ):
             action_type.act(
                 lateral_action,
@@ -852,13 +754,6 @@ class MultiAgentAction(ActionType):
                 self.env.controlled_vehicles,
             )
 
-        # All three Polynomial trajectories exist here, but road.step()
-        # has not yet advanced the simulation.
-        self._build_expert_alignment(
-            features,
-            vehicle_actions,
-            planner_flag,
-        )
     def get_available_actions(self):
         return itertools.product(
             *[
