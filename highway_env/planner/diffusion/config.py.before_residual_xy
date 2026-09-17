@@ -101,17 +101,8 @@ class StructuredDiffusionConfig:
     inference_timesteps: Tuple[int, ...] = (8, 0)
     inference_noise_scale: float = 1.0
 
-    # Residual clean-sample prediction around the noisy trajectory.
-    #
-    # Bounds are specified in physical ego-centric coordinates instead of
-    # one shared normalized scalar. Internally they are divided by
-    # feature_scales.trajectory_xy before being applied.
-    #
-    # Current defaults:
-    #   longitudinal x residual: +/-20 m
-    #   lateral      y residual: +/-4 m
-    max_residual_x_m: float = 20.0
-    max_residual_y_m: float = 4.0
+    # Residual clean-sample prediction around the noisy anchor.
+    max_normalized_residual: float = 0.75
 
     feature_scales: FeatureScaleConfig = field(
         default_factory=FeatureScaleConfig
@@ -129,29 +120,6 @@ class StructuredDiffusionConfig:
         if self.inference_start_timestep < 0:
             raise ValueError(
                 "inference_start_timestep must be >= 0"
-            )
-
-        if self.max_residual_x_m <= 0.0:
-            raise ValueError(
-                "max_residual_x_m must be positive"
-            )
-
-        if self.max_residual_y_m <= 0.0:
-            raise ValueError(
-                "max_residual_y_m must be positive"
-            )
-
-        if len(self.feature_scales.trajectory_xy) != 2:
-            raise ValueError(
-                "trajectory_xy scale must contain exactly x/y"
-            )
-
-        if any(
-            scale <= 0.0
-            for scale in self.feature_scales.trajectory_xy
-        ):
-            raise ValueError(
-                "trajectory_xy scales must be positive"
             )
 
         if len(self.feature_scales.ego) != self.ego_dim:

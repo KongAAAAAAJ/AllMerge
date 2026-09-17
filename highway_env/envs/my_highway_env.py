@@ -41,10 +41,121 @@ class MyHighwayEnv(AbstractEnv):
                     }
                 },
 
+                # "Planner": {
+                #     "state": True,
+                #     "type": "Polynomial",  # Polynomial / Diffusion
+                # },
+
+
                 "Planner": {
                     "state": True,
-                    "type": "Diffusion",  # Polynomial / Diffusion
+
+                    # ========================================================
+                    # Stage 1:
+                    # Polynomial 仍负责真实车辆控制
+                    # Diffusion 只进行 shadow inference
+                    # ========================================================
+                    "type": "Polynomial",
+
+                    # ========================================================
+                    # AllMerge structured planner features
+                    # ========================================================
+                    "features": {
+                        "max_agents": 16,
+                        "agent_radius": 120.0,
+
+                        "max_map_polylines": 8,
+                        "map_points": 32,
+
+                        "map_backward_range": 20.0,
+                        "map_forward_range": 120.0,
+                        "map_lateral_range": 24.0,
+
+                        "target_point_horizon": 4.0,
+                        "target_point_min_lookahead": 20.0,
+                        "target_point_max_lookahead": 120.0,
+
+                        "trucksim_angular_unit": "deg",
+
+                        # ====================================================
+                        # Dynamic Anchor
+                        # ====================================================
+                        "anchors": {
+                            "horizon_steps": 8,
+                            "trajectory_dt": 0.5,
+
+                            "speed_delta_mps": 4.0,
+                            "acceleration_preview_s": 1.0,
+
+                            "minimum_lane_change_speed_mps": 3.0,
+                            "emergency_decel_mps2": 4.5,
+
+                            "collision_check_enabled": True,
+
+                            "ego_length_m": 5.0,
+                            "ego_width_m": 2.0,
+
+                            "collision_longitudinal_margin_m": 1.0,
+                            "collision_lateral_margin_m": 0.3,
+
+                            "keep_low_always_valid": True,
+                            "stop_always_valid": True,
+
+                            # 正常网络运行时关闭 collision debug
+                            "diagnostics_enabled": False,
+                        },
+                    },
+
+                    # ========================================================
+                    # Structured Diffusion Planner
+                    # ========================================================
+                    "Diffusion": {
+
+                        # Stage 1 核心开关
+                        "shadow_enabled": True,
+
+                        # GPU
+                        "device": "cuda:0",
+
+                        # 当前只做接口测试，没有训练好的 checkpoint
+                        "allow_random_weights": True,
+
+                        "checkpoint": None,
+
+                        "strict_checkpoint": False,
+
+                        # 保证 debug 时噪声可复现
+                        "deterministic_seed": 0,
+
+                        # ====================================================
+                        # Network
+                        # ====================================================
+                        "model": {
+                            "d_model": 128,
+                            "d_ffn": 512,
+                            "num_heads": 4,
+
+                            "num_scene_layers": 1,
+                            "num_denoiser_layers": 2,
+
+                            "num_modes": 10,
+
+                            "horizon_steps": 8,
+                            "trajectory_dt": 0.5,
+
+                            # truncated diffusion
+                            "inference_start_timestep": 8,
+
+                            "inference_timesteps": (
+                                8,
+                                0,
+                            ),
+                        },
+                    },
                 },
+
+
+
 
                 "Decision maker": "Rule",  # Game or Rule
 

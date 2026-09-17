@@ -286,31 +286,6 @@ class StructuredTrajectoryDenoiser(nn.Module):
         self.config = config
         self.adapter = adapter
 
-        # Convert physical residual limits [m] into normalized
-        # trajectory coordinates once at construction time.
-        trajectory_scale_x = float(
-            config.feature_scales.trajectory_xy[0]
-        )
-        trajectory_scale_y = float(
-            config.feature_scales.trajectory_xy[1]
-        )
-
-        residual_limit_norm = torch.tensor(
-            [
-                float(config.max_residual_x_m)
-                / trajectory_scale_x,
-                float(config.max_residual_y_m)
-                / trajectory_scale_y,
-            ],
-            dtype=torch.float32,
-        )
-
-        self.register_buffer(
-            "residual_limit_norm",
-            residual_limit_norm,
-            persistent=False,
-        )
-
         trajectory_dim = (
             config.horizon_steps
             * 2
@@ -443,21 +418,10 @@ class StructuredTrajectoryDenoiser(nn.Module):
             dims,
         )
 
-        # Residual semantics remain unchanged:
-        #
-        #     x0_hat = x_t + delta_theta
-        #
-        # The x/y limits are specified in metres in the config and
-        # converted into normalized trajectory coordinates in __init__.
         residual = torch.tanh(
             residual
-        )
-
-        residual = (
-            residual
-            * self.residual_limit_norm.to(
-                dtype=residual.dtype,
-            )
+        ) * float(
+            self.config.max_normalized_residual
         )
 
         predicted_x0_norm = (
