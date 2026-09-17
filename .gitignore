@@ -10,3 +10,6 @@ __pycache__/
 
 # Files larger than 5 MiB must be listed explicitly below.
 # Gitignore cannot filter files by size.
+
+# Generated outputs
+/outputs/
