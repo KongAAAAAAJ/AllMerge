@@ -442,7 +442,6 @@ class MultiAgentAction(ActionType):
 
     MIN_COST = -1e6
 
-    # A_matrix = split_A_matrix + merge_A_matrix + keep_A_matrix
     A_MATRIX = np.ones(4)
     SPLIT_A_MATRIX = np.array([[0, 0, 1, 0],
                                [0, 0, 1, 0],
@@ -460,41 +459,69 @@ class MultiAgentAction(ActionType):
 
     KEEP_A_MATRIX = np.eye(4)
 
-    def __init__(self, env: "AbstractEnv", action_config: dict, **kwargs) -> None:
+    def __init__(
+        self,
+        env: "AbstractEnv",
+        action_config: dict,
+        **kwargs
+    ) -> None:
         super().__init__(env)
+
         self.action_config = action_config
         self.agents_action_types = []
+
         for vehicle in self.env.controlled_vehicles:
-            action_type = action_factory(self.env, self.action_config)
+            action_type = action_factory(
+                self.env,
+                self.action_config,
+            )
             action_type.controlled_vehicle = vehicle
-            self.agents_action_types.append(action_type)
+            self.agents_action_types.append(
+                action_type
+            )
+
         self.index_before_merge = [[0, 1, 2]]
-        """decisions made by Coalition Game"""
         self.ref_actions = None
         self.ref_lane_index = None
 
     def space(self) -> spaces.Space:
-        return spaces.Discrete(4)  # when controlled_vehicles = 3
+        return spaces.Discrete(4)
 
     @property
     def vehicle_class(self) -> Callable:
-        return action_factory(self.env, self.action_config).vehicle_class
+        return action_factory(
+            self.env,
+            self.action_config,
+        ).vehicle_class
 
-    def _build_planner_features(self, vehicle_actions, planner_flag):
+    def _build_planner_features(
+        self,
+        vehicle_actions,
+        planner_flag,
+    ):
         """
-        Build AllMerge-native planner features.
+        Build the single shared AllMerge planner-input contract.
 
-        This is intentionally executed for Polynomial as well as Diffusion when
-        Planner.state=True, so expert-data collection and online inference use
-        exactly the same preprocessing.
+        This is executed for Polynomial too, so expert-data collection and
+        future Diffusion inference always use identical preprocessing.
         """
-        if not planner_flag.get("state", False):
-            return
+        if not planner_flag.get(
+            "state",
+            False,
+        ):
+            return None
 
-        from highway_env.planner.anchor_builder import AllMergeAnchorBuilder
-        from highway_env.planner.feature_builder import AllMergeFeatureBuilder
+        from highway_env.planner.feature_builder import (
+            AllMergeFeatureBuilder,
+        )
+        from highway_env.planner.anchor_builder import (
+            AllMergeAnchorBuilder,
+        )
 
-        feature_config = planner_flag.get("features", {})
+        feature_config = planner_flag.get(
+            "features",
+            {},
+        )
 
         feature_builder = getattr(
             self.env,
@@ -503,11 +530,15 @@ class MultiAgentAction(ActionType):
         )
 
         if feature_builder is None:
-            feature_builder = AllMergeFeatureBuilder(
-                env=self.env,
-                config=feature_config,
+            feature_builder = (
+                AllMergeFeatureBuilder(
+                    env=self.env,
+                    config=feature_config,
+                )
             )
-            self.env.planner_feature_builder = feature_builder
+            self.env.planner_feature_builder = (
+                feature_builder
+            )
 
         anchor_builder = getattr(
             self.env,
@@ -516,55 +547,140 @@ class MultiAgentAction(ActionType):
         )
 
         if anchor_builder is None:
-            anchor_config = feature_config.get(
-                "anchors",
-                {},
+            anchor_builder = (
+                AllMergeAnchorBuilder(
+                    config=feature_config.get(
+                        "anchors",
+                        {},
+                    )
+                )
             )
-            anchor_builder = AllMergeAnchorBuilder(
-                config=anchor_config,
+            self.env.planner_anchor_builder = (
+                anchor_builder
             )
-            self.env.planner_anchor_builder = anchor_builder
 
-        features = feature_builder.build_batch(
-            target_lane_indices=vehicle_actions["lane index"],
+        features = (
+            feature_builder.build_batch(
+                target_lane_indices=(
+                    vehicle_actions[
+                        "lane index"
+                    ]
+                ),
+            )
         )
 
-        anchor_features = anchor_builder.build_batch(
-            features=features,
-            target_accelerations=vehicle_actions["acceleration"],
+        features.update(
+            anchor_builder.build_batch(
+                features=features,
+                target_accelerations=(
+                    vehicle_actions[
+                        "acceleration"
+                    ]
+                ),
+            )
         )
 
-        features.update(anchor_features)
+        self.env.latest_planner_features = (
+            features
+        )
 
-        self.env.latest_planner_features = features
+        return features
 
-    def act(self, action: Action) -> None:
+    def _run_diffusion_shadow(
+        self,
+        features,
+        planner_flag,
+    ):
+        """
+        Stage-1 integration:
+        Diffusion inference runs in parallel, but Polynomial still controls
+        the vehicle. No random-weight trajectory is sent to the controller.
+        """
+        if features is None:
+            return
+
+        diffusion_config = planner_flag.get(
+            "Diffusion",
+            {},
+        )
+
+        if not diffusion_config.get(
+            "shadow_enabled",
+            False,
+        ):
+            return
+
+        from highway_env.planner.diffusion.runtime import (
+            DiffusionPlannerRuntime,
+        )
+
+        runtime = getattr(
+            self.env,
+            "diffusion_planner_runtime",
+            None,
+        )
+
+        if runtime is None:
+            runtime = DiffusionPlannerRuntime(
+                diffusion_config
+            )
+            self.env.diffusion_planner_runtime = (
+                runtime
+            )
+
+        output = runtime.infer(
+            features
+        )
+
+        self.env.latest_diffusion_output = (
+            output
+        )
+
+    def act(
+        self,
+        action: Action,
+    ) -> None:
         context = getattr(
             self.env.road,
             "longitudinal_control",
             None,
         )
 
-        if context is not None and context.kind == "lmpc":
+        if (
+            context is not None
+            and context.kind == "lmpc"
+        ):
             context.begin_frame(
                 self.env.controlled_vehicles,
                 self.GROUPS[int(action)],
             )
 
         vehicle_actions = (
-            self.env.maker.group_action_to_vehicle_action(
+            self.env.maker
+            .group_action_to_vehicle_action(
                 action
             )
         )
 
-        if context is not None and context.kind == "lmpc":
-            for vehicle, acceleration in zip(
+        if (
+            context is not None
+            and context.kind == "lmpc"
+        ):
+            for (
+                vehicle,
+                acceleration,
+            ) in zip(
                 self.env.controlled_vehicles,
-                vehicle_actions["acceleration"],
+                vehicle_actions[
+                    "acceleration"
+                ],
             ):
-                prediction = context.predictions.get(
-                    vehicle._lon_id
+                prediction = (
+                    context.predictions.get(
+                        vehicle._lon_id
+                    )
                 )
+
                 if (
                     prediction is None
                     or not np.isclose(
@@ -577,18 +693,33 @@ class MultiAgentAction(ActionType):
                         acceleration,
                     )
 
-        planner_flag = self.env.config["Planner"]
+        planner_flag = self.env.config[
+            "Planner"
+        ]
 
-        # ----------------------------------------------------
-        # AllMerge-native Diffusion planner input construction
-        # ----------------------------------------------------
-        self._build_planner_features(
-            vehicle_actions,
+        features = (
+            self._build_planner_features(
+                vehicle_actions,
+                planner_flag,
+            )
+        )
+
+        # Stage-1 network integration:
+        # keep Planner.type="Polynomial" and only run the neural planner
+        # in shadow mode.
+        self._run_diffusion_shadow(
+            features,
             planner_flag,
         )
 
-        env_state = self.env.controlled_vehicles[0].env_state
-        index_group = self.GROUPS[env_state]
+        env_state = (
+            self.env.controlled_vehicles[
+                0
+            ].env_state
+        )
+        index_group = self.GROUPS[
+            env_state
+        ]
 
         for (
             lateral_action,
@@ -597,11 +728,21 @@ class MultiAgentAction(ActionType):
             action_type,
             car_id,
         ) in zip(
-            vehicle_actions["lateral action"],
-            vehicle_actions["lane index"],
-            vehicle_actions["acceleration"],
+            vehicle_actions[
+                "lateral action"
+            ],
+            vehicle_actions[
+                "lane index"
+            ],
+            vehicle_actions[
+                "acceleration"
+            ],
             self.agents_action_types,
-            range(len(self.agents_action_types)),
+            range(
+                len(
+                    self.agents_action_types
+                )
+            ),
         ):
             action_type.act(
                 lateral_action,
@@ -617,7 +758,8 @@ class MultiAgentAction(ActionType):
         return itertools.product(
             *[
                 action_type.get_available_actions()
-                for action_type in self.agents_action_types
+                for action_type
+                in self.agents_action_types
             ]
         )
 

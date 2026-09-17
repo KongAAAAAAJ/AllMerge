@@ -43,7 +43,7 @@ class MyHighwayEnv(AbstractEnv):
 
                 "Planner": {
                     "state": True,
-                    "type": "Polynomial",
+                    "type": "Diffusion",  # Polynomial / Diffusion
                 },
 
                 "Decision maker": "Rule",  # Game or Rule
