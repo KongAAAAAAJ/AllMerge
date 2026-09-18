@@ -1917,10 +1917,10 @@ class FOLLOWVehicle(ControlledVehicle):
         return [2, self.lane_index]
 
     def desired_gap(
-            self,
-            ego_vehicle: Vehicle,
-            front_vehicle: Vehicle = None,
-            projected: bool = True,
+        self,
+        ego_vehicle: Vehicle,
+        front_vehicle: Vehicle = None,
+        projected: bool = True,
     ) -> list:
         """
         Compute the desired distance between a vehicle and its leading vehicle.
@@ -1934,10 +1934,13 @@ class FOLLOWVehicle(ControlledVehicle):
         tau_star = self.TIME_WANTED
         tau_follow = self.TIME_WANTED / 10
         ab = -self.COMFORT_ACC_MAX * self.COMFORT_ACC_MIN
-        if front_vehicle is None:
-            dv = np.dot(ego_vehicle.velocity, ego_vehicle.direction)
-        elif ego_vehicle is None:
+
+        if ego_vehicle is None:
             return [0, 0]
+    
+        elif front_vehicle is None:
+            dv = np.dot(ego_vehicle.velocity, ego_vehicle.direction)
+
         else:
             dv = (
                 np.dot(ego_vehicle.velocity - front_vehicle.velocity, ego_vehicle.direction)
