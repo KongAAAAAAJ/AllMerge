@@ -1431,39 +1431,6 @@ class FOLLOWVehicle(ControlledVehicle):
         self.risk_value = 0
         self.risk_gradient = 0
         self.max_risk = 0
-    def trajectory_steering_control(
-            self,
-            reference_position,
-            reference_heading,
-    ):
-        reference_position = np.asarray(
-            reference_position,
-            dtype=float,
-        ).reshape(2)
-
-        delta = reference_position - np.asarray(self.position, dtype=float)
-        c = math.cos(float(self.heading))
-        s = math.sin(float(self.heading))
-
-        local_x = c * delta[0] + s * delta[1]
-        local_y = -s * delta[0] + c * delta[1]
-
-        lookahead_sq = max(
-            float(local_x ** 2 + local_y ** 2),
-            1.0,
-        )
-        curvature = 2.0 * float(local_y) / lookahead_sq
-        wheelbase = float(getattr(self, "LENGTH", 5.0))
-        pure_pursuit = math.atan(wheelbase * curvature)
-
-        heading_error = math.atan2(
-            math.sin(float(reference_heading) - float(self.heading)),
-            math.cos(float(reference_heading) - float(self.heading)),
-        )
-
-        # return pure_pursuit + 0.25 * heading_error
-        return pure_pursuit
-
     def polynomial_planning(
             self,
             index_group,
@@ -1598,24 +1565,12 @@ class FOLLOWVehicle(ControlledVehicle):
                     polynomial_config=polynomial_config,
                 )
 
-                tracking_index = min(
-                    10,
-                    len(path["x"]) - 1,
-                )
-
-                reference_position = np.asarray(
-                    [
-                        path["x"][tracking_index],
-                        path["y"][tracking_index],
-                    ],
-                    dtype=float,
-                )
-
-                ref_heading = path["heading"][tracking_index]
+                ref_y_postion = path["y"][10]
+                ref_heading = path["heading"][10]
 
                 action = {
-                    "steering": self.trajectory_steering_control(
-                        reference_position,
+                    "steering": self.steering_pid_control(
+                        ref_y_postion,
                         ref_heading,
                     ),
                     "acceleration": acceleration,
