@@ -48,7 +48,7 @@ class MyHighwayEnv(AbstractEnv):
 
 
                 "Planner": {
-                    "state": True,
+                    "state": False,
 
                     # ========================================================
                     # Stage 1:
@@ -174,7 +174,7 @@ class MyHighwayEnv(AbstractEnv):
 
                 "Controller": {
                     "type": "lqr", # lqr / lmpc (longitudinal only)
-                    "vehicle_model": "trucksim",  # kinematics / trucksim
+                    "vehicle_model": "kinematics",  # kinematics / trucksim
                 },
 
                 "TruckSim": {

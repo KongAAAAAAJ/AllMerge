@@ -143,27 +143,6 @@ def parse_args():
         ),
     )
 
-
-    parser.add_argument(
-        "--save-episode-videos",
-        action="store_true",
-        help=(
-            "Record every expert-collection episode as an MP4. "
-            "The terminal collision transition is included in the video "
-            "even though done transitions are still excluded from expert labels."
-        ),
-    )
-
-    parser.add_argument(
-        "--video-dir",
-        type=str,
-        default=None,
-        help=(
-            "Directory for per-episode MP4 files. "
-            "Default: <output-dir>/videos."
-        ),
-    )
-
     args = parser.parse_args()
 
     if not (
@@ -1615,310 +1594,6 @@ def print_summary(
     )
 
 
-
-# ---------------------------------------------------------------------------
-# Optional per-episode video recording
-# ---------------------------------------------------------------------------
-
-def _configure_episode_video(
-    video_env,
-    video_path: Path,
-) -> Path:
-    """
-    Configure per-episode recording for both old and new SB3 APIs.
-    Returns the actual mp4 path.
-    """
-    if video_env is None:
-        raise RuntimeError(
-            "--save-episode-videos requested, but env_reset() returned "
-            "video_env=None."
-        )
-
-    video_path = Path(video_path).resolve()
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Newer SB3 API.
-    if hasattr(video_env, "video_path"):
-        video_env.video_folder = str(video_path.parent)
-
-        if hasattr(video_env, "video_name"):
-            video_env.video_name = video_path.name
-
-        video_env.video_path = str(video_path)
-        return video_path
-
-    # Older SB3 API.
-    has_old_api = (
-        hasattr(video_env, "video_recorder")
-        and hasattr(video_env, "start_video_recorder")
-        and hasattr(video_env, "close_video_recorder")
-    )
-
-    if has_old_api:
-        # env_reset() may already have started a recorder with a default name.
-        # Close and restart it WITHOUT resetting the environment.
-        try:
-            video_env.close_video_recorder()
-        except Exception:
-            pass
-
-        video_env.video_folder = str(video_path.parent)
-        video_env.name_prefix = video_path.stem
-
-        try:
-            video_env.video_length = max(
-                int(video_env.video_length),
-                10000,
-            )
-        except Exception:
-            video_env.video_length = 10000
-
-        video_env.start_video_recorder()
-
-        recorder = getattr(
-            video_env,
-            "video_recorder",
-            None,
-        )
-
-        recorder_path = getattr(
-            recorder,
-            "path",
-            None,
-        )
-
-        if recorder_path:
-            return Path(recorder_path).resolve()
-
-        step_id = int(
-            getattr(video_env, "step_id", 0)
-        )
-
-        video_length = int(
-            getattr(video_env, "video_length", 10000)
-        )
-
-        actual_name = (
-            f"{video_path.stem}"
-            f"-step-{step_id}"
-            f"-to-step-{step_id + video_length}.mp4"
-        )
-
-        return (
-            video_path.parent
-            / actual_name
-        ).resolve()
-
-    attrs = sorted(
-        name
-        for name in dir(video_env)
-        if (
-            "video" in name.lower()
-            or "record" in name.lower()
-        )
-    )
-
-    raise RuntimeError(
-        "Unsupported VecVideoRecorder API. "
-        f"Relevant attributes: {attrs}"
-    )
-
-
-def _episode_terminal_summary(
-    info,
-) -> dict:
-    """
-    Keep a compact sidecar record for matching each MP4 to collected samples.
-    """
-    info = (
-        info
-        if isinstance(
-            info,
-            dict,
-        )
-        else {}
-    )
-
-    episode_state = info.get(
-        "episode_state",
-        {},
-    )
-
-    if not isinstance(
-        episode_state,
-        dict,
-    ):
-        episode_state = {}
-
-    crashed = episode_state.get(
-        "crashed",
-        None,
-    )
-
-    if crashed is None:
-        crashed_value = info.get(
-            "crashed",
-            False,
-        )
-
-        if isinstance(
-            crashed_value,
-            (list, tuple, np.ndarray),
-        ):
-            crashed = [
-                bool(v)
-                for v
-                in crashed_value
-            ]
-        else:
-            crashed = [
-                bool(
-                    crashed_value
-                )
-            ]
-
-    else:
-        crashed = [
-            bool(v)
-            for v
-            in crashed
-        ]
-
-    terminated = bool(
-        episode_state.get(
-            "terminated",
-            any(
-                crashed
-            ),
-        )
-    )
-
-    truncated = bool(
-        episode_state.get(
-            "truncated",
-            info.get(
-                "TimeLimit.truncated",
-                False,
-            ),
-        )
-    )
-
-    if any(
-        crashed
-    ):
-        reason = (
-            "controlled_vehicle_collision"
-        )
-
-    elif truncated:
-        reason = (
-            "truncated"
-        )
-
-    elif terminated:
-        reason = (
-            "terminated_other"
-        )
-
-    else:
-        reason = (
-            "done_unresolved"
-        )
-
-    return {
-        "reason":
-            reason,
-
-        "terminated":
-            terminated,
-
-        "truncated":
-            truncated,
-
-        "time":
-            episode_state.get(
-                "time",
-                None,
-            ),
-
-        "crashed":
-            crashed,
-
-        "lane_index":
-            episode_state.get(
-                "lane_index",
-                None,
-            ),
-
-        "on_road":
-            episode_state.get(
-                "on_road",
-                None,
-            ),
-
-        "speed":
-            info.get(
-                "speed",
-                None,
-            ),
-
-        "x_position":
-            info.get(
-                "x_position",
-                None,
-            ),
-
-        "y_position":
-            info.get(
-                "y_position",
-                None,
-            ),
-
-        "follow_distance":
-            info.get(
-                "follow_distance",
-                None,
-            ),
-
-        "follow_ttc":
-            info.get(
-                "follow_ttc",
-                None,
-            ),
-    }
-
-
-def _write_episode_video_manifest(
-    records,
-    path: Path,
-) -> None:
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    path.write_text(
-        json.dumps(
-            {
-                "source_commit":
-                    SOURCE_COMMIT,
-
-                "video_count":
-                    len(
-                        records
-                    ),
-
-                "episodes":
-                    records,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-
-
 def main():
     args = parse_args()
 
@@ -1932,30 +1607,6 @@ def main():
     output_dir = Path(
         args.output_dir
     ).resolve()
-
-    video_output_dir = (
-        Path(
-            args.video_dir
-        ).resolve()
-        if args.video_dir
-        else (
-            output_dir
-            / "videos"
-        )
-    )
-
-    if args.save_episode_videos:
-        video_output_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-    episode_video_manifest_path = (
-        video_output_dir
-        / "episode_video_manifest.json"
-    )
-
-    episode_video_records = []
 
     records = []
 
@@ -2001,19 +1652,6 @@ def main():
     )
 
     print(
-        "save episode videos:",
-        bool(
-            args.save_episode_videos
-        ),
-    )
-
-    if args.save_episode_videos:
-        print(
-            "video output:",
-            video_output_dir,
-        )
-
-    print(
         "=" * 108
     )
 
@@ -2028,26 +1666,6 @@ def main():
         env = None
         video_env = None
 
-        episode_start_frame = len(
-            records
-        )
-
-        episode_step = 0
-        episode_done = False
-
-        episode_terminal = {
-            "reason":
-                "collection_target_reached",
-
-            "terminated":
-                False,
-
-            "truncated":
-                False,
-        }
-
-        episode_video_path = None
-
         try:
             (
                 env,
@@ -2058,30 +1676,12 @@ def main():
                 seed=episode_seed,
             )
 
-            if args.save_episode_videos:
-                episode_video_path = (
-                    video_output_dir
-                    / (
-                        f"episode_{episode_index:04d}"
-                        f"_seed_{episode_seed:06d}.mp4"
-                    )
-                )
+            # Intentionally step the raw VecEnv returned by env_reset rather
+            # than VecVideoRecorder. This avoids producing hundreds of pilot
+            # video frames and does not alter the environment/planner logic.
+            runner_env = env
 
-                episode_video_path = (
-                    _configure_episode_video(
-                        video_env,
-                        episode_video_path,
-                    )
-                )
-
-            # Default path remains the raw VecEnv, exactly as before.
-            # When video recording is explicitly enabled, VecVideoRecorder is
-            # only a transparent stepping/render wrapper around the same env.
-            runner_env = (
-                video_env
-                if args.save_episode_videos
-                else env
-            )
+            episode_step = 0
 
             while len(
                 records
@@ -2114,22 +1714,6 @@ def main():
                     ]
                 ):
                     skipped_done_steps += 1
-                    episode_done = True
-
-                    terminal_info = (
-                        infos[
-                            0
-                        ]
-                        if infos
-                        else {}
-                    )
-
-                    episode_terminal = (
-                        _episode_terminal_summary(
-                            terminal_info
-                        )
-                    )
-
                     break
 
                 features = get_vec_attr(
@@ -2210,83 +1794,6 @@ def main():
                     env.close()
                 except Exception:
                     pass
-
-        if args.save_episode_videos:
-            if (
-                episode_video_path is None
-                or not episode_video_path.exists()
-            ):
-                raise RuntimeError(
-                    "Episode video was requested but was not created. "
-                    f"episode={episode_index}, "
-                    f"expected={episode_video_path}. "
-                    "Check MoviePy/FFmpeg and VecVideoRecorder."
-                )
-
-            episode_video_records.append(
-                {
-                    "episode_index":
-                        int(
-                            episode_index
-                        ),
-
-                    "seed":
-                        int(
-                            episode_seed
-                        ),
-
-                    "video_path":
-                        str(
-                            episode_video_path
-                        ),
-
-                    "environment_steps":
-                        int(
-                            episode_step
-                        ),
-
-                    "done":
-                        bool(
-                            episode_done
-                        ),
-
-                    "collected_frame_start":
-                        int(
-                            episode_start_frame
-                        ),
-
-                    "collected_frame_end_exclusive":
-                        int(
-                            len(
-                                records
-                            )
-                        ),
-
-                    "collected_frames":
-                        int(
-                            len(
-                                records
-                            )
-                            - episode_start_frame
-                        ),
-
-                    "terminal":
-                        episode_terminal,
-                }
-            )
-
-            _write_episode_video_manifest(
-                episode_video_records,
-                episode_video_manifest_path,
-            )
-
-            print(
-                f"[video] episode={episode_index:04d} | "
-                f"steps={episode_step} | "
-                f"frames={len(records) - episode_start_frame} | "
-                f"reason={episode_terminal.get('reason')} | "
-                f"{episode_video_path}"
-            )
 
         episode_index += 1
 

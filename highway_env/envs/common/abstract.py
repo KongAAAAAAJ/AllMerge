@@ -93,8 +93,8 @@ class AbstractEnv(gym.Env):
         return {
             "observation": {"type": "Kinematics"},
             "action_num": {"type": "DiscreteMetaAction"},
-            "simulation_frequency": 10,  # [Hz]
-            "policy_frequency": 1,  # [Hz]
+            "simulation_frequency": 1,  # [Hz]
+            "policy_frequency": 10,  # [Hz]
             "other_vehicles_type": "highway_env.vehicle.behavior.IDMVehicle",
             "screen_width": 600,  # [px]
             "screen_height": 150,  # [px]
@@ -115,7 +115,7 @@ class AbstractEnv(gym.Env):
         if config:
             self.config.update(config)
 
-    def update_metadata(self, video_real_time_ratio=2):
+    def update_metadata(self, video_real_time_ratio=1):
         frames_freq = (
             self.config["simulation_frequency"]
             if self._record_video_wrapper

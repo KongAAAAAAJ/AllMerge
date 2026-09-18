@@ -1623,10 +1623,15 @@ def print_summary(
 def _configure_episode_video(
     video_env,
     video_path: Path,
-) -> Path:
+) -> None:
     """
-    Configure per-episode recording for both old and new SB3 APIs.
-    Returns the actual mp4 path.
+    Redirect the already-created VecVideoRecorder to a unique per-episode path.
+
+    env_reset() already constructs/resets the recorder used elsewhere in
+    AllMerge. We reuse that exact wrapper so recording cannot change planner,
+    controller, or environment stepping semantics.
+
+    Stable-Baselines3 >= 2.4 stores the final output in `video_path`.
     """
     if video_env is None:
         raise RuntimeError(
@@ -1634,93 +1639,31 @@ def _configure_episode_video(
             "video_env=None."
         )
 
-    video_path = Path(video_path).resolve()
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Newer SB3 API.
-    if hasattr(video_env, "video_path"):
-        video_env.video_folder = str(video_path.parent)
-
-        if hasattr(video_env, "video_name"):
-            video_env.video_name = video_path.name
-
-        video_env.video_path = str(video_path)
-        return video_path
-
-    # Older SB3 API.
-    has_old_api = (
-        hasattr(video_env, "video_recorder")
-        and hasattr(video_env, "start_video_recorder")
-        and hasattr(video_env, "close_video_recorder")
+    video_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    if has_old_api:
-        # env_reset() may already have started a recorder with a default name.
-        # Close and restart it WITHOUT resetting the environment.
-        try:
-            video_env.close_video_recorder()
-        except Exception:
-            pass
-
-        video_env.video_folder = str(video_path.parent)
-        video_env.name_prefix = video_path.stem
-
-        try:
-            video_env.video_length = max(
-                int(video_env.video_length),
-                10000,
-            )
-        except Exception:
-            video_env.video_length = 10000
-
-        video_env.start_video_recorder()
-
-        recorder = getattr(
-            video_env,
-            "video_recorder",
-            None,
+    if not hasattr(
+        video_env,
+        "video_path",
+    ):
+        raise RuntimeError(
+            "The current VecVideoRecorder does not expose `video_path`. "
+            "This patch expects the Stable-Baselines3 VecVideoRecorder API "
+            "used by the current AllMerge environment."
         )
 
-        recorder_path = getattr(
-            recorder,
-            "path",
-            None,
-        )
-
-        if recorder_path:
-            return Path(recorder_path).resolve()
-
-        step_id = int(
-            getattr(video_env, "step_id", 0)
-        )
-
-        video_length = int(
-            getattr(video_env, "video_length", 10000)
-        )
-
-        actual_name = (
-            f"{video_path.stem}"
-            f"-step-{step_id}"
-            f"-to-step-{step_id + video_length}.mp4"
-        )
-
-        return (
-            video_path.parent
-            / actual_name
-        ).resolve()
-
-    attrs = sorted(
-        name
-        for name in dir(video_env)
-        if (
-            "video" in name.lower()
-            or "record" in name.lower()
-        )
+    video_env.video_folder = str(
+        video_path.parent
     )
 
-    raise RuntimeError(
-        "Unsupported VecVideoRecorder API. "
-        f"Relevant attributes: {attrs}"
+    video_env.video_name = (
+        video_path.name
+    )
+
+    video_env.video_path = str(
+        video_path
     )
 
 
@@ -2067,11 +2010,9 @@ def main():
                     )
                 )
 
-                episode_video_path = (
-                    _configure_episode_video(
-                        video_env,
-                        episode_video_path,
-                    )
+                _configure_episode_video(
+                    video_env,
+                    episode_video_path,
                 )
 
             # Default path remains the raw VecEnv, exactly as before.
