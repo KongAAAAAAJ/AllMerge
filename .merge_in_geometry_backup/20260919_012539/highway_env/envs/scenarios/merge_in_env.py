@@ -50,15 +50,6 @@ class MergeInEnv(BaseScenarioEnv):
         # lane-change topology explicit for the planner.
         merge_start = 0.0
         merge_end = 320.0
-
-        # === MERGE-IN GEOMETRY V2 ===
-        # Mainline lane 2 center is y=8 m. Lane 3 starts as the
-        # normal right-adjacent lane at y=12 m and converges
-        # smoothly to y=8 m by the end of the common b->c segment.
-        # With base=10, amplitude=2, phase=pi/2 and pulsation=pi/L:
-        # y(0)=12 m and y(L)=8 m.
-        auxiliary_base_y = 2.5 * lane_width
-
         for lane_id in range(3):
             y = lane_id * lane_width
             network.add_lane(
@@ -79,8 +70,8 @@ class MergeInEnv(BaseScenarioEnv):
             "b",
             "c",
             SineLane(
-                [merge_start, auxiliary_base_y],
-                [merge_end, auxiliary_base_y],
+                [merge_start, 3 * lane_width],
+                [merge_end, 3 * lane_width],
                 amplitude=2.0,
                 pulsation=2.0 * 3.141592653589793 / (2.0 * merge_end),
                 phase=3.141592653589793 / 2.0,

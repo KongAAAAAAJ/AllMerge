@@ -73,7 +73,6 @@ class SmokeResult:
     terminated: bool = False
     truncated: bool = False
     task_success: bool = False
-    terminal_reason: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -110,54 +109,6 @@ def _scenario_target_lane_indices(env: BaseScenarioEnv) -> List[Optional[tuple]]
     return result
 
 
-
-
-def _terminal_reason(info: dict) -> Optional[str]:
-    """Return a compact reason for terminal/truncated smoke-test steps."""
-    # TERMINAL REASON V1
-    if bool(info.get("task_success", False)):
-        return "task_success"
-
-    state = info.get("episode_state") or {}
-
-    crashed = list(state.get("crashed", []))
-    crashed_indices = [
-        index for index, value in enumerate(crashed) if bool(value)
-    ]
-    if crashed_indices:
-        return "collision:" + ",".join(
-            f"ego[{index}]" for index in crashed_indices
-        )
-
-    on_road = list(state.get("on_road", []))
-    if bool(state.get("offroad_terminal", False)) and on_road:
-        offroad_indices = [
-            index for index, value in enumerate(on_road) if not bool(value)
-        ]
-        if offroad_indices:
-            return "offroad:" + ",".join(
-                f"ego[{index}]" for index in offroad_indices
-            )
-
-    if bool(state.get("truncated", False)):
-        return "truncated"
-
-    if bool(state.get("terminated", False)):
-        return "terminated_unknown"
-
-    return None
-
-
-def _terminal_state_brief(info: dict) -> str:
-    """Return raw terminal fields for debugging."""
-    state = info.get("episode_state") or {}
-    return (
-        f"reason={_terminal_reason(info)} "
-        f"crashed={state.get('crashed')} "
-        f"lane_index={state.get('lane_index')} "
-        f"on_road={state.get('on_road')} "
-        f"offroad_terminal={state.get('offroad_terminal')}"
-    )
 
 def _check_reset_state(env: BaseScenarioEnv) -> None:
     """Fail early on obvious scene-construction errors."""
@@ -321,15 +272,10 @@ def run_one_scenario(
                     f"task_success={info.get('task_success')} "
                     f"lanes={_lane_indices(env)} "
                     f"rule_targets={_rule_target_lane_indices(env)} "
-                    f"speed={_speeds(env)} "
-                    f"terminal_reason={_terminal_reason(info)}"
+                    f"speed={_speeds(env)}"
                 )
 
             if terminated or truncated:
-                print(
-                    "terminal_state | "
-                    f"{_terminal_state_brief(info)}"
-                )
                 break
 
         if not first_step_checked:
@@ -343,7 +289,6 @@ def run_one_scenario(
             terminated=bool(terminated),
             truncated=bool(truncated),
             task_success=bool(info.get("task_success", False)),
-            terminal_reason=_terminal_reason(info),
         )
 
         print(
@@ -351,8 +296,7 @@ def run_one_scenario(
             f"time={result.sim_time:.2f}s, "
             f"terminated={result.terminated}, "
             f"truncated={result.truncated}, "
-            f"task_success={result.task_success}, "
-            f"terminal_reason={result.terminal_reason}"
+            f"task_success={result.task_success}"
         )
         return result
 
@@ -456,8 +400,7 @@ def main() -> int:
         details = (
             f"steps={result.steps}, time={result.sim_time:.2f}s, "
             f"terminated={result.terminated}, truncated={result.truncated}, "
-            f"task_success={result.task_success}, "
-            f"terminal_reason={result.terminal_reason}"
+            f"task_success={result.task_success}"
             if result.passed
             else f"error={result.error}"
         )
