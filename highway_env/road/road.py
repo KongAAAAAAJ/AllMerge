@@ -477,95 +477,173 @@ class Road(object):
             for other in self.objects:
                 vehicle.handle_collisions(other, dt)
 
+    # === FRENET LANE SAFETY V1 START ===
+    def lane_longitudinal_position(
+        self,
+        vehicle: "kinematics.Vehicle",
+        lane_index: LaneIndex,
+    ) -> float:
+        """Project a vehicle onto ``lane_index`` and return lane-local s."""
+        lane = self.network.get_lane(lane_index)
+        s, _ = lane.local_coordinates(vehicle.position)
+        return float(s)
+
+    def longitudinal_gap(
+        self,
+        front_vehicle: "kinematics.Vehicle",
+        rear_vehicle: "kinematics.Vehicle",
+        lane_index: LaneIndex,
+    ) -> float:
+        """Signed front-to-rear longitudinal gap in lane-local Frenet s."""
+        if front_vehicle is None or rear_vehicle is None:
+            return float("inf")
+        lane = self.network.get_lane(lane_index)
+        front_s, _ = lane.local_coordinates(front_vehicle.position)
+        rear_s, _ = lane.local_coordinates(rear_vehicle.position)
+        return float(front_s - rear_s)
+
+    def longitudinal_ttc(
+        self,
+        front_vehicle: "kinematics.Vehicle",
+        rear_vehicle: "kinematics.Vehicle",
+        lane_index: LaneIndex,
+    ) -> float:
+        """Longitudinal TTC computed on the queried lane's Frenet s axis."""
+        if front_vehicle is None or rear_vehicle is None:
+            return float("inf")
+
+        closing_speed = float(rear_vehicle.speed - front_vehicle.speed)
+        if closing_speed <= 0.0:
+            return float("inf")
+
+        gap = self.longitudinal_gap(
+            front_vehicle=front_vehicle,
+            rear_vehicle=rear_vehicle,
+            lane_index=lane_index,
+        )
+        if gap <= 0.0:
+            return 0.0
+
+        return float(gap / closing_speed)
+
     def neighbour_vehicles(
-        self, vehicle: "kinematics.Vehicle", lane_index: LaneIndex = None, group: list = None
-    ) -> Tuple[Optional["kinematics.Vehicle"], Optional["kinematics.Vehicle"]]:
-        """
-        Find the preceding and following vehicles of a given vehicle.
+        self,
+        vehicle: "kinematics.Vehicle",
+        lane_index: LaneIndex = None,
+        group: list = None,
+    ) -> Tuple[
+        Optional["kinematics.Vehicle"],
+        Optional["kinematics.Vehicle"],
+    ]:
+        """Find nearest front/rear objects using lane-local Frenet coordinates.
 
-        :param vehicle: the vehicle whose neighbours must be found
-        :param lane_index: the lane on which to look for preceding and following vehicles.
-                     It doesn't have to be the current vehicle lane but can also be another lane, in which case the
-                     vehicle is projected on it considering its local coordinates in the lane.
-        :return: its preceding vehicle, its following vehicle
+        The queried vehicle and all vehicles in ``group`` are excluded. This
+        works for straight, curved and ramp lanes, including lane id 3.
         """
         lane_index = lane_index or vehicle.lane_index
         if not lane_index:
             return None, None
-        # lane = self.network.get_lane(lane_index)
-        # s = self.network.get_lane(lane_index).local_coordinates(vehicle.position)[0]
-        s = vehicle.position[0]
-        s_front = s_rear = None
-        v_front = v_rear = None
-        lane_center_y = {
-            0: 0,
-            1: 4,
-            2: 8,
-        }
-        for v in self.vehicles + self.objects:
-            if (lane_index[:2] == ['j', 'k'] or lane_index[:2] == ['k', 'b'] or lane_index[2] == 3
-                    or abs(v.position[1] - lane_center_y[lane_index[2]]) > 2 or group is not None and v in group):
-                continue
-            s_v, lat_v = v.position
-            # if v is not vehicle and not isinstance(
-            #     v, Landmark
-            # ):  # self.network.is_connected_road(v.lane_index,
-            #     # lane_index, same_lane=True):
-            #     s_v, lat_v = lane.local_coordinates(v.position)
-            #     if not lane.on_lane(v.position, s_v, lat_v, margin=1):
-            #         continue
-            if s < s_v and (s_front is None or s_v <= s_front):
-                s_front = s_v
-                v_front = v
-            if s_v < s and (s_rear is None or s_v > s_rear):
-                s_rear = s_v
-                v_rear = v
-        return v_front, v_rear
 
+        lane = self.network.get_lane(lane_index)
+        s, _ = lane.local_coordinates(vehicle.position)
+
+        excluded = list(group or [])
+        front_s = rear_s = None
+        front_vehicle = rear_vehicle = None
+
+        for candidate in self.vehicles + self.objects:
+            if candidate is vehicle or candidate in excluded:
+                continue
+
+            candidate_s, candidate_lat = lane.local_coordinates(
+                candidate.position
+            )
+            if not lane.on_lane(
+                candidate.position,
+                candidate_s,
+                candidate_lat,
+                margin=1,
+            ):
+                continue
+
+            if s < candidate_s and (
+                front_s is None or candidate_s < front_s
+            ):
+                front_s = candidate_s
+                front_vehicle = candidate
+
+            if candidate_s < s and (
+                rear_s is None or candidate_s > rear_s
+            ):
+                rear_s = candidate_s
+                rear_vehicle = candidate
+
+        return front_vehicle, rear_vehicle
+    # === FRENET LANE SAFETY V1 END ===
     def predict_neighbour_vehicles(
-        self, vehicle: "kinematics.Vehicle", lane_index: LaneIndex = None, group: list = None,
-        predict_vehicles: list = None, background_vehicles: list = None, pre_background_vehicles: list = None
-    ) -> Tuple[Optional["kinematics.Vehicle"], Optional["kinematics.Vehicle"]]:
-        """
-        Find the preceding and following vehicles of a given vehicle.
-
-        :param vehicle: the vehicle whose neighbours must be found
-        :param lane_index: the lane on which to look for preceding and following vehicles.
-                     It doesn't have to be the current vehicle lane but can also be another lane, in which case the
-                     vehicle is projected on it considering its local coordinates in the lane.
-        :param group:
-        :return: its preceding vehicle, its following vehicle
-        """
+        self,
+        vehicle: "kinematics.Vehicle",
+        lane_index: LaneIndex = None,
+        group: list = None,
+        predict_vehicles: list = None,
+        background_vehicles: list = None,
+        pre_background_vehicles: list = None,
+    ) -> Tuple[
+        Optional["kinematics.Vehicle"],
+        Optional["kinematics.Vehicle"],
+    ]:
+        """Prediction variant of neighbour lookup using lane-local Frenet s."""
         lane_index = lane_index or vehicle.lane_index
         if not lane_index:
             return None, None
-        # lane = self.network.get_lane(lane_index)
-        # s = self.network.get_lane(lane_index).local_coordinates(vehicle.position)[0]
-        s = vehicle.position[0]
-        s_front = s_rear = None
-        v_front = v_rear = None
-        lane_center_y = {
-            0: 0,
-            1: 4,
-            2: 8
-        }
 
-        for v, v_pre in zip(
-                background_vehicles + self.objects + predict_vehicles,
-                pre_background_vehicles + self.objects + predict_vehicles
+        lane = self.network.get_lane(lane_index)
+        s, _ = lane.local_coordinates(vehicle.position)
+
+        background_vehicles = list(background_vehicles or [])
+        pre_background_vehicles = list(pre_background_vehicles or [])
+        predict_vehicles = list(predict_vehicles or [])
+        excluded = list(group or [])
+
+        candidates = background_vehicles + self.objects + predict_vehicles
+        previous_candidates = (
+            pre_background_vehicles + self.objects + predict_vehicles
+        )
+
+        front_s = rear_s = None
+        front_vehicle = rear_vehicle = None
+
+        for candidate, previous_candidate in zip(
+            candidates,
+            previous_candidates,
         ):
-            if (lane_index[:2] == ['j', 'k'] or lane_index[:2] == ['k', 'b'] or lane_index[2] == 3
-                    or abs(v.position[1] - lane_center_y[lane_index[2]]) > 2 or group is not None and v in group):
+            if candidate is vehicle or candidate in excluded:
                 continue
-            s_v, lat_v = v.position
-            if s < s_v and (s_front is None or s_v <= s_front):
-                s_front = s_v
-                v_front = v_pre
-            if s_v < s and (s_rear is None or s_v > s_rear):
-                s_rear = s_v
-                v_rear = v_pre
-        return v_front, v_rear
 
+            candidate_s, candidate_lat = lane.local_coordinates(
+                candidate.position
+            )
+            if not lane.on_lane(
+                candidate.position,
+                candidate_s,
+                candidate_lat,
+                margin=1,
+            ):
+                continue
+
+            if s < candidate_s and (
+                front_s is None or candidate_s < front_s
+            ):
+                front_s = candidate_s
+                front_vehicle = previous_candidate
+
+            if candidate_s < s and (
+                rear_s is None or candidate_s > rear_s
+            ):
+                rear_s = candidate_s
+                rear_vehicle = previous_candidate
+
+        return front_vehicle, rear_vehicle
     def predict_near_vehicles(self, first_vehicle, end_vehicle, lane_index, predict_vehicles):
 
         x_limit = [end_vehicle.position[0], first_vehicle.position[0]]
@@ -583,48 +661,34 @@ class Road(object):
 
     # Kong add:
     def group_neighbour_vehicles(
-        self, group: list, lane_index: LaneIndex = None
+        self,
+        group: list,
+        lane_index: LaneIndex = None,
     ) -> Tuple[Optional["list"], Optional["list"]]:
-        """
-        Find the preceding, following vehicles of each vehicle in given group.
+        """Find front/rear neighbours for every member of a vehicle group.
 
-        :param group: the group of vehicles
-        :param lane_index: the lane on which to look for preceding and following vehicles.
-                     It doesn't have to be the current vehicle lane but can also be another lane, in which case the
-                     vehicle is projected on it considering its local coordinates in the lane.
-        :return: the preceding vehicle list, following vehicle list of each vehicle in group
+        Each member is projected onto the same queried target lane when one is
+        supplied. Group members are excluded from one another's neighbour set.
         """
         front_vehicles = []
         rear_vehicles = []
+
         for current_vehicle in group:
-            lane_index = lane_index or current_vehicle.lane_index
-            if not lane_index:
-                return None, None
-            lane = self.network.get_lane(lane_index)
-            s = self.network.get_lane(lane_index).local_coordinates(current_vehicle.position)[0]
-            s_front = s_rear = None
-            v_front = v_rear = None
-            for v in self.vehicles + self.objects:
-                if v in group:
-                    continue
-                if v is not isinstance(
-                        v, Landmark
-                ):  # self.network.is_connected_road(v.lane_index,
-                    # lane_index, same_lane=True):
-                    s_v, lat_v = lane.local_coordinates(v.position)
-                    if not lane.on_lane(v.position, s_v, lat_v, margin=1):
-                        continue
-                    if s <= s_v and (s_front is None or s_v <= s_front):
-                        s_front = s_v
-                        v_front = v
-                    if s_v < s and (s_rear is None or s_v > s_rear):
-                        s_rear = s_v
-                        v_rear = v
-            front_vehicles.append(v_front)
-            rear_vehicles.append(v_rear)
+            query_lane_index = lane_index or current_vehicle.lane_index
+            if not query_lane_index:
+                front_vehicles.append(None)
+                rear_vehicles.append(None)
+                continue
+
+            front_vehicle, rear_vehicle = self.neighbour_vehicles(
+                vehicle=current_vehicle,
+                lane_index=query_lane_index,
+                group=group,
+            )
+            front_vehicles.append(front_vehicle)
+            rear_vehicles.append(rear_vehicle)
 
         return front_vehicles, rear_vehicles
-
     def __repr__(self):
         return self.vehicles.__repr__()
 

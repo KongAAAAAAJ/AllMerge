@@ -755,80 +755,104 @@ class LEADVehicle(ControlledVehicle):
                     states.append(copy.deepcopy(v))
         return states
 
-    def change_lane_policy(self, controlled_vehicle, group: list = None, target_lane_index: LaneIndex = None) -> list:
+    def change_lane_policy(
+        self,
+        controlled_vehicle,
+        group: list = None,
+        target_lane_index: LaneIndex = None,
+    ) -> list:
+        """Select/continue a lane change.
+
+        Scenario target lanes still pass through MOBIL before the maneuver
+        starts. Once accepted, the target becomes committed until the vehicle
+        reaches that lane. Ordinary MOBIL is therefore not re-run every policy
+        step during the same maneuver.
         """
-        Decide when to change lane.
+        # === LANE CHANGE COMMITMENT V1 START ===
+        current_lane_index = controlled_vehicle.lane_index
+        committed_target = getattr(
+            controlled_vehicle,
+            "target_lane_index",
+            current_lane_index,
+        )
 
-        Based on:
-        - frequency;
-        - closeness of the target lane;
-        - MOBIL model.
-
-        :param group: a group of vehicles
-        :param target_lane_index
-        :param controlled_vehicle
-        :return lane change results: eg: [0, ("0", "1", 2)] [action, lane_index]
-            0: "LANE_LEFT",
-            1: "LANE_RIGHT",
-            2: "LANE_KEEP"
-
-        """
-        # If a lane change is already ongoing
-        if controlled_vehicle.lane_index != controlled_vehicle.target_lane_index:
-            # If we are on correct route but bad lane: abort it if someone else is already changing into the same lane
-            if controlled_vehicle.lane_index[:2] == controlled_vehicle.target_lane_index[:2]:
-                for v in self.road.vehicles:
-                    if (
-                        v is not controlled_vehicle
-                        and v.lane_index != controlled_vehicle.target_lane_index
-                        and isinstance(v, ControlledVehicle)
-                        and v.target_lane_index == controlled_vehicle.target_lane_index
-                    ):
-                        d = self.lane_distance_to(v)
-                        d_star, _ = self.desired_gap(controlled_vehicle, v)
-                        if 0 < d < d_star:
-                            target_lane_index = controlled_vehicle.lane_index
-                            break
-
-        # else, at a given frequency,
-        # else:
-        #     if not utils.do_every(self.LANE_CHANGE_DELAY, self.timer):
-        #         return [2, controlled_vehicle.lane_index]
-        # self.timer = 0
-
-        # decide to make a lane change
-        if target_lane_index is None:
-            for lane_index in self.road.network.side_lanes(controlled_vehicle.lane_index):
-                # Is the candidate lane close enough?
-                if not self.road.network.get_lane(lane_index).is_reachable_from(
-                    controlled_vehicle.position
+        if (
+            committed_target is not None
+            and current_lane_index != committed_target
+            and current_lane_index[:2] == committed_target[:2]
+        ):
+            # Keep only the existing emergency conflict check. Do not re-run
+            # ordinary MOBIL and oscillate between current/target lanes.
+            emergency_abort = False
+            for other in self.road.vehicles:
+                if (
+                    other is controlled_vehicle
+                    or not isinstance(other, ControlledVehicle)
                 ):
                     continue
-                # Only change lane when the vehicle is moving
+                if (
+                    other.lane_index != committed_target
+                    and getattr(other, "target_lane_index", None)
+                    == committed_target
+                ):
+                    target_lane = self.road.network.get_lane(
+                        committed_target
+                    )
+                    ego_s, _ = target_lane.local_coordinates(
+                        controlled_vehicle.position
+                    )
+                    other_s, _ = target_lane.local_coordinates(
+                        other.position
+                    )
+                    d_star, _ = self.desired_gap(
+                        controlled_vehicle,
+                        other,
+                    )
+                    if 0.0 < other_s - ego_s < d_star:
+                        emergency_abort = True
+                        break
+
+            if not emergency_abort:
+                if current_lane_index[2] > committed_target[2]:
+                    return [0, committed_target]
+                if current_lane_index[2] < committed_target[2]:
+                    return [1, committed_target]
+                return [2, committed_target]
+
+            return [2, current_lane_index]
+        # === LANE CHANGE COMMITMENT V1 END ===
+
+        if target_lane_index is None:
+            for lane_index in self.road.network.side_lanes(
+                current_lane_index
+            ):
+                if not self.road.network.get_lane(
+                    lane_index
+                ).is_reachable_from(controlled_vehicle.position):
+                    continue
                 if np.abs(controlled_vehicle.speed) < 1:
                     continue
-                # Does the MOBIL model recommend a lane change?
                 if self.mobil(lane_index, group):
-                    if controlled_vehicle.lane_index[2] > lane_index[2]:
+                    if current_lane_index[2] > lane_index[2]:
                         return [0, lane_index]
-                    elif controlled_vehicle.lane_index[2] < lane_index[2]:
+                    if current_lane_index[2] < lane_index[2]:
                         return [1, lane_index]
         else:
-            # Is the target lane close enough?
-            if self.road.network.get_lane(target_lane_index).is_reachable_from(
-                    controlled_vehicle.position
-            ):
-                # Only change lane when the vehicle is moving
+            if self.road.network.get_lane(
+                target_lane_index
+            ).is_reachable_from(controlled_vehicle.position):
                 if np.abs(controlled_vehicle.speed) >= 1:
-                    # Does the MOBIL model recommend a lane change?
-                    if self.mobil(target_lane_index, group, forced=True):
-                        if controlled_vehicle.lane_index[2] > target_lane_index[2]:
+                    if self.mobil(
+                        target_lane_index,
+                        group,
+                        forced=True,
+                    ):
+                        if current_lane_index[2] > target_lane_index[2]:
                             return [0, target_lane_index]
-                        elif controlled_vehicle.lane_index[2] < target_lane_index[2]:
+                        if current_lane_index[2] < target_lane_index[2]:
                             return [1, target_lane_index]
 
-        return [2, controlled_vehicle.lane_index]
-
+        return [2, current_lane_index]
     def desired_gap(
         self,
         ego_vehicle: Vehicle,
@@ -866,190 +890,273 @@ class LEADVehicle(ControlledVehicle):
         )
         return [d_star, d_follow]
 
-    def mobil(self, lane_index: LaneIndex, group: list = None, forced: bool = False) -> bool:
-        """
-        MOBIL lane change model: Minimizing Overall Braking Induced by a Lane change
-        Adapt to a lead vehicle with several follow vehicles
-
-            The group should change lane only if every vehicle in group can meet:
-            - after changing it (and/or following vehicles) can accelerate more;
-            - it doesn't impose an unsafe braking on its new following vehicle.
-
-        :param group: the group of sub-platoon, including leader and followers
-        :param lane_index: the candidate lane for the change
-        :param forced: the flag of forced lane change
-        :return: whether the lane change should be performed
-        """
+    def mobil(
+        self,
+        lane_index: LaneIndex,
+        group: list = None,
+        forced: bool = False,
+    ) -> bool:
+        """MOBIL safety/utility check using target-lane Frenet geometry."""
         if group is None:
-            # Is the maneuver unsafe for the new following vehicle?
-            new_preceding, new_following = self.road.neighbour_vehicles(self, lane_index)
+            new_preceding, new_following = self.road.neighbour_vehicles(
+                self,
+                lane_index,
+            )
+
             new_following_a = self.acceleration(
                 ego_vehicle=new_following,
                 front_vehicle=new_preceding,
-                desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=new_preceding)[1]
+                desired_gap=self.desired_gap(
+                    ego_vehicle=new_following,
+                    front_vehicle=new_preceding,
+                )[1],
             )
             new_following_pred_a = self.acceleration(
                 ego_vehicle=new_following,
                 front_vehicle=self,
-                desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=self)[1]
+                desired_gap=self.desired_gap(
+                    ego_vehicle=new_following,
+                    front_vehicle=self,
+                )[1],
             )
-            # if new_following_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
-            # if new_following_pred_a < -self.ACC_MAX:
-            #     return False
 
-            # Do I have a planned route for a specific lane which is safe for me to access?
-            old_preceding, old_following = self.road.neighbour_vehicles(self)
+            old_preceding, old_following = self.road.neighbour_vehicles(
+                self
+            )
+
             if self.route and self.route[0][2] is not None:
-                # Wrong direction
-                if np.sign(lane_index[2] - self.target_lane_index[2]) != np.sign(
-                        self.route[0][2] - self.target_lane_index[2]
+                if np.sign(
+                    lane_index[2] - self.target_lane_index[2]
+                ) != np.sign(
+                    self.route[0][2] - self.target_lane_index[2]
                 ):
                     return False
 
-            # Is the maneuver unsafe for the ego vehicle?
-            # self_pred_a = self.integrated_longitudinal_control(ego_vehicle=self, front_vehicle=new_preceding)
             self_pred_a = self.acceleration(
                 ego_vehicle=self,
                 front_vehicle=new_preceding,
-                desired_gap=self.desired_gap(ego_vehicle=self, front_vehicle=new_preceding)[1]
+                desired_gap=self.desired_gap(
+                    ego_vehicle=self,
+                    front_vehicle=new_preceding,
+                )[1],
             )
-
-            # if self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
             if self_pred_a < -self.ACC_MAX:
                 return False
 
-            # Is the distance unsafe?
             if new_preceding is not None:
-                ttc_new_preceding = utils.ttc(new_preceding, self)
-                if (new_preceding.position[0] - self.position[0] <= 1.5 * self.LENGTH
-                        or ttc_new_preceding <= self.TTC_MIN):
-                    return False
-            if new_following is not None:
-                ttc_new_following = utils.ttc(self, new_following)
-                if (self.position[0] - new_following.position[0] <= 1.5 * self.LENGTH
-                        or ttc_new_following <= self.TTC_MIN):
+                front_gap = self.road.longitudinal_gap(
+                    front_vehicle=new_preceding,
+                    rear_vehicle=self,
+                    lane_index=lane_index,
+                )
+                front_ttc = self.road.longitudinal_ttc(
+                    front_vehicle=new_preceding,
+                    rear_vehicle=self,
+                    lane_index=lane_index,
+                )
+                if (
+                    front_gap <= 1.5 * self.LENGTH
+                    or front_ttc <= self.TTC_MIN
+                ):
                     return False
 
-            # Is it a forced lane change?
+            if new_following is not None:
+                rear_gap = self.road.longitudinal_gap(
+                    front_vehicle=self,
+                    rear_vehicle=new_following,
+                    lane_index=lane_index,
+                )
+                rear_ttc = self.road.longitudinal_ttc(
+                    front_vehicle=self,
+                    rear_vehicle=new_following,
+                    lane_index=lane_index,
+                )
+                if (
+                    rear_gap <= 1.5 * self.LENGTH
+                    or rear_ttc <= self.TTC_MIN
+                ):
+                    return False
+
             if forced:
                 return True
 
-            # Is there an acceleration advantage for me and/or my followers to change lane?
-            self_a = self.integrated_longitudinal_control(ego_vehicle=self, front_vehicle=old_preceding)
+            self_a = self.integrated_longitudinal_control(
+                ego_vehicle=self,
+                front_vehicle=old_preceding,
+            )
             old_following_a = self.acceleration(
                 ego_vehicle=old_following,
                 front_vehicle=self,
-                desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=self)[1]
+                desired_gap=self.desired_gap(
+                    ego_vehicle=old_following,
+                    front_vehicle=self,
+                )[1],
             )
             old_following_pred_a = self.acceleration(
                 ego_vehicle=old_following,
                 front_vehicle=old_preceding,
-                desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=old_preceding)[1]
+                desired_gap=self.desired_gap(
+                    ego_vehicle=old_following,
+                    front_vehicle=old_preceding,
+                )[1],
             )
             jerk = (
-                    self_pred_a
-                    - self_a
-                    + self.POLITENESS
-                    * (
-                            new_following_pred_a
-                            - new_following_a
-                            + old_following_pred_a
-                            - old_following_a
-                    )
+                self_pred_a
+                - self_a
+                + self.POLITENESS
+                * (
+                    new_following_pred_a
+                    - new_following_a
+                    + old_following_pred_a
+                    - old_following_a
+                )
+            )
+            if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
+                return False
+            return True
+
+        new_precedings, new_followings = (
+            self.road.group_neighbour_vehicles(
+                group=group,
+                lane_index=lane_index,
+            )
+        )
+        old_precedings, old_followings = (
+            self.road.group_neighbour_vehicles(group=group)
+        )
+
+        for idx, (
+            new_preceding,
+            new_following,
+            old_preceding,
+            old_following,
+        ) in enumerate(
+            zip(
+                new_precedings,
+                new_followings,
+                old_precedings,
+                old_followings,
+            )
+        ):
+            # === GROUP MOBIL EGO REFERENCE V1 ===
+            ego_vehicle = group[idx]
+
+            if new_preceding is not None:
+                front_gap = self.road.longitudinal_gap(
+                    front_vehicle=new_preceding,
+                    rear_vehicle=ego_vehicle,
+                    lane_index=lane_index,
+                )
+                front_ttc = self.road.longitudinal_ttc(
+                    front_vehicle=new_preceding,
+                    rear_vehicle=ego_vehicle,
+                    lane_index=lane_index,
+                )
+                if (
+                    front_gap <= 1.5 * ego_vehicle.LENGTH
+                    or front_ttc <= self.TTC_MIN
+                ):
+                    return False
+
+            if new_following is not None:
+                rear_gap = self.road.longitudinal_gap(
+                    front_vehicle=ego_vehicle,
+                    rear_vehicle=new_following,
+                    lane_index=lane_index,
+                )
+                rear_ttc = self.road.longitudinal_ttc(
+                    front_vehicle=ego_vehicle,
+                    rear_vehicle=new_following,
+                    lane_index=lane_index,
+                )
+                if (
+                    rear_gap <= 1.5 * ego_vehicle.LENGTH
+                    or rear_ttc <= self.TTC_MIN
+                ):
+                    return False
+
+            new_following_a = self.acceleration(
+                ego_vehicle=new_following,
+                front_vehicle=new_preceding,
+                desired_gap=self.desired_gap(
+                    ego_vehicle=new_following,
+                    front_vehicle=new_preceding,
+                )[1],
+            )
+            new_following_pred_a = self.acceleration(
+                ego_vehicle=new_following,
+                front_vehicle=ego_vehicle,
+                desired_gap=self.desired_gap(
+                    ego_vehicle=new_following,
+                    front_vehicle=ego_vehicle,
+                )[1],
+            )
+            if new_following_pred_a < -self.ACC_MAX:
+                return False
+
+            ego_route = getattr(ego_vehicle, "route", None)
+            ego_target_lane_index = getattr(
+                ego_vehicle,
+                "target_lane_index",
+                ego_vehicle.lane_index,
+            )
+            if ego_route and ego_route[0][2] is not None:
+                if np.sign(
+                    lane_index[2] - ego_target_lane_index[2]
+                ) != np.sign(
+                    ego_route[0][2] - ego_target_lane_index[2]
+                ):
+                    return False
+
+            ego_pred_a = self.acceleration(
+                ego_vehicle=ego_vehicle,
+                front_vehicle=new_preceding,
+                desired_gap=self.desired_gap(
+                    ego_vehicle=ego_vehicle,
+                    front_vehicle=new_preceding,
+                )[1],
+            )
+            if ego_pred_a < -self.ACC_MAX:
+                return False
+
+            if forced:
+                continue
+
+            ego_current_a = self.integrated_longitudinal_control(
+                ego_vehicle=ego_vehicle,
+                front_vehicle=old_preceding,
+            )
+            old_following_a = self.acceleration(
+                ego_vehicle=old_following,
+                front_vehicle=ego_vehicle,
+                desired_gap=self.desired_gap(
+                    ego_vehicle=old_following,
+                    front_vehicle=ego_vehicle,
+                )[1],
+            )
+            old_following_pred_a = self.acceleration(
+                ego_vehicle=old_following,
+                front_vehicle=old_preceding,
+                desired_gap=self.desired_gap(
+                    ego_vehicle=old_following,
+                    front_vehicle=old_preceding,
+                )[1],
+            )
+            jerk = (
+                ego_pred_a
+                - ego_current_a
+                + self.POLITENESS
+                * (
+                    new_following_pred_a
+                    - new_following_a
+                    + old_following_pred_a
+                    - old_following_a
+                )
             )
             if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
                 return False
 
-            # All clear, let's go!
-            return True
-
-        else:
-            first_v_x = group[0].position[0]
-            last_v_x = group[-1].position[0]
-            new_precedings, new_followings = self.road.group_neighbour_vehicles(
-                group=group, lane_index=lane_index
-            )
-            old_precedings, old_followings = self.road.group_neighbour_vehicles(group)
-            for new_preceding, new_following, old_preceding, old_following, idx in zip(
-                    new_precedings, new_followings, old_precedings, old_followings, range(0, len(group))
-            ):
-                # Is the distance unsafe?
-                if new_preceding is not None:
-                    ttc_new_preceding = utils.ttc(new_preceding, self)
-                    if (new_preceding.position[0] - self.position[0] <= 1.5 * self.LENGTH
-                            or ttc_new_preceding <= self.TTC_MIN):
-                        return False
-                if new_following is not None:
-                    ttc_new_following = utils.ttc(self, new_following)
-                    if (self.position[0] - new_following.position[0] <= 1.5 * self.LENGTH
-                            or ttc_new_following <= self.TTC_MIN):
-                        return False
-
-                # Is the maneuver unsafe for the new following vehicle?
-                new_following_a = self.acceleration(
-                    ego_vehicle=new_following,
-                    front_vehicle=new_preceding,
-                    desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=new_preceding)[1]
-                )
-                new_following_pred_a = self.acceleration(
-                    ego_vehicle=new_following,
-                    front_vehicle=group[idx],
-                    desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=self)[1]
-                )
-                # if new_following_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
-                if new_following_pred_a < -self.ACC_MAX:
-                    return False
-
-                # Do I have a planned route for a specific lane which is safe for me to access?
-                if self.route and self.route[0][2] is not None:
-                    # Wrong direction
-                    if np.sign(lane_index[2] - self.target_lane_index[2]) != np.sign(
-                            self.route[0][2] - self.target_lane_index[2]
-                    ):
-                        return False
-                # Unsafe braking required
-                # self_pred_a = self.integrated_longitudinal_control(ego_vehicle=self, front_vehicle=new_preceding)
-                self_pred_a = self.acceleration(
-                    ego_vehicle=group[idx],
-                    front_vehicle=new_preceding,
-                    desired_gap=self.desired_gap(ego_vehicle=group[idx], front_vehicle=new_preceding)[1]
-                )
-                # if self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
-                if self_pred_a < -self.ACC_MAX:
-                    return False
-
-                # Is it a forced lane change?
-                if forced:
-                    continue
-
-                # Is there an acceleration advantage for me and/or my followers to change lane?
-                self_a = self.integrated_longitudinal_control(ego_vehicle=self, front_vehicle=old_preceding)
-                old_following_a = self.acceleration(
-                    ego_vehicle=old_following,
-                    front_vehicle=group[idx],
-                    desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=group[idx])[1]
-                )
-                old_following_pred_a = self.acceleration(
-                    ego_vehicle=old_following,
-                    front_vehicle=old_preceding,
-                    desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=old_preceding)[1]
-                )
-                jerk = (
-                        self_pred_a
-                        - self_a
-                        + self.POLITENESS
-                        * (
-                                new_following_pred_a
-                                - new_following_a
-                                + old_following_pred_a
-                                - old_following_a
-                        )
-                )
-                if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
-                    return False
-            # Seems all vehicles in the group are safe and beneficial from the lane-change
-            return True
-
+        return True
     def acceleration(
         self,
         ego_vehicle: ControlledVehicle,
@@ -1907,60 +2014,42 @@ class FOLLOWVehicle(ControlledVehicle):
                     states.append(copy.deepcopy(v))
         return states
 
-    def change_lane_policy(self, ref_lane_index: LaneIndex, group: list = None) -> list:
-        """
-        Adapt to follow vehicles:
-        Decide when to change lane.
+    def change_lane_policy(
+        self,
+        ref_lane_index: LaneIndex,
+        group: list = None,
+    ) -> list:
+        """Follow the leader's target lane with lane-change commitment."""
+        current_lane_index = self.lane_index
+        committed_target = self.target_lane_index
 
-        Based on:
-        - frequency;
-        - closeness of the target lane;
-        - MOBIL model.
-
-        return: lane change results: eg: [0, 1] [action, lane_index]
-            0: "LANE_LEFT",
-            1: "LANE_RIGHT",
-            2: "LANE_KEEP"
-
-        """
-        # # If a lane change is already ongoing
-        # if self.lane_index != self.target_lane_index:
-        #     # If we are on correct route but bad lane: abort it if someone else is already changing into the same lane
-        #     if self.lane_index[:2] == self.target_lane_index[:2]:
-        #         for v in self.road.vehicles:
-        #             if (
-        #                 v is not self
-        #                 and v.lane_index != self.target_lane_index
-        #                 and isinstance(v, ControlledVehicle)
-        #                 and v.target_lane_index == self.target_lane_index
-        #             ):
-        #                 d = self.lane_distance_to(v)
-        #                 d_star = self.desired_gap(self, v)
-        #                 if 0 < d < d_star:
-        #                     ref_lane_index = self.lane_index
-        #                     break
-
-        # else, at a given frequency,
-        # else:
-        #     if not utils.do_every(self.LANE_CHANGE_DELAY, self.timer):
-        #         return [2, self.lane_index]
-        # self.timer = 0
-
-        # decide to make a lane change to near the leader vehicle
-        # Is the candidate lane close enough?
-        if self.road.network.get_lane(ref_lane_index).is_reachable_from(
-            self.position
+        # === LANE CHANGE COMMITMENT V1: follower ===
+        if (
+            committed_target is not None
+            and current_lane_index != committed_target
+            and current_lane_index[:2] == committed_target[:2]
         ):
-            # Only change lane when the vehicle is moving
-            if np.abs(self.speed) >= 1:
-                # Does the MOBIL model recommend a lane change?
-                if self.mobil(lane_index=ref_lane_index, forced=True, group=group):
-                    if self.lane_index[2] > ref_lane_index[2]:
-                        return [0, ref_lane_index]
-                    elif self.lane_index[2] < ref_lane_index[2]:
-                        return [1, ref_lane_index]
-        return [2, self.lane_index]
+            if current_lane_index[2] > committed_target[2]:
+                return [0, committed_target]
+            if current_lane_index[2] < committed_target[2]:
+                return [1, committed_target]
+            return [2, committed_target]
 
+        if self.road.network.get_lane(
+            ref_lane_index
+        ).is_reachable_from(self.position):
+            if np.abs(self.speed) >= 1:
+                if self.mobil(
+                    lane_index=ref_lane_index,
+                    forced=True,
+                    group=group,
+                ):
+                    if current_lane_index[2] > ref_lane_index[2]:
+                        return [0, ref_lane_index]
+                    if current_lane_index[2] < ref_lane_index[2]:
+                        return [1, ref_lane_index]
+
+        return [2, current_lane_index]
     def desired_gap(
         self,
         ego_vehicle: Vehicle,
@@ -2000,102 +2089,135 @@ class FOLLOWVehicle(ControlledVehicle):
         )
         return [d_star, d_follow]
 
-    def mobil(self, lane_index: LaneIndex, forced: bool = False, group: list = None) -> bool:
-        """
-        MOBIL lane change model: Minimizing Overall Braking Induced by a Lane change
-        Adapt to a lead vehicle with several follow vehicles
+    def mobil(
+        self,
+        lane_index: LaneIndex,
+        forced: bool = False,
+        group: list = None,
+    ) -> bool:
+        """Follower MOBIL safety check using target-lane Frenet geometry."""
+        new_preceding, new_following = self.road.neighbour_vehicles(
+            self,
+            lane_index,
+            group,
+        )
 
-            The vehicle should change lane only if:
-            - after changing it (and/or following vehicles) can accelerate more;
-            - it doesn't impose an unsafe braking on its new following vehicle.
-
-        :param lane_index: the candidate lane for the change
-        :param forced: the flag of forced lane change
-        :return: whether the lane change should be performed
-        """
-        # Is the maneuver unsafe for the new following vehicle?
-        new_preceding, new_following = self.road.neighbour_vehicles(self, lane_index, group)
         new_following_a = self.acceleration(
             ego_vehicle=new_following,
             front_vehicle=new_preceding,
-            desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=new_preceding)[1]
+            desired_gap=self.desired_gap(
+                ego_vehicle=new_following,
+                front_vehicle=new_preceding,
+            )[1],
         )
         new_following_pred_a = self.acceleration(
             ego_vehicle=new_following,
             front_vehicle=self,
-            desired_gap=self.desired_gap(ego_vehicle=new_following, front_vehicle=self)[1]
+            desired_gap=self.desired_gap(
+                ego_vehicle=new_following,
+                front_vehicle=self,
+            )[1],
         )
-        # if new_following_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
-        # if new_following_pred_a < -self.ACC_MAX:
-        #     return False
 
-        # Do I have a planned route for a specific lane which is safe for me to access?
-        old_preceding, old_following = self.road.neighbour_vehicles(self)
+        old_preceding, old_following = self.road.neighbour_vehicles(
+            self
+        )
         self_pred_a = self.acceleration(
             ego_vehicle=self,
             front_vehicle=new_preceding,
-            desired_gap=self.desired_gap(ego_vehicle=self, front_vehicle=new_preceding)[1]
+            desired_gap=self.desired_gap(
+                ego_vehicle=self,
+                front_vehicle=new_preceding,
+            )[1],
         )
+
         if self.route and self.route[0][2] is not None:
-            # Wrong direction
-            if np.sign(lane_index[2] - self.target_lane_index[2]) != np.sign(
+            if np.sign(
+                lane_index[2] - self.target_lane_index[2]
+            ) != np.sign(
                 self.route[0][2] - self.target_lane_index[2]
             ):
                 return False
 
-        # Unsafe braking required
-        # if self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
         if self_pred_a < -self.ACC_MAX:
             return False
 
-        # Is the distance and TTC unsafe?
         if new_preceding is not None:
-            ttc_new_preceding = utils.ttc(new_preceding, self)
-            if new_preceding.position[0] - self.position[0] <= 1.5 * self.LENGTH or ttc_new_preceding <= self.TTC_MIN:
+            front_gap = self.road.longitudinal_gap(
+                front_vehicle=new_preceding,
+                rear_vehicle=self,
+                lane_index=lane_index,
+            )
+            front_ttc = self.road.longitudinal_ttc(
+                front_vehicle=new_preceding,
+                rear_vehicle=self,
+                lane_index=lane_index,
+            )
+            if (
+                front_gap <= 1.5 * self.LENGTH
+                or front_ttc <= self.TTC_MIN
+            ):
                 return False
+
         if new_following is not None:
-            ttc_new_following = utils.ttc(self, new_following)
-            if self.position[0] - new_following.position[0] <= 1.5 * self.LENGTH or ttc_new_following <= self.TTC_MIN:
+            rear_gap = self.road.longitudinal_gap(
+                front_vehicle=self,
+                rear_vehicle=new_following,
+                lane_index=lane_index,
+            )
+            rear_ttc = self.road.longitudinal_ttc(
+                front_vehicle=self,
+                rear_vehicle=new_following,
+                lane_index=lane_index,
+            )
+            if (
+                rear_gap <= 1.5 * self.LENGTH
+                or rear_ttc <= self.TTC_MIN
+            ):
                 return False
 
-        else:
-            # Is it a forced lane change?
-            if forced:
-                return True
+        if forced:
+            return True
 
-            # Is there an acceleration advantage for me and/or my followers to change lane?
-            self_a = self.acceleration(
+        self_a = self.acceleration(
+            ego_vehicle=self,
+            front_vehicle=old_preceding,
+            desired_gap=self.desired_gap(
                 ego_vehicle=self,
                 front_vehicle=old_preceding,
-                desired_gap=self.desired_gap(ego_vehicle=self, front_vehicle=old_preceding)[1]
-            )
-            old_following_a = self.acceleration(
+            )[1],
+        )
+        old_following_a = self.acceleration(
+            ego_vehicle=old_following,
+            front_vehicle=self,
+            desired_gap=self.desired_gap(
                 ego_vehicle=old_following,
                 front_vehicle=self,
-                desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=self)[1]
-            )
-            old_following_pred_a = self.acceleration(
+            )[1],
+        )
+        old_following_pred_a = self.acceleration(
+            ego_vehicle=old_following,
+            front_vehicle=old_preceding,
+            desired_gap=self.desired_gap(
                 ego_vehicle=old_following,
                 front_vehicle=old_preceding,
-                desired_gap=self.desired_gap(ego_vehicle=old_following, front_vehicle=old_preceding)[1]
+            )[1],
+        )
+        jerk = (
+            self_pred_a
+            - self_a
+            + self.POLITENESS
+            * (
+                new_following_pred_a
+                - new_following_a
+                + old_following_pred_a
+                - old_following_a
             )
-            jerk = (
-                self_pred_a
-                - self_a
-                + self.POLITENESS
-                * (
-                    new_following_pred_a
-                    - new_following_a
-                    + old_following_pred_a
-                    - old_following_a
-                )
-            )
-            if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
-                return False
+        )
+        if jerk < self.LANE_CHANGE_MIN_ACC_GAIN:
+            return False
 
-        # All clear, let's go!
         return True
-
     def acceleration(
         self,
         ego_vehicle: Vehicle,

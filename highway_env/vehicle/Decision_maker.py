@@ -1624,52 +1624,79 @@ class RULE_MAKER(COALITION_GAME_MAKER):
         return False, env_state
 
     def lc_condition_check(self, ego_v, lane_index) -> bool:
-        """
-        Set three conditions to check lane-change safety
-            Condition 1: safe distance
-            Condition 2: new following car minimum acceleration
-            Condition 3: ego car minimum acceleration
-        """
+        """Check lane-change safety on the target lane's Frenet s axis."""
+        # === FRENET RULE SAFETY V1 ===
         LANE_CHANGE_MAX_BRAKING_IMPOSED = 3.0
         ACC_MAX = 6.0
         TTC_MIN = 3.0
 
-        new_preceding, new_following = self.env.road.neighbour_vehicles(ego_v, lane_index)
+        new_preceding, new_following = (
+            self.env.road.neighbour_vehicles(
+                ego_v,
+                lane_index,
+            )
+        )
 
-        # Is the distance unsafe?
         if new_preceding is not None:
-            ttc_new_preceding = utils.ttc(new_preceding, ego_v)
-            if (new_preceding.position[0] - ego_v.position[0] <= 1.5 * ego_v.LENGTH
-                    or ttc_new_preceding <= TTC_MIN):
-                return False
-        if new_following is not None:
-            ttc_new_following = utils.ttc(ego_v, new_following)
-            if (ego_v.position[0] - new_following.position[0] <= 1.5 * ego_v.LENGTH
-                    or ttc_new_following <= TTC_MIN):
+            front_gap = self.env.road.longitudinal_gap(
+                front_vehicle=new_preceding,
+                rear_vehicle=ego_v,
+                lane_index=lane_index,
+            )
+            front_ttc = self.env.road.longitudinal_ttc(
+                front_vehicle=new_preceding,
+                rear_vehicle=ego_v,
+                lane_index=lane_index,
+            )
+            if (
+                front_gap <= 1.5 * ego_v.LENGTH
+                or front_ttc <= TTC_MIN
+            ):
                 return False
 
-        # Is the maneuver unsafe for the new following vehicle?
+        if new_following is not None:
+            rear_gap = self.env.road.longitudinal_gap(
+                front_vehicle=ego_v,
+                rear_vehicle=new_following,
+                lane_index=lane_index,
+            )
+            rear_ttc = self.env.road.longitudinal_ttc(
+                front_vehicle=ego_v,
+                rear_vehicle=new_following,
+                lane_index=lane_index,
+            )
+            if (
+                rear_gap <= 1.5 * ego_v.LENGTH
+                or rear_ttc <= TTC_MIN
+            ):
+                return False
+
         new_following_pred_a = ego_v.acceleration(
             ego_vehicle=new_following,
             front_vehicle=ego_v,
-            desired_gap=ego_v.desired_gap(ego_vehicle=new_following, front_vehicle=ego_v)[1]
+            desired_gap=ego_v.desired_gap(
+                ego_vehicle=new_following,
+                front_vehicle=ego_v,
+            )[1],
         )
-        if new_following_pred_a < -LANE_CHANGE_MAX_BRAKING_IMPOSED:
-            # if new_following_pred_a < -ACC_MAX:
+        if (
+            new_following_pred_a
+            < -LANE_CHANGE_MAX_BRAKING_IMPOSED
+        ):
             return False
 
-        # Is the maneuver unsafe for the ego vehicle?
         self_pred_a = ego_v.acceleration(
             ego_vehicle=ego_v,
             front_vehicle=new_preceding,
-            desired_gap=ego_v.desired_gap(ego_vehicle=ego_v, front_vehicle=new_preceding)[1]
+            desired_gap=ego_v.desired_gap(
+                ego_vehicle=ego_v,
+                front_vehicle=new_preceding,
+            )[1],
         )
-        # if self_pred_a < -self.LANE_CHANGE_MAX_BRAKING_IMPOSED:
         if self_pred_a < -ACC_MAX:
             return False
 
         return True
-
     def lane_change_safety_check(self, index, lane_index) -> bool:
         """
         Check if lane change is safe
