@@ -22,6 +22,8 @@ class StraightLaneChangeEnv(BaseScenarioEnv):
                 "platoon_longitudinal": [170.0, 155.0, 140.0],
             }
         )
+        # SIMPLE RANDOM TRAFFIC V1: fixed leader spawn region.
+        config["traffic_randomization"]["leader_spawn_s_range"] = [150.0, 190.0]
         config["scenario"] = {
             "name": cls.SCENARIO_NAME,
             "maneuver": cls.MANEUVER,

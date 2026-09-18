@@ -173,6 +173,38 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                 # Phase-1 deterministic platoon. Randomized state ranges are
                 # deliberately deferred to the next implementation step.
                 "platoon_longitudinal": [150.0, 135.0, 120.0],
+                # === SIMPLE RANDOM TRAFFIC V1 START ===
+                "traffic_randomization": {
+                    "enabled": True,
+
+                    # Each concrete scenario overrides this interval.
+                    "leader_spawn_s_range": [120.0, 160.0],
+
+                    # Random platoon initial speed.
+                    "leader_speed_range": [22.0, 26.0],
+
+                    # Followers are placed behind the sampled leader.
+                    "platoon_spacing": 15.0,
+
+                    # Fixed number of background vehicles.
+                    "background_vehicle_count": 8,
+
+                    # Background longitudinal position relative to leader_s.
+                    "background_s_offset_range": [-60.0, 100.0],
+
+                    # Background initial speed relative to leader speed.
+                    "background_speed_delta_range": [-4.0, 4.0],
+
+                    # Minimal spawn constraints.
+                    "background_min_speed": 15.0,
+                    "min_spawn_gap": 15.0,
+                    "road_edge_margin": 5.0,
+                    "max_spawn_attempts": 200,
+
+                    # V1 randomizes initial traffic only.
+                    "randomize_background_behavior": False,
+                },
+                # === SIMPLE RANDOM TRAFFIC V1 END ===
                 "scenario": {
                     "name": cls.SCENARIO_NAME,
                     "maneuver": cls.MANEUVER,
@@ -208,20 +240,63 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         lane_index = self._initial_lane_index()
         lane = self.road.network.get_lane(lane_index)
 
-        longitudinal = list(self.config["platoon_longitudinal"])
-        speeds = list(self.config["initial_controlled_vehicle_speed"])
         num_vehicles = int(self.config["controlled_vehicles"])
+        traffic_cfg = self.config.get("traffic_randomization", {})
 
-        if len(longitudinal) != num_vehicles:
-            raise ValueError(
-                "platoon_longitudinal length must equal controlled_vehicles: "
-                f"{len(longitudinal)} != {num_vehicles}"
+        if traffic_cfg.get("enabled", False):
+            leader_s_min, leader_s_max = traffic_cfg["leader_spawn_s_range"]
+            leader_v_min, leader_v_max = traffic_cfg["leader_speed_range"]
+            spacing = float(traffic_cfg["platoon_spacing"])
+
+            leader_s = float(
+                self.np_random.uniform(
+                    float(leader_s_min),
+                    float(leader_s_max),
+                )
             )
-        if len(speeds) != num_vehicles:
-            raise ValueError(
-                "initial_controlled_vehicle_speed length must equal controlled_vehicles: "
-                f"{len(speeds)} != {num_vehicles}"
+            leader_speed = float(
+                self.np_random.uniform(
+                    float(leader_v_min),
+                    float(leader_v_max),
+                )
             )
+
+            longitudinal = [
+                leader_s - vehicle_index * spacing
+                for vehicle_index in range(num_vehicles)
+            ]
+
+            # Start the platoon in a stable state.
+            speeds = [leader_speed] * num_vehicles
+
+        else:
+            longitudinal = list(self.config["platoon_longitudinal"])
+            speeds = list(self.config["initial_controlled_vehicle_speed"])
+
+            if len(longitudinal) != num_vehicles:
+                raise ValueError(
+                    "platoon_longitudinal length must equal controlled_vehicles: "
+                    f"{len(longitudinal)} != {num_vehicles}"
+                )
+
+            if len(speeds) != num_vehicles:
+                raise ValueError(
+                    "initial_controlled_vehicle_speed length must equal "
+                    "controlled_vehicles: "
+                    f"{len(speeds)} != {num_vehicles}"
+                )
+
+        # Fail early if the sampled platoon would leave the initial lane.
+        for s in longitudinal:
+            if s < 0.0 or s > float(lane.length):
+                raise ValueError(
+                    f"controlled platoon spawn s={s:.3f} is outside "
+                    f"initial lane length={float(lane.length):.3f}"
+                )
+
+        # Stored for local background-traffic generation.
+        self._platoon_leader_s = float(longitudinal[0])
+        self._platoon_leader_speed = float(speeds[0])
 
         self.controlled_vehicles = []
         destination = self._route_destination()
@@ -245,13 +320,168 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         return None
 
     def _create_background_traffic(self) -> None:
-        """Phase-1 placeholder.
+        """Spawn a fixed number of simple random background vehicles.
 
-        Background traffic is intentionally empty here. The next step will
-        implement constrained traffic-condition sampling after the platoon has
-        been created.
+        Background vehicles are sampled around the current platoon leader:
+            s_bg = s_leader + Uniform(offset_min, offset_max)
+            v_bg = v_leader + Uniform(delta_v_min, delta_v_max)
+
+        A lane is sampled uniformly from all side lanes of the initial road
+        segment. Only same-lane longitudinal spawn distance is checked.
         """
+        traffic_cfg = self.config.get("traffic_randomization", {})
+        self.background_vehicles = []
+
+        if not traffic_cfg.get("enabled", False):
+            return None
+
+        vehicle_count = int(traffic_cfg["background_vehicle_count"])
+        if vehicle_count <= 0:
+            return None
+
+        lane_indices = list(
+            self.road.network.all_side_lanes(
+                self._initial_lane_index()
+            )
+        )
+        if not lane_indices:
+            lane_indices = [self._initial_lane_index()]
+
+        offset_min, offset_max = traffic_cfg[
+            "background_s_offset_range"
+        ]
+        speed_delta_min, speed_delta_max = traffic_cfg[
+            "background_speed_delta_range"
+        ]
+
+        min_speed = float(traffic_cfg["background_min_speed"])
+        min_gap = float(traffic_cfg["min_spawn_gap"])
+        edge_margin = float(traffic_cfg["road_edge_margin"])
+        max_attempts = int(traffic_cfg["max_spawn_attempts"])
+        randomize_behavior = bool(
+            traffic_cfg.get(
+                "randomize_background_behavior",
+                False,
+            )
+        )
+
+        leader_s = float(self._platoon_leader_s)
+        leader_speed = float(self._platoon_leader_speed)
+
+        for background_index in range(vehicle_count):
+            spawned = False
+
+            for _ in range(max_attempts):
+                lane_index = lane_indices[
+                    int(self.np_random.integers(0, len(lane_indices)))
+                ]
+                lane = self.road.network.get_lane(lane_index)
+
+                longitudinal = (
+                    leader_s
+                    + float(
+                        self.np_random.uniform(
+                            float(offset_min),
+                            float(offset_max),
+                        )
+                    )
+                )
+
+                if longitudinal < edge_margin:
+                    continue
+
+                if longitudinal > float(lane.length) - edge_margin:
+                    continue
+
+                if not self._background_spawn_position_is_free(
+                    lane_index=lane_index,
+                    longitudinal=longitudinal,
+                    min_gap=min_gap,
+                ):
+                    continue
+
+                speed = (
+                    leader_speed
+                    + float(
+                        self.np_random.uniform(
+                            float(speed_delta_min),
+                            float(speed_delta_max),
+                        )
+                    )
+                )
+
+                lane_speed_limit = getattr(
+                    lane,
+                    "speed_limit",
+                    None,
+                )
+                if lane_speed_limit is not None:
+                    speed = min(
+                        speed,
+                        float(lane_speed_limit),
+                    )
+
+                speed = max(
+                    speed,
+                    min_speed,
+                )
+
+                vehicle = self._spawn_background_vehicle(
+                    lane_index=lane_index,
+                    longitudinal=longitudinal,
+                    speed=float(speed),
+                    target_speed=float(speed),
+                    randomize_behavior=randomize_behavior,
+                )
+
+                self.background_vehicles.append(vehicle)
+                spawned = True
+                break
+
+            if not spawned:
+                raise RuntimeError(
+                    "Failed to spawn the requested fixed number of "
+                    "background vehicles. "
+                    f"placed={background_index}, requested={vehicle_count}. "
+                    "Increase background_s_offset_range or "
+                    "max_spawn_attempts, or reduce min_spawn_gap."
+                )
+
         return None
+
+    def _background_spawn_position_is_free(
+        self,
+        lane_index,
+        longitudinal: float,
+        min_gap: float,
+    ) -> bool:
+        """Check only same-lane longitudinal spawn separation."""
+        lane = self.road.network.get_lane(lane_index)
+
+        for vehicle in self.road.vehicles:
+            existing_lane_index = getattr(
+                vehicle,
+                "lane_index",
+                None,
+            )
+
+            if existing_lane_index is None:
+                continue
+
+            if tuple(existing_lane_index) != tuple(lane_index):
+                continue
+
+            existing_s, _ = lane.local_coordinates(
+                vehicle.position
+            )
+
+            if (
+                abs(float(existing_s) - float(longitudinal))
+                < float(min_gap)
+            ):
+                return False
+
+        return True
 
     def _after_scene_created(self) -> None:
         """Optional subclass hook executed after all vehicles are created."""
