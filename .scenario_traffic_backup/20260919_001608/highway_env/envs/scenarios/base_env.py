@@ -173,37 +173,38 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                 # Phase-1 deterministic platoon. Randomized state ranges are
                 # deliberately deferred to the next implementation step.
                 "platoon_longitudinal": [150.0, 135.0, 120.0],
-                # === LOCAL RANDOM TRAFFIC V2 START ===
+                # === SIMPLE RANDOM TRAFFIC V1 START ===
                 "traffic_randomization": {
                     "enabled": True,
 
-                    # Overridden by each concrete scenario.
+                    # Each concrete scenario overrides this interval.
                     "leader_spawn_s_range": [120.0, 160.0],
 
                     # Random platoon initial speed.
                     "leader_speed_range": [22.0, 26.0],
 
-                    # Followers keep a fixed distance behind the sampled leader.
+                    # Followers are placed behind the sampled leader.
                     "platoon_spacing": 15.0,
 
-                    # Fixed-size local traffic around the platoon leader.
+                    # Fixed number of background vehicles.
                     "background_vehicle_count": 8,
-                    "background_rear_range": 100.0,
-                    "background_front_range": 100.0,
 
-                    # Background speed is sampled relative to leader speed.
+                    # Background longitudinal position relative to leader_s.
+                    "background_s_offset_range": [-60.0, 100.0],
+
+                    # Background initial speed relative to leader speed.
                     "background_speed_delta_range": [-4.0, 4.0],
-                    "background_min_speed": 15.0,
 
-                    # Basic spawn constraints.
+                    # Minimal spawn constraints.
+                    "background_min_speed": 15.0,
                     "min_spawn_gap": 15.0,
                     "road_edge_margin": 5.0,
                     "max_spawn_attempts": 200,
 
-                    # V2 randomizes initial traffic states only.
+                    # V1 randomizes initial traffic only.
                     "randomize_background_behavior": False,
                 },
-                # === LOCAL RANDOM TRAFFIC V2 END ===
+                # === SIMPLE RANDOM TRAFFIC V1 END ===
                 "scenario": {
                     "name": cls.SCENARIO_NAME,
                     "maneuver": cls.MANEUVER,
@@ -319,19 +320,14 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         return None
 
     def _create_background_traffic(self) -> None:
-        """Spawn fixed-size local random traffic around the platoon leader.
+        """Spawn a fixed number of simple random background vehicles.
 
-        The leader position defines one local longitudinal window:
+        Background vehicles are sampled around the current platoon leader:
+            s_bg = s_leader + Uniform(offset_min, offset_max)
+            v_bg = v_leader + Uniform(delta_v_min, delta_v_max)
 
-            [leader_s - rear_range, leader_s + front_range]
-
-        For every background vehicle, one lane is sampled uniformly from all
-        lanes belonging to the leader's current road segment, followed by one
-        longitudinal position sampled uniformly inside that local window.
-
-        This intentionally keeps the traffic generator simple. It does not use
-        traffic-density classes, semantic cut-in templates, or behavior-style
-        randomization.
+        A lane is sampled uniformly from all side lanes of the initial road
+        segment. Only same-lane longitudinal spawn distance is checked.
         """
         traffic_cfg = self.config.get("traffic_randomization", {})
         self.background_vehicles = []
@@ -343,28 +339,30 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         if vehicle_count <= 0:
             return None
 
-        lane_indices = self._background_spawn_lane_indices()
+        lane_indices = list(
+            self.road.network.all_side_lanes(
+                self._initial_lane_index()
+            )
+        )
         if not lane_indices:
-            raise RuntimeError(
-                "No candidate lane is available for background traffic."
-            )
+            lane_indices = [self._initial_lane_index()]
 
-        rear_range = float(traffic_cfg["background_rear_range"])
-        front_range = float(traffic_cfg["background_front_range"])
-        if rear_range < 0.0 or front_range < 0.0:
-            raise ValueError(
-                "background_rear_range and background_front_range must be >= 0"
-            )
-
+        offset_min, offset_max = traffic_cfg[
+            "background_s_offset_range"
+        ]
         speed_delta_min, speed_delta_max = traffic_cfg[
             "background_speed_delta_range"
         ]
+
         min_speed = float(traffic_cfg["background_min_speed"])
         min_gap = float(traffic_cfg["min_spawn_gap"])
         edge_margin = float(traffic_cfg["road_edge_margin"])
         max_attempts = int(traffic_cfg["max_spawn_attempts"])
         randomize_behavior = bool(
-            traffic_cfg.get("randomize_background_behavior", False)
+            traffic_cfg.get(
+                "randomize_background_behavior",
+                False,
+            )
         )
 
         leader_s = float(self._platoon_leader_s)
@@ -379,23 +377,21 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                 ]
                 lane = self.road.network.get_lane(lane_index)
 
-                # The same leader-centred window is used on every candidate
-                # lane. Clip it to this lane's valid longitudinal interval.
-                spawn_s_min = max(
-                    edge_margin,
-                    leader_s - rear_range,
-                )
-                spawn_s_max = min(
-                    float(lane.length) - edge_margin,
-                    leader_s + front_range,
+                longitudinal = (
+                    leader_s
+                    + float(
+                        self.np_random.uniform(
+                            float(offset_min),
+                            float(offset_max),
+                        )
+                    )
                 )
 
-                if spawn_s_max <= spawn_s_min:
+                if longitudinal < edge_margin:
                     continue
 
-                longitudinal = float(
-                    self.np_random.uniform(spawn_s_min, spawn_s_max)
-                )
+                if longitudinal > float(lane.length) - edge_margin:
+                    continue
 
                 if not self._background_spawn_position_is_free(
                     lane_index=lane_index,
@@ -414,10 +410,21 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     )
                 )
 
-                lane_speed_limit = getattr(lane, "speed_limit", None)
+                lane_speed_limit = getattr(
+                    lane,
+                    "speed_limit",
+                    None,
+                )
                 if lane_speed_limit is not None:
-                    speed = min(speed, float(lane_speed_limit))
-                speed = max(speed, min_speed)
+                    speed = min(
+                        speed,
+                        float(lane_speed_limit),
+                    )
+
+                speed = max(
+                    speed,
+                    min_speed,
+                )
 
                 vehicle = self._spawn_background_vehicle(
                     lane_index=lane_index,
@@ -426,6 +433,7 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     target_speed=float(speed),
                     randomize_behavior=randomize_behavior,
                 )
+
                 self.background_vehicles.append(vehicle)
                 spawned = True
                 break
@@ -435,40 +443,11 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     "Failed to spawn the requested fixed number of "
                     "background vehicles. "
                     f"placed={background_index}, requested={vehicle_count}. "
-                    "Increase the local front/rear range or max_spawn_attempts, "
-                    "or reduce min_spawn_gap."
+                    "Increase background_s_offset_range or "
+                    "max_spawn_attempts, or reduce min_spawn_gap."
                 )
 
         return None
-
-    def _background_spawn_lane_indices(self):
-        """Return every lane on the platoon leader's initial road segment.
-
-        In the current scenarios this gives:
-        - straight lane change: 3 lanes
-        - curved lane change: 3 lanes
-        - merge in: 4 lanes on b -> c
-        - merge out: 4 lanes on b -> c
-
-        The current leader spawn ranges plus the local traffic window remain
-        inside this segment, so no cross-segment coordinate conversion is
-        needed here.
-        """
-        initial_lane_index = self._initial_lane_index()
-        road_from, road_to, _ = initial_lane_index
-
-        try:
-            lane_count = len(self.road.network.graph[road_from][road_to])
-        except KeyError as exc:
-            raise RuntimeError(
-                "Initial road segment is missing from the road network: "
-                f"{initial_lane_index[:2]}"
-            ) from exc
-
-        return [
-            (road_from, road_to, lane_id)
-            for lane_id in range(lane_count)
-        ]
 
     def _background_spawn_position_is_free(
         self,
@@ -476,19 +455,30 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         longitudinal: float,
         min_gap: float,
     ) -> bool:
-        """Check same-lane longitudinal separation before spawning."""
+        """Check only same-lane longitudinal spawn separation."""
         lane = self.road.network.get_lane(lane_index)
 
         for vehicle in self.road.vehicles:
-            existing_lane_index = getattr(vehicle, "lane_index", None)
+            existing_lane_index = getattr(
+                vehicle,
+                "lane_index",
+                None,
+            )
+
             if existing_lane_index is None:
                 continue
 
             if tuple(existing_lane_index) != tuple(lane_index):
                 continue
 
-            existing_s, _ = lane.local_coordinates(vehicle.position)
-            if abs(float(existing_s) - float(longitudinal)) < float(min_gap):
+            existing_s, _ = lane.local_coordinates(
+                vehicle.position
+            )
+
+            if (
+                abs(float(existing_s) - float(longitudinal))
+                < float(min_gap)
+            ):
                 return False
 
         return True

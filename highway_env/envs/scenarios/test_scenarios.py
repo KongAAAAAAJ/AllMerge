@@ -300,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario",
         choices=["all", *SCENARIOS.keys()],
-        default="curved",
+        default="all",
         help="scenario to run; default: all",
     )
     parser.add_argument(
@@ -319,7 +319,7 @@ def parse_args() -> argparse.Namespace:
         "--group-action",
         type=int,
         choices=[0, 1, 2, 3],
-        default=3,
+        default=0,
         help=(
             "platoon group action sent to env.step(); default: 3. "
             "Use 3 first for stable environment smoke testing."

@@ -24,7 +24,7 @@ class MergeOutEnv(BaseScenarioEnv):
                 "duration": 5.0,
             }
         )
-        # SIMPLE RANDOM TRAFFIC V1: fixed leader spawn region.
+        # LOCAL RANDOM TRAFFIC V2: fixed leader spawn region.
         config["traffic_randomization"]["leader_spawn_s_range"] = [110.0, 140.0]
         config["scenario"] = {
             "name": cls.SCENARIO_NAME,
