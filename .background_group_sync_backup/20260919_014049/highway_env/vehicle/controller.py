@@ -2046,14 +2046,6 @@ class FOLLOWVehicle(ControlledVehicle):
         current_lane_index = self.lane_index
         committed_target = self.target_lane_index
 
-        # === GROUP LANE CHANGE SYNC V1 START ===
-        # In grouped motion, ref_lane_index from the leader is the authoritative
-        # lateral target. This propagates both commitment and emergency abort.
-        if group is not None and ref_lane_index is not None:
-            committed_target = ref_lane_index
-            self.target_lane_index = ref_lane_index
-        # === GROUP LANE CHANGE SYNC V1 END ===
-
         # === LANE CHANGE COMMITMENT V1: follower ===
         if (
             committed_target is not None

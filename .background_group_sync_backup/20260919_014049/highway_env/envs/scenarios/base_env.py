@@ -209,12 +209,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     "maneuver_corridor_front_margin": 30.0,
                     # === MANEUVER CORRIDOR V1 END ===
                     # V2 randomizes initial traffic states only.
-                    # === BACKGROUND LANE CHANGE POLICY V1 START ===
-                    # Keep longitudinal IDM behavior but disable autonomous MOBIL lane changes
-                    # during scenario maneuver rollouts.
-                    "background_lane_change_enabled": False,
-                    # === BACKGROUND LANE CHANGE POLICY V1 END ===
-
                     "randomize_background_behavior": False,
                 },
                 # === LOCAL RANDOM TRAFFIC V2 END ===
@@ -637,16 +631,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
             lane.heading_at(s),
             float(speed),
         )
-        # === BACKGROUND LANE CHANGE POLICY V1 ===
-        background_lane_change_enabled = bool(
-            self.config.get("traffic_randomization", {}).get(
-                "background_lane_change_enabled",
-                False,
-            )
-        )
-        if hasattr(vehicle, "enable_lane_change"):
-            vehicle.enable_lane_change = background_lane_change_enabled
-
         if target_speed is not None and hasattr(vehicle, "target_speed"):
             vehicle.target_speed = float(target_speed)
         if randomize_behavior and hasattr(vehicle, "randomize_behavior"):
