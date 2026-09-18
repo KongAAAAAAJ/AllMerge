@@ -235,53 +235,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         """Optional road-network destination for route-aware scenarios."""
         return None
 
-    def scenario_target_lane_index(self, vehicle) -> Optional[LaneIndex]:
-        """Resolve the scenario lane goal on the maneuver road segment.
-
-        ``scenario.target_lane_id`` stores only the lane id because the concrete
-        graph edge is scenario/runtime dependent. This method converts it to a
-        full highway-env ``LaneIndex``:
-
-            (road_from, road_to, target_lane_id)
-
-        The scenario target is active only while the vehicle is on the initial
-        maneuver edge. After merge-in / merge-out leaves that edge, normal
-        route following takes over.
-
-        Returning ``None`` means that this environment has no usable scenario
-        lane goal at the vehicle's current location.
-        """
-        # SCENARIO TARGET LANE V1: resolve configured target.
-        scenario_cfg = self.config.get("scenario", {})
-        target_lane_id = scenario_cfg.get("target_lane_id")
-        current_lane_index = getattr(vehicle, "lane_index", None)
-
-        if target_lane_id is None or current_lane_index is None:
-            return None
-
-        maneuver_edge = tuple(self._initial_lane_index()[:2])
-        current_edge = tuple(current_lane_index[:2])
-
-        # The configured target_lane_id describes the scenario maneuver edge,
-        # not arbitrary downstream route segments.
-        if current_edge != maneuver_edge:
-            return None
-
-        candidate = (
-            current_lane_index[0],
-            current_lane_index[1],
-            int(target_lane_id),
-        )
-
-        # Fail closed if a future scenario config points to a non-existing lane.
-        try:
-            self.road.network.get_lane(candidate)
-        except (KeyError, IndexError):
-            return None
-
-        return candidate
-
-
     def _create_controlled_platoon(self) -> None:
         lane_index = self._initial_lane_index()
         lane = self.road.network.get_lane(lane_index)

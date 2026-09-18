@@ -1462,18 +1462,6 @@ class RULE_MAKER(COALITION_GAME_MAKER):
             2: [0, 1, 2],
             3: [[0, 1, 2]],
         }
-
-    def _scenario_target_lane_index(self, vehicle):
-        """Read an optional scenario lane goal without coupling Rule to scenarios.
-
-        Legacy environments do not provide ``scenario_target_lane_index`` and
-        therefore keep the original MOBIL autonomous lane-selection behavior.
-        """
-        resolver = getattr(self.env, "scenario_target_lane_index", None)
-        if not callable(resolver):
-            return None
-        return resolver(vehicle)
-
     def group_action_to_vehicle_action(self, action) -> dict:
 
         """
@@ -1719,13 +1707,8 @@ class RULE_MAKER(COALITION_GAME_MAKER):
             )
             bind_longitudinal_source(leader_v, first_v)
 
-            # SCENARIO TARGET LANE V1: scenario decides where; MOBIL decides when.
-            scenario_target_lane_index = self._scenario_target_lane_index(first_v)
-            [lead_action, lead_target_lane_index] = leader_v.change_lane_policy(
-                controlled_vehicle=first_v,
-                group=group,
-                target_lane_index=scenario_target_lane_index,
-            )
+            # MOBIL计算leader车横向动作：
+            [lead_action, lead_target_lane_index] = leader_v.change_lane_policy(first_v, group)
             first_v.timer = leader_v.timer
             target_actions[front_id] = lead_action
             target_lane_index[front_id] = lead_target_lane_index
@@ -1820,12 +1803,9 @@ class RULE_MAKER(COALITION_GAME_MAKER):
         bind_longitudinal_source(front_leader_v, front_vehicle)
 
         if merge_num == 1:
-            # SCENARIO TARGET LANE V1: keep scenario intent during regrouping.
-            scenario_target_lane_index = self._scenario_target_lane_index(front_vehicle)
+            # 横向规划
             [front_leader_action, front_leader_target_lane_index] = front_leader_v.change_lane_policy(
-                controlled_vehicle=front_vehicle,
-                group=group,
-                target_lane_index=scenario_target_lane_index,
+                front_vehicle, group
             )
             front_vehicle.timer = front_leader_v.timer
             target_actions[front_vehicle_idx] = front_leader_action
@@ -1864,12 +1844,9 @@ class RULE_MAKER(COALITION_GAME_MAKER):
                 front_speed_control_type = "slightly slow down"
 
         # TODO: Leader planning
-        # SCENARIO TARGET LANE V1: front leader carries the scenario lane goal.
-        scenario_target_lane_index = self._scenario_target_lane_index(front_vehicle)
+        # 横向规划
         [front_leader_action, front_leader_target_lane_index] = front_leader_v.change_lane_policy(
-            controlled_vehicle=front_vehicle,
-            group=group,
-            target_lane_index=scenario_target_lane_index,
+            front_vehicle, group
         )
         front_vehicle.timer = front_leader_v.timer
         target_actions[front_vehicle_idx] = front_leader_action

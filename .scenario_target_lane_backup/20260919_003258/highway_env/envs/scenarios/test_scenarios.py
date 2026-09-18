@@ -90,25 +90,6 @@ def _positions(env: BaseScenarioEnv) -> List[List[float]]:
 def _speeds(env: BaseScenarioEnv) -> List[float]:
     return [round(float(v.speed), 3) for v in env.controlled_vehicles]
 
-def _rule_target_lane_indices(env: BaseScenarioEnv) -> List[Optional[tuple]]:
-    """Current target_lane_index stored on the controlled vehicles."""
-    result: List[Optional[tuple]] = []
-    for vehicle in env.controlled_vehicles:
-        lane_index = getattr(vehicle, "target_lane_index", None)
-        result.append(tuple(lane_index) if lane_index is not None else None)
-    return result
-
-
-def _scenario_target_lane_indices(env: BaseScenarioEnv) -> List[Optional[tuple]]:
-    """Resolved scenario targets before the Rule/MOBIL safety gate."""
-    # SCENARIO TARGET LANE V1: diagnostics.
-    result: List[Optional[tuple]] = []
-    for vehicle in env.controlled_vehicles:
-        target = env.scenario_target_lane_index(vehicle)
-        result.append(tuple(target) if target is not None else None)
-    return result
-
-
 
 def _check_reset_state(env: BaseScenarioEnv) -> None:
     """Fail early on obvious scene-construction errors."""
@@ -223,10 +204,6 @@ def run_one_scenario(
         print(f"controlled={len(env.controlled_vehicles)}")
         print(f"road_vehicles={len(env.road.vehicles)}")
         print(f"lane_index={_lane_indices(env)}")
-        print(
-            "scenario_target_lane="
-            f"{_scenario_target_lane_indices(env)}"
-        )
         print(f"position={_positions(env)}")
         print(f"speed={_speeds(env)}")
         print(
@@ -271,7 +248,6 @@ def run_one_scenario(
                     f"truncated={truncated} "
                     f"task_success={info.get('task_success')} "
                     f"lanes={_lane_indices(env)} "
-                    f"rule_targets={_rule_target_lane_indices(env)} "
                     f"speed={_speeds(env)}"
                 )
 
@@ -343,7 +319,7 @@ def parse_args() -> argparse.Namespace:
         "--group-action",
         type=int,
         choices=[0, 1, 2, 3],
-        default=3,
+        default=0,
         help=(
             "platoon group action sent to env.step(); default: 3. "
             "Use 3 first for stable environment smoke testing."
