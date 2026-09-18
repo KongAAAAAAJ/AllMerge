@@ -200,14 +200,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     "road_edge_margin": 5.0,
                     "max_spawn_attempts": 200,
 
-
-                    # === MANEUVER CORRIDOR V1 START ===
-                    # Preserve one executable initial gap only on the scenario
-                    # target lane. Other lanes and positions remain random.
-                    "maneuver_corridor_enabled": True,
-                    "maneuver_corridor_rear_margin": 30.0,
-                    "maneuver_corridor_front_margin": 30.0,
-                    # === MANEUVER CORRIDOR V1 END ===
                     # V2 randomizes initial traffic states only.
                     "randomize_background_behavior": False,
                 },
@@ -425,52 +417,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         leader_s = float(self._platoon_leader_s)
         leader_speed = float(self._platoon_leader_speed)
 
-
-        # === MANEUVER CORRIDOR V1: target-lane Frenet geometry ===
-        corridor_target_lane_index = None
-        corridor_s_min = None
-        corridor_s_max = None
-        if bool(traffic_cfg.get("maneuver_corridor_enabled", True)):
-            rear_margin = float(
-                traffic_cfg.get("maneuver_corridor_rear_margin", 30.0)
-            )
-            front_margin = float(
-                traffic_cfg.get("maneuver_corridor_front_margin", 30.0)
-            )
-            if rear_margin < 0.0 or front_margin < 0.0:
-                raise ValueError("maneuver corridor margins must be >= 0")
-
-            target_lane_id = self.config.get("scenario", {}).get(
-                "target_lane_id"
-            )
-            if target_lane_id is not None and self.controlled_vehicles:
-                road_from, road_to, _ = self._initial_lane_index()
-                candidate_target = (
-                    road_from,
-                    road_to,
-                    int(target_lane_id),
-                )
-                try:
-                    target_lane = self.road.network.get_lane(candidate_target)
-                except (KeyError, IndexError):
-                    target_lane = None
-
-                if target_lane is not None:
-                    leader_target_s, _ = target_lane.local_coordinates(
-                        self.controlled_vehicles[0].position
-                    )
-                    tail_target_s, _ = target_lane.local_coordinates(
-                        self.controlled_vehicles[-1].position
-                    )
-                    corridor_target_lane_index = candidate_target
-                    corridor_s_min = (
-                        min(float(leader_target_s), float(tail_target_s))
-                        - rear_margin
-                    )
-                    corridor_s_max = (
-                        max(float(leader_target_s), float(tail_target_s))
-                        + front_margin
-                    )
         for background_index in range(vehicle_count):
             spawned = False
 
@@ -498,13 +444,6 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                     self.np_random.uniform(spawn_s_min, spawn_s_max)
                 )
 
-                # === MANEUVER CORRIDOR V1: target lane only ===
-                if (
-                    corridor_target_lane_index is not None
-                    and tuple(lane_index) == tuple(corridor_target_lane_index)
-                    and corridor_s_min <= longitudinal <= corridor_s_max
-                ):
-                    continue
                 if not self._background_spawn_position_is_free(
                     lane_index=lane_index,
                     longitudinal=longitudinal,

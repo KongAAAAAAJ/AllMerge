@@ -918,15 +918,13 @@ class LEADVehicle(ControlledVehicle):
                     ego_vehicle=new_following,
                     front_vehicle=self,
                 )[1],
-                lane_index=lane_index,
             )
 
             old_preceding, old_following = self.road.neighbour_vehicles(
                 self
             )
 
-            # SCENARIO FORCED MOBIL V2: explicit scenario target bypasses route preference.
-            if not forced and self.route and self.route[0][2] is not None:
+            if self.route and self.route[0][2] is not None:
                 if np.sign(
                     lane_index[2] - self.target_lane_index[2]
                 ) != np.sign(
@@ -941,7 +939,6 @@ class LEADVehicle(ControlledVehicle):
                     ego_vehicle=self,
                     front_vehicle=new_preceding,
                 )[1],
-                lane_index=lane_index,
             )
             if self_pred_a < -self.ACC_MAX:
                 return False
@@ -1093,7 +1090,6 @@ class LEADVehicle(ControlledVehicle):
                     ego_vehicle=new_following,
                     front_vehicle=ego_vehicle,
                 )[1],
-                lane_index=lane_index,
             )
             if new_following_pred_a < -self.ACC_MAX:
                 return False
@@ -1104,8 +1100,7 @@ class LEADVehicle(ControlledVehicle):
                 "target_lane_index",
                 ego_vehicle.lane_index,
             )
-            # SCENARIO FORCED MOBIL V2: same rule for each group member.
-            if not forced and ego_route and ego_route[0][2] is not None:
+            if ego_route and ego_route[0][2] is not None:
                 if np.sign(
                     lane_index[2] - ego_target_lane_index[2]
                 ) != np.sign(
@@ -1120,7 +1115,6 @@ class LEADVehicle(ControlledVehicle):
                     ego_vehicle=ego_vehicle,
                     front_vehicle=new_preceding,
                 )[1],
-                lane_index=lane_index,
             )
             if ego_pred_a < -self.ACC_MAX:
                 return False
@@ -1169,7 +1163,6 @@ class LEADVehicle(ControlledVehicle):
         front_vehicle: Vehicle = None,
         desired_gap: float = None,
         rear_vehicle: Vehicle = None,
-        lane_index: LaneIndex = None,
     ) -> float:
         """
         Compute an acceleration command with the Intelligent Driver Model.
@@ -1189,14 +1182,9 @@ class LEADVehicle(ControlledVehicle):
         if not ego_vehicle or not isinstance(ego_vehicle, Vehicle):
             return 0
         ego_target_speed = getattr(ego_vehicle, "target_speed", 0)
-        evaluation_lane = (
-            self.road.network.get_lane(lane_index)
-            if lane_index is not None
-            else ego_vehicle.lane
-        )
-        if evaluation_lane and evaluation_lane.speed_limit is not None:
+        if ego_vehicle.lane and ego_vehicle.lane.speed_limit is not None:
             ego_target_speed = np.clip(
-                ego_target_speed, 0, evaluation_lane.speed_limit
+                ego_target_speed, 0, ego_vehicle.lane.speed_limit
             )
         acceleration = self.COMFORT_ACC_MAX * (
             1
@@ -1207,18 +1195,7 @@ class LEADVehicle(ControlledVehicle):
         )
 
         if front_vehicle:
-            # TARGET-LANE IDM GEOMETRY V1:
-            # MOBIL hypothetical acceleration is evaluated on the candidate
-            # lane Frenet s axis; ordinary longitudinal control is unchanged.
-            d = (
-                self.road.longitudinal_gap(
-                    front_vehicle=front_vehicle,
-                    rear_vehicle=ego_vehicle,
-                    lane_index=lane_index,
-                )
-                if lane_index is not None
-                else ego_vehicle.lane_distance_to(front_vehicle)
-            )
+            d = ego_vehicle.lane_distance_to(front_vehicle)
             if desired_gap is None:
                 acceleration -= self.COMFORT_ACC_MAX * np.power(
                     self.desired_gap(ego_vehicle, front_vehicle)[0] / utils.not_zero(d), 2
@@ -2140,7 +2117,6 @@ class FOLLOWVehicle(ControlledVehicle):
                 ego_vehicle=new_following,
                 front_vehicle=self,
             )[1],
-            lane_index=lane_index,
         )
 
         old_preceding, old_following = self.road.neighbour_vehicles(
@@ -2153,11 +2129,9 @@ class FOLLOWVehicle(ControlledVehicle):
                 ego_vehicle=self,
                 front_vehicle=new_preceding,
             )[1],
-            lane_index=lane_index,
         )
 
-        # SCENARIO FORCED MOBIL V2: explicit scenario target bypasses route preference.
-        if not forced and self.route and self.route[0][2] is not None:
+        if self.route and self.route[0][2] is not None:
             if np.sign(
                 lane_index[2] - self.target_lane_index[2]
             ) != np.sign(
@@ -2250,7 +2224,6 @@ class FOLLOWVehicle(ControlledVehicle):
         front_vehicle: Vehicle = None,
         desired_gap: float = None,
         rear_vehicle: Vehicle = None,
-        lane_index: LaneIndex = None,
     ) -> float:
         """
         Compute an acceleration command with the Intelligent Driver Model.
@@ -2270,14 +2243,9 @@ class FOLLOWVehicle(ControlledVehicle):
         if not ego_vehicle or not isinstance(ego_vehicle, Vehicle):
             return 0
         ego_target_speed = getattr(ego_vehicle, "target_speed", 0)
-        evaluation_lane = (
-            self.road.network.get_lane(lane_index)
-            if lane_index is not None
-            else ego_vehicle.lane
-        )
-        if evaluation_lane and evaluation_lane.speed_limit is not None:
+        if ego_vehicle.lane and ego_vehicle.lane.speed_limit is not None:
             ego_target_speed = np.clip(
-                ego_target_speed, 0, evaluation_lane.speed_limit
+                ego_target_speed, 0, ego_vehicle.lane.speed_limit
             )
         acceleration = self.COMFORT_ACC_MAX * (
             1
@@ -2288,18 +2256,7 @@ class FOLLOWVehicle(ControlledVehicle):
         )
 
         if front_vehicle:
-            # TARGET-LANE IDM GEOMETRY V1:
-            # MOBIL hypothetical acceleration is evaluated on the candidate
-            # lane Frenet s axis; ordinary longitudinal control is unchanged.
-            d = (
-                self.road.longitudinal_gap(
-                    front_vehicle=front_vehicle,
-                    rear_vehicle=ego_vehicle,
-                    lane_index=lane_index,
-                )
-                if lane_index is not None
-                else ego_vehicle.lane_distance_to(front_vehicle)
-            )
+            d = ego_vehicle.lane_distance_to(front_vehicle)
             if desired_gap is None:
                 acceleration -= self.COMFORT_ACC_MAX * np.power(
                     self.desired_gap(ego_vehicle, front_vehicle)[0] / utils.not_zero(d), 2
