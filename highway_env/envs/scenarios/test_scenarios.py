@@ -300,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario",
         choices=["all", *SCENARIOS.keys()],
-        default="all",
+        default="curved",
         help="scenario to run; default: all",
     )
     parser.add_argument(
