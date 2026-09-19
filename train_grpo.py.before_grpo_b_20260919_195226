@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# GRPO B PAIRED DELTA V1
-
 import argparse
 import csv
 from pathlib import Path
@@ -431,7 +429,7 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
@@ -440,24 +438,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
-    parser.add_argument(
-        "--advantage-source",
-        choices=("raw_reward", "paired_delta"),
-        default="raw_reward",
-        help=(
-            "GRPO credit source. raw_reward preserves Gate7 behavior; "
-            "paired_delta uses same-state/same-noise current-minus-frozen reward"
-        ),
-    )
-    parser.add_argument(
-        "--paired-delta-bootstrap-steps",
-        type=int,
-        default=1,
-        help=(
-            "raw-reward train steps used only to bootstrap paired_delta away "
-            "from the current==frozen zero-credit fixed point"
-        ),
-    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument(
@@ -543,16 +523,10 @@ def _build_trainer(args: argparse.Namespace):
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
-            advantage_source=args.advantage_source,
-            paired_delta_bootstrap_steps=args.paired_delta_bootstrap_steps,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
-    print(
-        f"[grpo] advantage_source={args.advantage_source} "
-        f"paired_delta_bootstrap_steps={args.paired_delta_bootstrap_steps}"
-    )
     return adapter, trainer, device
 
 
@@ -716,8 +690,6 @@ def main() -> int:
         raise SystemExit("--diagnostics-interval must be >= 0")
     if args.gradient_diagnostics_interval < 0:
         raise SystemExit("--gradient-diagnostics-interval must be >= 0")
-    if args.paired_delta_bootstrap_steps < 0:
-        raise SystemExit("--paired-delta-bootstrap-steps must be >= 0")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
