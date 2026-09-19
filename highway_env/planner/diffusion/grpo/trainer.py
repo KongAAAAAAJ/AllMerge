@@ -21,8 +21,6 @@ class GRPOConfig:
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
     update_epochs: int = 2
-    advantage_source: str = "raw_reward"
-    paired_delta_bootstrap_steps: int = 1
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
@@ -50,13 +48,6 @@ class GRPOTrainer:
         self.config = config or GRPOConfig()
         if self.config.update_epochs < 1:
             raise ValueError("update_epochs must be >= 1")
-        if self.config.advantage_source not in ("raw_reward", "paired_delta"):
-            raise ValueError(
-                "advantage_source must be 'raw_reward' or 'paired_delta'"
-            )
-        if self.config.paired_delta_bootstrap_steps < 0:
-            raise ValueError("paired_delta_bootstrap_steps must be >= 0")
-        self._train_step_count = 0
         self._configure_trainable_parameters()
         parameters = [p for p in self.model.parameters() if p.requires_grad]
         if not parameters:
@@ -99,24 +90,14 @@ class GRPOTrainer:
         self.reference_model.eval()
         self.reference_model.requires_grad_(False)
 
-    def _collect_with_credit(
+    def collect(
         self,
         features: Dict[str, torch.Tensor],
         *,
         context: Any = None,
         generator: torch.Generator | None = None,
-        advantage_source: str | None = None,
-    ):
-        """Collect current rollout and construct the requested GRPO credit signal."""
-        source = self.config.advantage_source if advantage_source is None else advantage_source
-        if source not in ("raw_reward", "paired_delta"):
-            raise ValueError(f"unknown advantage_source={source!r}")
-
-        paired_generator = (
-            self._clone_generator(generator)
-            if source == "paired_delta"
-            else None
-        )
+    ) -> tuple[DiffusionTrace, torch.Tensor, torch.Tensor]:
+        # Keep dropout disabled: diffusion transition log-prob must describe all policy stochasticity.
         self.model.eval()
         with torch.no_grad():
             trace = self.sampler.sample(features, generator=generator)
@@ -125,59 +106,11 @@ class GRPOTrainer:
                 features=features,
                 context=context,
             )
-
-            frozen_trace = None
-            frozen_rewards = None
-            delta_rewards = None
-            credit_rewards = rewards
-            if source == "paired_delta":
-                assert paired_generator is not None
-                self.reference_model.eval()
-                frozen_trace = self.reference_sampler.sample(
-                    features,
-                    generator=paired_generator,
-                )
-                frozen_rewards = self.reward_adapter(
-                    frozen_trace.candidates,
-                    features=features,
-                    context=context,
-                )
-                if rewards.shape != frozen_rewards.shape:
-                    raise ValueError(
-                        "paired current/frozen rewards must have identical shapes, got "
-                        f"{tuple(rewards.shape)} and {tuple(frozen_rewards.shape)}"
-                    )
-                delta_rewards = rewards - frozen_rewards
-                credit_rewards = delta_rewards
-
             advantages = group_relative_advantage(
-                credit_rewards,
+                rewards,
                 eps=self.config.advantage_eps,
                 valid_mask=features.get("mode_valid_mask"),
             )
-
-        return (
-            trace,
-            rewards,
-            advantages,
-            frozen_trace,
-            frozen_rewards,
-            delta_rewards,
-        )
-
-    def collect(
-        self,
-        features: Dict[str, torch.Tensor],
-        *,
-        context: Any = None,
-        generator: torch.Generator | None = None,
-    ) -> tuple[DiffusionTrace, torch.Tensor, torch.Tensor]:
-        """Backward-compatible public collect() contract."""
-        trace, rewards, advantages, _, _, _ = self._collect_with_credit(
-            features,
-            context=context,
-            generator=generator,
-        )
         return trace, rewards, advantages
 
 
@@ -608,140 +541,6 @@ class GRPOTrainer:
         return metrics
 
 
-
-
-    # GRPO B PAIRED DELTA V1
-    @staticmethod
-    def _average_rank_1d(values: torch.Tensor) -> torch.Tensor:
-        """Deterministic average ranks; ties receive their mean rank."""
-        if values.ndim != 1:
-            raise ValueError("rank input must be 1-D")
-        raw = [float(x) for x in values.detach().cpu().tolist()]
-        order = sorted(range(len(raw)), key=lambda index: (raw[index], index))
-        ranks = [0.0] * len(raw)
-        start = 0
-        while start < len(order):
-            end = start + 1
-            value = raw[order[start]]
-            while end < len(order) and raw[order[end]] == value:
-                end += 1
-            average = 0.5 * float(start + end - 1)
-            for offset in range(start, end):
-                ranks[order[offset]] = average
-            start = end
-        return torch.tensor(ranks, device=values.device, dtype=torch.float32)
-
-    @classmethod
-    def _spearman_rank_corr_1d(
-        cls,
-        left: torch.Tensor,
-        right: torch.Tensor,
-    ) -> torch.Tensor:
-        if left.shape != right.shape or left.ndim != 1:
-            raise ValueError("rank correlation inputs must share 1-D shape")
-        if left.numel() < 2:
-            return torch.zeros((), device=left.device, dtype=torch.float32)
-        left_rank = cls._average_rank_1d(left)
-        right_rank = cls._average_rank_1d(right)
-        left_centered = left_rank - left_rank.mean()
-        right_centered = right_rank - right_rank.mean()
-        denominator = (
-            left_centered.square().sum().sqrt()
-            * right_centered.square().sum().sqrt()
-        )
-        if float(denominator) <= 1e-12:
-            return torch.zeros((), device=left.device, dtype=torch.float32)
-        return (left_centered * right_centered).sum() / denominator
-
-    def paired_delta_diagnostics(
-        self,
-        trace: DiffusionTrace,
-        current_rewards: torch.Tensor,
-        frozen_trace: DiffusionTrace,
-        frozen_rewards: torch.Tensor,
-        features: Dict[str, torch.Tensor],
-    ) -> Dict[str, float]:
-        """Diagnostics for same-state/same-noise current-minus-frozen credit."""
-        if current_rewards.shape != frozen_rewards.shape:
-            raise ValueError("paired-delta current/frozen reward shapes differ")
-        mask = self._diagnostic_mask(
-            current_rewards,
-            features.get("mode_valid_mask"),
-        )
-        delta = current_rewards - frozen_rewards
-        expanded_mask = mask[:, None, :].expand_as(delta)
-        delta_values = delta[expanded_mask]
-        if delta_values.numel() == 0:
-            raise ValueError("paired-delta reward mask has no valid entries")
-
-        current_mean = current_rewards[expanded_mask].mean()
-        frozen_mean = frozen_rewards[expanded_mask].mean()
-        positive_fraction = (delta_values > 0.0).to(delta.dtype).mean()
-
-        waypoint_delta = torch.linalg.vector_norm(
-            trace.candidates[..., :2] - frozen_trace.candidates[..., :2],
-            dim=-1,
-        ).mean(dim=-1)
-        candidate_delta = waypoint_delta[mask[:, None, :].expand_as(waypoint_delta)].mean()
-
-        raw_group_mean = current_rewards.mean(dim=1)
-        raw_group_std = current_rewards.std(dim=1, unbiased=False)
-        raw_group_range = current_rewards.max(dim=1).values - current_rewards.min(dim=1).values
-        delta_group_mean = delta.mean(dim=1)
-        delta_group_std = delta.std(dim=1, unbiased=False)
-        delta_group_range = delta.max(dim=1).values - delta.min(dim=1).values
-
-        correlations = []
-        for role in range(current_rewards.shape[0]):
-            for mode in range(current_rewards.shape[2]):
-                if bool(mask[role, mode]):
-                    correlations.append(
-                        self._spearman_rank_corr_1d(
-                            current_rewards[role, :, mode],
-                            delta[role, :, mode],
-                        )
-                    )
-        rank_corr = (
-            torch.stack(correlations).mean()
-            if correlations
-            else torch.zeros((), device=current_rewards.device)
-        )
-
-        metrics: Dict[str, float] = {
-            "diagnostics/online_paired_current_reward_mean": float(current_mean.detach()),
-            "diagnostics/online_paired_frozen_reward_mean": float(frozen_mean.detach()),
-            "diagnostics/online_paired_reward_gain": float(
-                (current_mean - frozen_mean).detach()
-            ),
-            "diagnostics/online_paired_positive_fraction": float(
-                positive_fraction.detach()
-            ),
-            "diagnostics/online_paired_candidate_delta_m": float(
-                candidate_delta.detach()
-            ),
-            "diagnostics/raw_group_reward_mean": float(raw_group_mean[mask].mean()),
-            "diagnostics/raw_group_reward_std": float(raw_group_std[mask].mean()),
-            "diagnostics/raw_group_reward_range": float(raw_group_range[mask].mean()),
-            "diagnostics/paired_delta_mean": float(delta_group_mean[mask].mean()),
-            "diagnostics/paired_delta_std": float(delta_group_std[mask].mean()),
-            "diagnostics/paired_delta_range": float(delta_group_range[mask].mean()),
-            "diagnostics/paired_delta_positive_fraction": float(
-                positive_fraction.detach()
-            ),
-            "diagnostics/raw_vs_delta_rank_corr": float(rank_corr.detach()),
-        }
-        for role in range(current_rewards.shape[0]):
-            role_mask = mask[role]
-            if not bool(role_mask.any()):
-                continue
-            role_current = current_rewards[role, :, role_mask].mean()
-            role_frozen = frozen_rewards[role, :, role_mask].mean()
-            metrics[f"diagnostics/vehicle_{role}_reward_gain"] = float(
-                (role_current - role_frozen).detach()
-            )
-        return metrics
-
-
     @staticmethod
     def _reference_kl(new_log_prob: torch.Tensor, ref_log_prob: torch.Tensor) -> torch.Tensor:
         # k3 estimator from log-ratio; non-negative and zero when policies match.
@@ -801,13 +600,6 @@ class GRPOTrainer:
         gradient_diagnostics: bool = False,
     ) -> Dict[str, float]:
         diagnostics = bool(diagnostics or gradient_diagnostics)
-        requested_source = self.config.advantage_source
-        bootstrap_active = bool(
-            requested_source == "paired_delta"
-            and self._train_step_count < int(self.config.paired_delta_bootstrap_steps)
-        )
-        effective_source = "raw_reward" if bootstrap_active else requested_source
-
         paired_generator = (
             self._clone_generator(generator)
             if paired_validation
@@ -815,22 +607,11 @@ class GRPOTrainer:
         )
         diagnostic_generator = (
             self._clone_generator(generator)
-            if diagnostics and effective_source != "paired_delta"
+            if diagnostics
             else None
         )
-
-        (
-            trace,
-            rewards,
-            advantages,
-            frozen_trace,
-            frozen_rewards,
-            delta_rewards,
-        ) = self._collect_with_credit(
-            features,
-            context=context,
-            generator=generator,
-            advantage_source=effective_source,
+        trace, rewards, advantages = self.collect(
+            features, context=context, generator=generator
         )
 
         validation_metrics: Dict[str, float] = {}
@@ -846,48 +627,19 @@ class GRPOTrainer:
 
         diagnostic_metrics: Dict[str, float] = {}
         if diagnostics:
+            assert diagnostic_generator is not None
             diagnostic_metrics.update(
                 self.group_diagnostics(trace, rewards, features)
             )
-            if requested_source == "paired_delta":
-                if frozen_trace is None or frozen_rewards is None:
-                    assert diagnostic_generator is not None
-                    self.reference_model.eval()
-                    with torch.no_grad():
-                        frozen_trace = self.reference_sampler.sample(
-                            features,
-                            generator=diagnostic_generator,
-                        )
-                        frozen_rewards = self.reward_adapter(
-                            frozen_trace.candidates,
-                            features=features,
-                            context=context,
-                        )
-                        delta_rewards = rewards - frozen_rewards
-                diagnostic_metrics.update(
-                    self.paired_delta_diagnostics(
-                        trace,
-                        rewards,
-                        frozen_trace,
-                        frozen_rewards,
-                        features,
-                    )
+            diagnostic_metrics.update(
+                self.rollout_diagnostics(
+                    trace,
+                    rewards,
+                    features,
+                    context=context,
+                    generator=diagnostic_generator,
                 )
-                diagnostic_metrics[
-                    "diagnostics/paired_delta_bootstrap_active"
-                ] = float(bootstrap_active)
-            else:
-                assert diagnostic_generator is not None
-                diagnostic_metrics.update(
-                    self.rollout_diagnostics(
-                        trace,
-                        rewards,
-                        features,
-                        context=context,
-                        generator=diagnostic_generator,
-                    )
-                )
-
+            )
             if gradient_diagnostics:
                 diagnostic_metrics.update(
                     self.gradient_diagnostics(
@@ -906,7 +658,6 @@ class GRPOTrainer:
                     valid_mask=features.get("mode_valid_mask"),
                 )
             )
-
         metrics = dict(update_metrics[-1])
         metrics.update(
             update_epochs=float(self.config.update_epochs),
@@ -920,5 +671,4 @@ class GRPOTrainer:
         )
         metrics.update(validation_metrics)
         metrics.update(diagnostic_metrics)
-        self._train_step_count += 1
         return metrics
