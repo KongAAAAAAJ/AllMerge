@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, Tuple
 
 import torch
 
+from .objective import rank_group_advantage
 from .objective import group_relative_advantage, grpo_clipped_objective
 from .reward_adapter import CandidateRewardAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
@@ -20,6 +21,8 @@ class GRPOConfig:
     kl_coef: float = 0.01
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
+    # GRPO RANK ADVANTAGE D V2
+    advantage_transform: str = "standard"
     update_epochs: int = 2
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
@@ -46,6 +49,11 @@ class GRPOTrainer:
         self.model = model
         self.reward_adapter = reward_adapter
         self.config = config or GRPOConfig()
+        if self.config.advantage_transform not in {"standard", "rank"}:
+            raise ValueError(
+                'advantage_transform must be "standard" or "rank"; got '
+                + repr(self.config.advantage_transform)
+            )
         if self.config.update_epochs < 1:
             raise ValueError("update_epochs must be >= 1")
         self._configure_trainable_parameters()
@@ -90,6 +98,94 @@ class GRPOTrainer:
         self.reference_model.eval()
         self.reference_model.requires_grad_(False)
 
+    # GRPO RANK ADVANTAGE D V2
+    def _compute_advantages(
+        self,
+        rewards: torch.Tensor,
+        *,
+        eps: float | None = None,
+        valid_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.config.advantage_transform == "rank":
+            return rank_group_advantage(rewards, valid_mask=valid_mask)
+        return group_relative_advantage(
+            rewards,
+            eps=self.config.advantage_eps if eps is None else eps,
+            valid_mask=valid_mask,
+        )
+
+    def _rank_reward_diagnostics(
+        self,
+        rewards: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+    ) -> Dict[str, float]:
+        if valid_mask is None:
+            mask = torch.ones(
+                rewards.shape[0], rewards.shape[2],
+                dtype=torch.bool, device=rewards.device,
+            )
+        else:
+            mask = valid_mask.to(device=rewards.device, dtype=torch.bool)
+        reward_mask = mask[:, None, :].expand_as(rewards)
+        values = rewards[reward_mask].float()
+        if values.numel() == 0:
+            return {}
+        q = torch.quantile(
+            values,
+            torch.tensor([0.05, 0.25, 0.50, 0.75, 0.95], device=values.device),
+        )
+        p05, q25, p50, q75, p95 = q
+        iqr = q75 - q25
+        if float(iqr.abs()) <= 1e-20:
+            extreme_fraction = torch.zeros((), device=values.device)
+        else:
+            low = q25 - 1.5 * iqr
+            high = q75 + 1.5 * iqr
+            extreme_fraction = ((values < low) | (values > high)).float().mean()
+        standard = group_relative_advantage(
+            rewards, eps=self.config.advantage_eps, valid_mask=mask,
+        )[reward_mask]
+        rank = rank_group_advantage(rewards, valid_mask=mask)[reward_mask]
+        return {
+            "diagnostics/reward_min": float(values.min().detach()),
+            "diagnostics/reward_max": float(values.max().detach()),
+            "diagnostics/reward_p05": float(p05.detach()),
+            "diagnostics/reward_p50": float(p50.detach()),
+            "diagnostics/reward_p95": float(p95.detach()),
+            "diagnostics/standard_advantage_min": float(standard.min().detach()),
+            "diagnostics/standard_advantage_max": float(standard.max().detach()),
+            "diagnostics/rank_advantage_min": float(rank.min().detach()),
+            "diagnostics/rank_advantage_max": float(rank.max().detach()),
+            "diagnostics/extreme_reward_fraction": float(extreme_fraction.detach()),
+        }
+
+    @staticmethod
+    def _reward_rank_stability(
+        current_rewards: torch.Tensor,
+        frozen_rewards: torch.Tensor,
+        valid_mask: torch.Tensor | None,
+    ) -> float:
+        if valid_mask is None:
+            mask = torch.ones(
+                current_rewards.shape[0], current_rewards.shape[2],
+                dtype=torch.bool, device=current_rewards.device,
+            )
+        else:
+            mask = valid_mask.to(device=current_rewards.device, dtype=torch.bool)
+        current = rank_group_advantage(current_rewards, valid_mask=mask)
+        frozen = rank_group_advantage(frozen_rewards, valid_mask=mask)
+        expanded = mask[:, None, :].expand_as(current)
+        x = current[expanded].float()
+        y = frozen[expanded].float()
+        if x.numel() == 0:
+            return 0.0
+        x = x - x.mean()
+        y = y - y.mean()
+        denom = x.square().sum().sqrt() * y.square().sum().sqrt()
+        if float(denom) <= 1e-20:
+            return 1.0 if torch.allclose(x, y) else 0.0
+        return float(((x * y).sum() / denom).detach())
+
     def collect(
         self,
         features: Dict[str, torch.Tensor],
@@ -106,7 +202,7 @@ class GRPOTrainer:
                 features=features,
                 context=context,
             )
-            advantages = group_relative_advantage(
+            advantages = self._compute_advantages(
                 rewards,
                 eps=self.config.advantage_eps,
                 valid_mask=features.get("mode_valid_mask"),
@@ -200,6 +296,9 @@ class GRPOTrainer:
                     candidate_delta_m.detach()
                 ),
             }
+        )
+        metrics["diagnostics/reward_rank_stability"] = GRPOTrainer._reward_rank_stability(
+            current_rewards, frozen_rewards, mask
         )
         return metrics
 
@@ -668,6 +767,11 @@ class GRPOTrainer:
             reward_std=float(rewards.std(unbiased=False).detach()),
             advantage_mean=float(advantages.mean().detach()),
             advantage_std=float(advantages.std(unbiased=False).detach()),
+        )
+        metrics.update(
+            self._rank_reward_diagnostics(
+                rewards, features.get("mode_valid_mask")
+            )
         )
         metrics.update(validation_metrics)
         metrics.update(diagnostic_metrics)

@@ -429,9 +429,19 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
+    # GRPO RANK ADVANTAGE D V2
+    parser.add_argument(
+        "--advantage-transform",
+        choices=("standard", "rank"),
+        default="standard",
+        help=(
+            "standard: GRPO reward mean/std normalization; "
+            "rank: deterministic tie-aware group ranks mapped to [-1,1]"
+        ),
+    )
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--eta", type=float, default=0.02)
     parser.add_argument("--clip-eps", type=float, default=0.2)
@@ -521,6 +531,7 @@ def _build_trainer(args: argparse.Namespace):
             eta=args.eta,
             clip_eps=args.clip_eps,
             kl_coef=args.kl_coef,
+            advantage_transform=args.advantage_transform,
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
         ),
