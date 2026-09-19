@@ -222,6 +222,51 @@ def _print_predicted_collisions(records: list[PredictionRecord]) -> None:
         )
 
 
+def _print_false_negatives(
+    records: list[PredictionRecord],
+) -> None:
+    misses = [
+        record
+        for record in records
+        if (
+            record.actual_collision
+            and not record.predicted_collision
+        )
+    ]
+    print()
+    print("predicted-safe -> actual-collision pairs")
+    print(
+        "scenario seed step role actor         actual_t "
+        "pred_gap actual_gap pred_ttc actual_ttc end_err speed_err"
+    )
+    print("-" * 112)
+
+    if not misses:
+        print("(none)")
+        return
+
+    for record in misses:
+        actual_t = (
+            "-"
+            if record.actual_first_collision_time_s is None
+            else f"{record.actual_first_collision_time_s:.2f}"
+        )
+        print(
+            f"{record.scenario:12s} "
+            f"{record.seed:4d} "
+            f"{record.rollout_step:4d} "
+            f"{record.target_role:4d} "
+            f"{record.actor_id:12s} "
+            f"{actual_t:>8s} "
+            f"{record.predicted_min_gap_m:8.3f} "
+            f"{record.actual_min_gap_m:10.3f} "
+            f"{record.predicted_min_ttc_s:8.3f} "
+            f"{record.actual_min_ttc_s:10.3f} "
+            f"{record.endpoint_position_error_m:7.3f} "
+            f"{record.endpoint_speed_error_mps:9.3f}"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -314,6 +359,7 @@ def main() -> int:
 
     overall = summarize(all_records)
     _print_predicted_collisions(all_records)
+    _print_false_negatives(all_records)
 
     write_reports(
         records=all_records,
@@ -343,6 +389,11 @@ def main() -> int:
     print(
         "[OK] collision agreement: "
         f"{overall['collision_agreement_rate']:.2%}"
+    )
+    print(
+        "[OK] collision precision/recall: "
+        f"{overall['collision_precision']:.2%} / "
+        f"{overall['collision_recall']:.2%}"
     )
     print(
         "[OK] endpoint position error mean/p95/max: "

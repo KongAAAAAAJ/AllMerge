@@ -98,6 +98,31 @@ def summarize(
         for record in records
         if record.predicted_collision
     ]
+    true_positive = sum(
+        record.predicted_collision and record.actual_collision
+        for record in records
+    )
+    false_positive = sum(
+        record.predicted_collision and not record.actual_collision
+        for record in records
+    )
+    false_negative = sum(
+        record.actual_collision and not record.predicted_collision
+        for record in records
+    )
+    predicted_positive = true_positive + false_positive
+    actual_positive = true_positive + false_negative
+    precision = (
+        float(true_positive / predicted_positive)
+        if predicted_positive
+        else 1.0
+    )
+    recall = (
+        float(true_positive / actual_positive)
+        if actual_positive
+        else 1.0
+    )
+
     return {
         "pair_count": len(records),
         "predicted_collision_count": sum(
@@ -108,21 +133,11 @@ def summarize(
             record.actual_collision
             for record in records
         ),
-        "predicted_collision_actual_true_count": sum(
-            record.predicted_collision
-            and record.actual_collision
-            for record in records
-        ),
-        "predicted_collision_actual_false_count": sum(
-            record.predicted_collision
-            and not record.actual_collision
-            for record in records
-        ),
-        "actual_collision_prediction_false_count": sum(
-            record.actual_collision
-            and not record.predicted_collision
-            for record in records
-        ),
+        "predicted_collision_actual_true_count": true_positive,
+        "predicted_collision_actual_false_count": false_positive,
+        "actual_collision_prediction_false_count": false_negative,
+        "collision_precision": precision,
+        "collision_recall": recall,
         "predicted_clearance_count": sum(
             record.predicted_clearance
             for record in records
@@ -240,6 +255,14 @@ def _markdown(
             f"{overall['collision_agreement_rate']:.6f} |"
         ),
         (
+            f"| collision precision | "
+            f"{overall['collision_precision']:.6f} |"
+        ),
+        (
+            f"| collision recall | "
+            f"{overall['collision_recall']:.6f} |"
+        ),
+        (
             f"| clearance agreement | "
             f"{overall['clearance_agreement_rate']:.6f} |"
         ),
@@ -295,6 +318,51 @@ def _markdown(
             f"{record.endpoint_speed_error_mps:.3f} |"
         )
 
+    false_negative_records = [
+        record
+        for record in records
+        if (
+            record.actual_collision
+            and not record.predicted_collision
+        )
+    ]
+    lines.extend(
+        [
+            "",
+            "## Predicted-safe but actual-collision pairs",
+            "",
+            (
+                "| scenario | seed | step | role | actor | actual coll t | "
+                "pred min gap | actual min gap | pred min TTC | "
+                "actual min TTC | endpoint error | speed error |"
+            ),
+            (
+                "|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|"
+            ),
+        ]
+    )
+    for record in false_negative_records:
+        actual_t = (
+            "-"
+            if record.actual_first_collision_time_s is None
+            else f"{record.actual_first_collision_time_s:.2f}"
+        )
+        lines.append(
+            f"| {record.scenario} | {record.seed} | "
+            f"{record.rollout_step} | {record.target_role} | "
+            f"{record.actor_id} | {actual_t} | "
+            f"{record.predicted_min_gap_m:.3f} | "
+            f"{record.actual_min_gap_m:.3f} | "
+            f"{record.predicted_min_ttc_s:.3f} | "
+            f"{record.actual_min_ttc_s:.3f} | "
+            f"{record.endpoint_position_error_m:.3f} | "
+            f"{record.endpoint_speed_error_mps:.3f} |"
+        )
+    if not false_negative_records:
+        lines.append(
+            "| - | - | - | - | none | - | - | - | - | - | - | - |"
+        )
+
     lines.extend(
         [
             "",
@@ -308,6 +376,14 @@ def _markdown(
             (
                 "- predicted_collision=True / actual_collision=True supports "
                 "the current reward background-risk signal."
+            ),
+            (
+                "- predicted_collision=False / actual_collision=True is a "
+                "predictor false negative and is the safety-critical miss."
+            ),
+            (
+                "- Collision precision/recall are more informative than raw "
+                "agreement when most target/background pairs are non-colliding."
             ),
             (
                 "- This is a counterfactual fidelity diagnostic, not a full "
@@ -332,7 +408,7 @@ def write_reports(
 
     payload = {
         "validation": (
-            "trajectory_mode_reward_background_prediction_diagnostics_v1"
+            "trajectory_mode_reward_background_prediction_diagnostics_v2"
         ),
         "reward_behavior_changed": False,
         "rollout_mode": rollout_mode,
