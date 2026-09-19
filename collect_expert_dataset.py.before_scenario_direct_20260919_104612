@@ -24,21 +24,10 @@ from expert_collection_core import (
     build_frame_record,
     get_vec_attr,
 )
+from decide.decide import decide
+from env_reset import env_reset
 from expert_dataset import split_shards
-from highway_env.envs.scenarios.curved_lane_change_env import CurvedLaneChangeEnv
-from highway_env.envs.scenarios.merge_in_env import MergeInEnv
-from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
-from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChangeEnv
-
-
-SCENARIOS = {
-    "straight": StraightLaneChangeEnv,
-    "curved": CurvedLaneChangeEnv,
-    "merge_in": MergeInEnv,
-    "merge_out": MergeOutEnv,
-}
-
-# SCENARIO-DIRECT EXPERT COLLECTOR V1
+from mode_selector.mode_selector import set_platoon_mode
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -56,25 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-samples", type=int, default=1000)
     parser.add_argument("--samples-per-shard", type=int, default=2048)
     parser.add_argument("--start-seed", type=int, default=1)
-    parser.add_argument(
-        "--scenario",
-        choices=["all", *SCENARIOS.keys()],
-        default="all",
-        help="scenario source for expert collection; default: all",
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=5.0,
-        help="episode duration in seconds; default: 5.0",
-    )
-    parser.add_argument(
-        "--group-action",
-        type=int,
-        choices=[0, 1, 2, 3],
-        default=3,
-        help="platoon group action sent to scenario env.step(); default: 3",
-    )
+    parser.add_argument("--env-name", type=str, default="highway-platoon-v0")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--dataset-name", type=str, default="allmerge_expert")
     parser.add_argument("--resume", action="store_true")
@@ -92,8 +63,6 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-samples must be positive")
     if args.samples_per_shard <= 0:
         parser.error("--samples-per-shard must be positive")
-    if args.duration <= 0:
-        parser.error("--duration must be positive")
     if args.max_consecutive_empty_episodes <= 0:
         parser.error("--max-consecutive-empty-episodes must be positive")
     return args
@@ -491,9 +460,7 @@ def write_manifest(
         },
         "collection_wall_time_sec": float(collection_wall_time_sec),
         "config": {
-            "scenario": args.scenario,
-            "duration": float(args.duration),
-            "group_action": int(args.group_action),
+            "env_name": args.env_name,
             "start_seed": int(args.start_seed),
             "samples_per_shard": int(args.samples_per_shard),
             "allow_contract_mismatch": bool(args.allow_contract_mismatch),
@@ -529,23 +496,9 @@ def write_manifest(
 def main() -> None:
     args = parse_args()
 
-    if args.save_episode_videos:
-        raise ValueError(
-            "--save-episode-videos is temporarily disabled for the direct "
-            "scenario collector. Validate dataset collection first; video "
-            "recording should be added as a scenario-env wrapper, not through "
-            "the legacy VecEnv path."
-        )
-
     set_random_seed(
         args.start_seed,
         using_cuda=torch.cuda.is_available(),
-    )
-
-    selected_scenarios = (
-        list(SCENARIOS.items())
-        if args.scenario == "all"
-        else [(args.scenario, SCENARIOS[args.scenario])]
     )
 
     dataset_root = (
@@ -554,9 +507,21 @@ def main() -> None:
     )
     shard_dir = dataset_root / "shards"
     report_dir = dataset_root / "reports"
+    video_output_dir = (
+        Path(args.video_dir).resolve()
+        if args.video_dir
+        else report_dir / "videos"
+    )
 
     shard_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_episode_videos:
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+
+    episode_video_manifest_path = (
+        video_output_dir / "episode_video_manifest.json"
+    )
+    episode_video_records = []
 
     if args.resume:
         state = detect_existing_state(shard_dir)
@@ -619,10 +584,7 @@ def main() -> None:
     print("ALLMERGE EXPERT DATASET COLLECTION")
     print("=" * 108)
     print("repo commit:", resolve_git_commit())
-    print("collector core commit constant:", PILOT_SOURCE_COMMIT)
-    print("scenarios:", [name for name, _ in selected_scenarios])
-    print("duration:", args.duration)
-    print("group action:", args.group_action)
+    print("pilot source commit constant:", PILOT_SOURCE_COMMIT)
     print("target samples:", args.target_samples)
     print("existing samples:", total_samples)
     print("samples per shard:", args.samples_per_shard)
@@ -630,11 +592,9 @@ def main() -> None:
     print("=" * 108)
 
     while total_samples < args.target_samples:
-        scenario_name, env_cls = selected_scenarios[
-            episode_index % len(selected_scenarios)
-        ]
         episode_seed = args.start_seed + episode_index
         env = None
+        video_env = None
         episode_step = 0
         episode_added = 0
         episode_done = False
@@ -643,70 +603,57 @@ def main() -> None:
             "terminated": False,
             "truncated": False,
         }
+        episode_video_path = None
 
         try:
-            env = env_cls(
-                config={
-                    "duration": float(args.duration),
-                    "offscreen_rendering": False,
-                },
-                render_mode=None,
+            env, video_env, obs = env_reset(
+                args.env_name,
+                seed=episode_seed,
             )
-            _obs, _reset_info = env.reset(seed=int(episode_seed))
 
-            planner_cfg = env.config.get("Planner", {})
-            if not planner_cfg.get("state", False):
-                raise RuntimeError(
-                    f"scenario={scenario_name}: Planner.state must be True"
+            if args.save_episode_videos:
+                episode_video_path = (
+                    video_output_dir
+                    / (
+                        f"episode_{episode_index:06d}"
+                        f"_seed_{episode_seed:08d}.mp4"
+                    )
                 )
-            if planner_cfg.get("type") != "Polynomial":
-                raise RuntimeError(
-                    f"scenario={scenario_name}: expert collector requires "
-                    f"Planner.type='Polynomial', got {planner_cfg.get('type')!r}"
-                )
-            if planner_cfg.get("Polynomial", {}).get("mode") != "aligned":
-                raise RuntimeError(
-                    f"scenario={scenario_name}: expert collector requires "
-                    "Planner.Polynomial.mode='aligned'"
-                )
-            if not planner_cfg.get("ExpertAlignment", {}).get("enabled", False):
-                raise RuntimeError(
-                    f"scenario={scenario_name}: "
-                    "Planner.ExpertAlignment.enabled must be True"
+                episode_video_path = _configure_episode_video(
+                    video_env,
+                    episode_video_path,
                 )
 
-            policy_frequency = float(env.config["policy_frequency"])
-            max_steps = int(np.ceil(float(args.duration) * policy_frequency))
+            runner_env = (
+                video_env
+                if args.save_episode_videos
+                else env
+            )
 
-            for _ in range(max_steps):
-                _obs, _reward, terminated, truncated, info = env.step(
-                    int(args.group_action)
-                )
+            while total_samples < args.target_samples:
+                mode = set_platoon_mode()
+                action = decide(obs, mode)
+
+                obs, _reward, done, infos = runner_env.step(action)
                 episode_step += 1
 
-                if bool(terminated) or bool(truncated):
+                if bool(done[0]):
                     skipped_done_steps += 1
                     episode_done = True
-                    episode_terminal = _episode_terminal_summary(info or {})
+                    terminal_info = infos[0] if infos else {}
+                    episode_terminal = _episode_terminal_summary(
+                        terminal_info
+                    )
                     break
 
-                features = getattr(env, "latest_planner_features", None)
-                alignment = getattr(env, "latest_expert_alignment", None)
-
-                if features is None:
-                    raise RuntimeError(
-                        f"scenario={scenario_name} seed={episode_seed}: "
-                        "latest_planner_features missing after env.step(). "
-                        "The direct scenario MultiAgentAction -> Rule -> "
-                        "Polynomial path did not publish the planner batch."
-                    )
-                if alignment is None:
-                    raise RuntimeError(
-                        f"scenario={scenario_name} seed={episode_seed}: "
-                        "latest_expert_alignment missing after env.step(). "
-                        "Check Planner.ExpertAlignment.enabled and aligned "
-                        "Polynomial output."
-                    )
+                features = get_vec_attr(
+                    env,
+                    "latest_planner_features",
+                )
+                alignment = get_vec_attr(
+                    env,
+                    "latest_expert_alignment",
+                )
 
                 frame_record = build_frame_record(
                     frame_index=frame_index,
@@ -741,32 +688,48 @@ def main() -> None:
                     print(
                         "[collect] "
                         f"{total_samples}/{args.target_samples} samples | "
-                        f"scenario={scenario_name} | "
                         f"episode={episode_index} | "
                         f"step={episode_step} | "
                         f"buffer={writer.buffer_size}"
                     )
 
-                if total_samples >= args.target_samples:
-                    break
-
-            if (
-                not episode_done
-                and episode_step >= max_steps
-                and total_samples < args.target_samples
-            ):
-                episode_terminal = {
-                    "reason": "duration_limit",
-                    "terminated": False,
-                    "truncated": True,
-                }
-
         finally:
-            if env is not None:
+            if video_env is not None:
+                try:
+                    video_env.close()
+                except Exception:
+                    pass
+            elif env is not None:
                 try:
                     env.close()
                 except Exception:
                     pass
+
+        if args.save_episode_videos:
+            if (
+                episode_video_path is None
+                or not episode_video_path.exists()
+            ):
+                raise RuntimeError(
+                    "Episode video requested but not created. "
+                    f"episode={episode_index}, expected={episode_video_path}"
+                )
+
+            episode_video_records.append(
+                {
+                    "episode_index": int(episode_index),
+                    "seed": int(episode_seed),
+                    "video_path": str(episode_video_path),
+                    "environment_steps": int(episode_step),
+                    "done": bool(episode_done),
+                    "collected_samples": int(episode_added),
+                    "terminal": episode_terminal,
+                }
+            )
+            _write_episode_video_manifest(
+                episode_video_records,
+                episode_video_manifest_path,
+            )
 
         if episode_added == 0:
             consecutive_empty_episodes += 1
