@@ -1,3 +1,4 @@
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import json
@@ -88,7 +89,7 @@ def Devs(x, u, d_vy1, d_d_phi1):
     # ==============整车参数================
 
     # B级车参数
-    with open("all_merge/highway_env/vehicle/parameters/truck.json", 'r') as file:
+    with open(Path(__file__).resolve().parent / "parameters" / "truck.json", "r", encoding="utf-8") as file:
         parameter = json.load(file)
     m = parameter["m"]  # 整车质量
     mu = parameter["mu"]  # 非簧载质量
