@@ -132,15 +132,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
-    parser.add_argument(
-        "--paired-validation-interval",
-        type=int,
-        default=1,
-        help=(
-            "online W4 same-noise current-vs-frozen validation cadence; "
-            "0 disables, 1 validates every step"
-        ),
-    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -205,18 +196,7 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             _, _, terminated, truncated, _ = env.step(int(args.group_action))
             features = _scenario_features(env, adapter)
             context = _frozen_reward_context(trainer, features, env)
-            interval = int(args.paired_validation_interval)
-            paired_now = interval > 0 and (
-                step == 1
-                or step == args.steps
-                or step % interval == 0
-            )
-            metrics = trainer.train_step(
-                features,
-                context=context,
-                generator=generator,
-                paired_validation=paired_now,
-            )
+            metrics = trainer.train_step(features, context=context, generator=generator)
             compact = " ".join(f"{key}={value:.5f}" for key, value in metrics.items())
             print(f"[step {step:03d}/{args.steps}] scenario={args.scenario} {compact}")
             if bool(terminated) or bool(truncated):
@@ -228,8 +208,6 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
 
 def main() -> int:
     args = parse_args()
-    if args.paired_validation_interval < 0:
-        raise SystemExit("--paired-validation-interval must be >= 0")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)

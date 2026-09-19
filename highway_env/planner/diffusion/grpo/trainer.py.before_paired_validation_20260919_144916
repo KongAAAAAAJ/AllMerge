@@ -61,11 +61,6 @@ class GRPOTrainer:
             group_size=self.config.group_size,
             eta=self.config.eta,
         )
-        self.reference_sampler = GroupDiffusionSampler(
-            self.reference_model,
-            group_size=self.config.group_size,
-            eta=self.config.eta,
-        )
 
     def _configure_trainable_parameters(self) -> None:
         self.model.requires_grad_(False)
@@ -112,129 +107,6 @@ class GRPOTrainer:
                 valid_mask=features.get("mode_valid_mask"),
             )
         return trace, rewards, advantages
-
-
-    @staticmethod
-    def _clone_generator(
-        generator: torch.Generator | None,
-    ) -> torch.Generator:
-        if generator is None:
-            raise ValueError(
-                "paired validation requires an explicit torch.Generator"
-            )
-        clone = torch.Generator(device=generator.device)
-        clone.set_state(generator.get_state())
-        return clone
-
-    @staticmethod
-    def _paired_reward_metrics(
-        current_rewards: torch.Tensor,
-        frozen_rewards: torch.Tensor,
-        valid_mask: torch.Tensor | None,
-        *,
-        candidate_delta_m: torch.Tensor,
-    ) -> Dict[str, float]:
-        if current_rewards.shape != frozen_rewards.shape:
-            raise ValueError(
-                "paired current/frozen rewards must have identical shapes, got "
-                f"{tuple(current_rewards.shape)} and {tuple(frozen_rewards.shape)}"
-            )
-        if current_rewards.ndim != 3:
-            raise ValueError(
-                "paired rewards must be [vehicle,group,mode]"
-            )
-        if valid_mask is None:
-            mask = torch.ones(
-                current_rewards.shape[0],
-                current_rewards.shape[2],
-                dtype=torch.bool,
-                device=current_rewards.device,
-            )
-        else:
-            mask = valid_mask.to(
-                device=current_rewards.device,
-                dtype=torch.bool,
-            )
-        if tuple(mask.shape) != (
-            current_rewards.shape[0],
-            current_rewards.shape[2],
-        ):
-            raise ValueError(
-                "valid_mode_mask shape does not match paired rewards"
-            )
-
-        role_current = []
-        role_frozen = []
-        metrics: Dict[str, float] = {}
-        for role in range(current_rewards.shape[0]):
-            role_mask = mask[role]
-            if not bool(role_mask.any()):
-                raise ValueError(
-                    f"paired validation vehicle {role} has no valid modes"
-                )
-            current_value = current_rewards[role, :, role_mask].mean()
-            frozen_value = frozen_rewards[role, :, role_mask].mean()
-            role_current.append(current_value)
-            role_frozen.append(frozen_value)
-            metrics[f"validation/vehicle_{role}_reward_gain"] = float(
-                (current_value - frozen_value).detach()
-            )
-
-        current_mean = torch.stack(role_current).mean()
-        frozen_mean = torch.stack(role_frozen).mean()
-        gain = current_mean - frozen_mean
-        group_size = int(current_rewards.shape[1])
-        metrics.update(
-            {
-                "validation/paired_group_current_reward_mean": float(
-                    current_mean.detach()
-                ),
-                "validation/paired_group_frozen_reward_mean": float(
-                    frozen_mean.detach()
-                ),
-                "validation/paired_group_reward_gain": float(gain.detach()),
-                f"validation/paired_n{group_size}_reward_gain": float(
-                    gain.detach()
-                ),
-                "validation/paired_candidate_delta_m": float(
-                    candidate_delta_m.detach()
-                ),
-            }
-        )
-        return metrics
-
-    def paired_validation(
-        self,
-        trace: DiffusionTrace,
-        current_rewards: torch.Tensor,
-        features: Dict[str, torch.Tensor],
-        *,
-        context: Any,
-        generator: torch.Generator,
-    ) -> Dict[str, float]:
-        """Same-noise current-vs-frozen reward comparison on one live state."""
-        self.reference_model.eval()
-        with torch.no_grad():
-            frozen_trace = self.reference_sampler.sample(
-                features,
-                generator=generator,
-            )
-            frozen_rewards = self.reward_adapter(
-                frozen_trace.candidates,
-                features=features,
-                context=context,
-            )
-            delta_m = torch.linalg.vector_norm(
-                trace.candidates[..., :2]
-                - frozen_trace.candidates[..., :2],
-                dim=-1,
-            ).mean()
-        return self._paired_reward_metrics(
-            current_rewards,
-            frozen_rewards,
-            features.get("mode_valid_mask"),
-            candidate_delta_m=delta_m,
-        )
 
     @staticmethod
     def _reference_kl(new_log_prob: torch.Tensor, ref_log_prob: torch.Tensor) -> torch.Tensor:
@@ -290,26 +162,10 @@ class GRPOTrainer:
         *,
         context: Any = None,
         generator: torch.Generator | None = None,
-        paired_validation: bool = False,
     ) -> Dict[str, float]:
-        paired_generator = (
-            self._clone_generator(generator)
-            if paired_validation
-            else None
-        )
         trace, rewards, advantages = self.collect(
             features, context=context, generator=generator
         )
-        validation_metrics: Dict[str, float] = {}
-        if paired_validation:
-            assert paired_generator is not None
-            validation_metrics = self.paired_validation(
-                trace,
-                rewards,
-                features,
-                context=context,
-                generator=paired_generator,
-            )
         update_metrics = []
         for _ in range(self.config.update_epochs):
             update_metrics.append(
@@ -330,5 +186,4 @@ class GRPOTrainer:
             advantage_mean=float(advantages.mean().detach()),
             advantage_std=float(advantages.std(unbiased=False).detach()),
         )
-        metrics.update(validation_metrics)
         return metrics
