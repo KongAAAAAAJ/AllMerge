@@ -479,6 +479,12 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             features = _scenario_features(env, adapter)
             context = _frozen_reward_context(trainer, features, env)
 
+            online_interval = int(args.paired_validation_interval)
+            paired_now = online_interval > 0 and (
+                step == 1
+                or step == args.steps
+                or step % online_interval == 0
+            )
 
             metrics = trainer.train_step(
                 features,
