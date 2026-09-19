@@ -24,7 +24,7 @@ The actual AllMerge repository commit is recorded at collection time with
 | `metadrive/exp_dataset/collect_expert.py::ShardWriter` | ADAPT | `collect_expert_dataset.py::ShardWriter` | Preserve compressed NPZ sharding. Add schema-drift checks and atomic writes. |
 | `collect_expert.py::detect_existing_state` | ADAPT | `collect_expert_dataset.py::detect_existing_state` | Resume state is reconstructed from shard contents, not only `manifest.json`. |
 | `collect_expert.py::write_manifest` | ADAPT | `collect_expert_dataset.py::write_manifest` | Preserve manifest/resume history; replace MetaDrive visual/IDM fields with AllMerge feature/label metadata. |
-| `collect_expert.py` MetaDrive frame extraction | DROP | existing `expert_collection_core.py` | AllMerge already exposes `latest_planner_features` and `latest_expert_alignment`. |
+| `collect_expert.py` MetaDrive frame extraction | DROP | existing `collect_expert_pilot.py` | AllMerge already exposes `latest_planner_features` and `latest_expert_alignment`. |
 | `collect_expert.py` IDM/PPO expert logic | DROP | existing Polynomial expert | Do not create a second expert policy. |
 | `collect_expert.py` camera/LiDAR/BEV storage | DROP | 9-key structured features | AllMerge structured planner does not consume the old visual observation contract. |
 | `collect_expert.py` trajectory correction/filter | DROP | existing Polynomial trajectory + label contract | Dataset production must not alter expert geometry. |
@@ -38,7 +38,7 @@ The actual AllMerge repository commit is recorded at collection time with
 
 ### 1. Frame-to-ego flattening
 
-`expert_collection_core.py` is a diagnostic collector. One record contains all
+`collect_expert_pilot.py` is a diagnostic collector. One record contains all
 controlled vehicles at one planning frame.
 
 The production dataset stores **one controlled ego as one sample**. Therefore
@@ -63,7 +63,7 @@ No model-side extra vehicle dimension is introduced.
 The production collector imports and calls the existing:
 
 ```python
-expert_collection_core.build_frame_record(...)
+collect_expert_pilot.build_frame_record(...)
 ```
 
 It does **not** reimplement `assign_expert_mode()` or recompute

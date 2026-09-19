@@ -26,7 +26,7 @@ Polynomial expert
 latest_planner_features
 latest_expert_alignment
     ↓
-expert_collection_core.build_frame_record()
+collect_expert_pilot.build_frame_record()
     ↓
 per-ego flatten only
     ↓

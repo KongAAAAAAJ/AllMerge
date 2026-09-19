@@ -13,7 +13,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.utils import set_random_seed
 
-from expert_collection_core import (
+from collect_expert_pilot import (
     FEATURE_KEYS,
     MODE_NAMES,
     SEMANTIC_NAMES,
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Production AllMerge Polynomial-expert dataset collector. "
-            "Reuses expert_collection_core.py for the feature/label contract, "
+            "Reuses collect_expert_pilot.py for the feature/label contract, "
             "and adds per-ego flattening, sharding, resume, splits and manifest."
         )
     )
@@ -437,7 +437,7 @@ def write_manifest(
         "repo_commit": resolve_git_commit(),
         "pilot_source_commit_constant": PILOT_SOURCE_COMMIT,
         "collector_contract_source": (
-            "expert_collection_core.build_frame_record + "
+            "collect_expert_pilot.build_frame_record + "
             "latest_planner_features/latest_expert_alignment"
         ),
         "expert_type": "Polynomial",
