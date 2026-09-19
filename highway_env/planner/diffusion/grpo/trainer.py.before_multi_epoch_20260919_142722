@@ -20,7 +20,6 @@ class GRPOConfig:
     kl_coef: float = 0.01
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
-    update_epochs: int = 2
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
@@ -46,8 +45,6 @@ class GRPOTrainer:
         self.model = model
         self.reward_adapter = reward_adapter
         self.config = config or GRPOConfig()
-        if self.config.update_epochs < 1:
-            raise ValueError("update_epochs must be >= 1")
         self._configure_trainable_parameters()
         parameters = [p for p in self.model.parameters() if p.requires_grad]
         if not parameters:
@@ -166,21 +163,12 @@ class GRPOTrainer:
         trace, rewards, advantages = self.collect(
             features, context=context, generator=generator
         )
-        update_metrics = []
-        for _ in range(self.config.update_epochs):
-            update_metrics.append(
-                self.update(
-                    trace,
-                    advantages,
-                    valid_mask=features.get("mode_valid_mask"),
-                )
-            )
-        metrics = dict(update_metrics[-1])
+        metrics = self.update(
+            trace,
+            advantages,
+            valid_mask=features.get("mode_valid_mask"),
+        )
         metrics.update(
-            update_epochs=float(self.config.update_epochs),
-            epoch1_ratio_mean=float(update_metrics[0]["ratio_mean"]),
-            epoch1_approx_kl=float(update_metrics[0]["approx_kl"]),
-            epoch1_clip_fraction=float(update_metrics[0]["clip_fraction"]),
             reward_mean=float(rewards.mean().detach()),
             reward_std=float(rewards.std(unbiased=False).detach()),
             advantage_mean=float(advantages.mean().detach()),

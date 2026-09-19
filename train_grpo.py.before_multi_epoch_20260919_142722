@@ -131,7 +131,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
-    parser.add_argument("--update-epochs", type=int, default=2)
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -159,11 +158,9 @@ def _build_trainer(args: argparse.Namespace):
             clip_eps=args.clip_eps,
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
-            update_epochs=args.update_epochs,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
-    print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
     return adapter, trainer, device
 
 
