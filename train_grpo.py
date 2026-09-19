@@ -343,7 +343,7 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
@@ -352,6 +352,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
+    # GRPO ROLE-WISE CREDIT A V3
+    parser.add_argument(
+        "--advantage-mode",
+        choices=("joint", "rolewise"),
+        default="joint",
+        help="joint keeps baseline; rolewise uses equal-weight per-vehicle policy losses",
+    )
+    parser.add_argument(
+        "--diagnostics-interval",
+        type=int,
+        default=0,
+        help="role advantage diagnostics interval; 0 disables",
+    )
+    parser.add_argument(
+        "--gradient-diagnostics-interval",
+        type=int,
+        default=0,
+        help="role gradient diagnostics interval; 0 disables",
+    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument(
@@ -412,11 +431,15 @@ def _build_trainer(args: argparse.Namespace):
             clip_eps=args.clip_eps,
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
+            advantage_mode=args.advantage_mode,
             update_epochs=args.update_epochs,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
-    print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
+    print(
+        f"[grpo] update_epochs={args.update_epochs} "
+        f"clip_eps={args.clip_eps} advantage_mode={args.advantage_mode}"
+    )
     return adapter, trainer, device
 
 
@@ -427,7 +450,20 @@ def _run_fake(args, adapter, trainer, device, generator) -> Dict[str, float]:
     batches = iter_batches(arrays, batch_size=args.batch_size, adapter=adapter)
     metrics: Dict[str, float] = {}
     for step in range(1, args.steps + 1):
-        metrics = trainer.train_step(next(batches), generator=generator)
+        diagnostics_now = (
+            args.diagnostics_interval > 0
+            and step % args.diagnostics_interval == 0
+        )
+        gradient_diagnostics_now = (
+            args.gradient_diagnostics_interval > 0
+            and step % args.gradient_diagnostics_interval == 0
+        )
+        metrics = trainer.train_step(
+            next(batches),
+            generator=generator,
+            diagnostics=diagnostics_now,
+            gradient_diagnostics=gradient_diagnostics_now,
+        )
         compact = " ".join(f"{key}={value:.5f}" for key, value in metrics.items())
         print(f"[step {step:03d}/{args.steps}] {compact}")
     return metrics
@@ -480,11 +516,21 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             context = _frozen_reward_context(trainer, features, env)
 
 
+            diagnostics_now = (
+                args.diagnostics_interval > 0
+                and step % args.diagnostics_interval == 0
+            )
+            gradient_diagnostics_now = (
+                args.gradient_diagnostics_interval > 0
+                and step % args.gradient_diagnostics_interval == 0
+            )
             metrics = trainer.train_step(
                 features,
                 context=context,
                 generator=generator,
                 paired_validation=False,
+                diagnostics=diagnostics_now,
+                gradient_diagnostics=gradient_diagnostics_now,
             )
 
             fixed_interval = int(args.fixed_validation_interval)
@@ -532,6 +578,10 @@ def main() -> int:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:
         raise SystemExit("--fixed-validation-interval must be >= 1")
+    if args.diagnostics_interval < 0:
+        raise SystemExit("--diagnostics-interval must be >= 0")
+    if args.gradient_diagnostics_interval < 0:
+        raise SystemExit("--gradient-diagnostics-interval must be >= 0")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
