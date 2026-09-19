@@ -1,4 +1,4 @@
-"""Checkpoint compatibility between Lightning pretraining and DiffusionPlannerRuntime."""
+"""Checkpoint compatibility between W2 pretraining and DiffusionPlannerRuntime."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -18,8 +18,8 @@ def load_planner_state_dict(checkpoint_obj) -> Tuple[Dict[str, torch.Tensor], di
     """Return planner-only state_dict plus stored model config when available.
 
     Supported inputs:
-      * W2 Lightning checkpoint: ``planner_state_dict`` is preferred.
-      * W2 Lightning ``state_dict`` with ``planner.`` prefix.
+      * W2 training checkpoint: ``planner_state_dict`` is preferred.
+      * legacy W2 ``state_dict`` with ``planner.`` prefix.
       * runtime checkpoint containing a direct planner ``state_dict``.
       * direct state_dict mapping.
     """

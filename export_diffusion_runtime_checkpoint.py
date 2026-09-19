@@ -6,7 +6,7 @@ from pretraining.checkpoint_io import export_runtime_checkpoint
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Export W2 Lightning checkpoint for DiffusionPlannerRuntime.")
+    parser = argparse.ArgumentParser(description="Export W2 training checkpoint for DiffusionPlannerRuntime.")
     parser.add_argument("checkpoint")
     parser.add_argument("output")
     args = parser.parse_args()

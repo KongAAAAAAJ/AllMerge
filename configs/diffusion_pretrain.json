@@ -1,0 +1,26 @@
+{
+  "model": {},
+  "training": {
+    "dataset_root": "outputs/expert_dataset/allmerge_expert",
+    "output_dir": "outputs/diffusion_pretrain",
+    "train_split": "train",
+    "val_split": "val",
+    "batch_size": 64,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "prefetch_factor": 2,
+    "pin_memory": "auto",
+    "max_epochs": 50,
+    "max_steps": -1,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "min_lr": 0.000001,
+    "warmup_epochs": 3,
+    "device": "auto",
+    "precision": "auto",
+    "grad_clip": 5.0,
+    "check_val_every_n_epoch": 1,
+    "log_every_n_steps": 10,
+    "seed": 0
+  }
+}

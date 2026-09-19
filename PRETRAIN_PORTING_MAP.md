@@ -1,48 +1,34 @@
-# W2 Diffusion Pretraining — PRETRAIN_PORTING_MAP
+# PRETRAIN_PORTING_MAP
 
-Baseline: AllMerge `d946cef` + W1 root-level `expert_dataset.py` handoff.
-Rule: migrate first, adapt second, add only AllMerge-specific glue/tests.
+## Baseline
 
-| Diffusion-metadrive source | Decision | AllMerge target | Reason / adaptation |
-|---|---|---|---|
-| `scripts/run_diffusion_train.sh` | ADAPT | `scripts/run_diffusion_pretrain.sh` | Preserve one-command training entrypoint; replace MetaDrive dataset/anchor arguments with W1 dataset root + W2 config. |
-| `metadrive.policy.diffusion_policy.train_transfuser` | ADAPT | `train_diffusion_pretrain.py` | Preserve Lightning `Trainer`, run directories, TensorBoard, ModelCheckpoint, precision and validation cadence. Replace dataset and model APIs only. |
-| `metadrive.policy.diffusion_policy.transfuser_agent.TransfuserAgent` | ADAPT | `pretraining/lightning_module.py` | Keep LightningModule / optimizer / scheduler structure. Replace `V2TransfuserModel` with existing `StructuredDiffusionPlanner`; call `forward_train()` directly. |
-| `modules/scheduler.WarmupCosLR` | COPY | `pretraining/warmup_cos_lr.py` | Framework-independent; copied with import-path cleanup only. |
-| `transfuser_config.py` training fields | ADAPT | `configs/diffusion_pretrain.yaml` | Keep AdamW, weight decay, warmup/cosine, epochs, precision, dataloader workers. Camera/LiDAR/BEV fields are dropped. |
-| `transfuser_features.MetaDriveTransfuserDataset` | DROP | W1 `expert_dataset.AllMergeExpertShardDataset` | Replaced by frozen `allmerge_planner_v1` shards and collate contract. |
-| `V2TransfuserModel.forward/loss` | DROP | existing `StructuredDiffusionPlanner.forward_train()` | All target-mode assignment, diffusion-noise construction, trajectory regression and classification loss already live in AllMerge model. |
-| `transfuser_loss.py` | DROP | none | Recomputing loss in Trainer is explicitly forbidden. |
-| `transfuser_callback.py` camera/LiDAR visualizer | DROP | none | MetaDrive perception-specific. W2 validation is metric/log based. |
-| `eval_transfuser_open_loop.py` | ADAPT | `eval_diffusion_open_loop.py` | Reuse ADE/FDE concept; add minADE/minFDE and raw/masked mode metrics for 10-mode structured planner; drop camera/LiDAR rendering. |
-| `scripts/run_diffusion_open_loop_eval.sh` | ADAPT | `scripts/run_diffusion_open_loop_eval.sh` | New dataset/model arguments. |
-| `scripts/run_diffusion_test.sh` closed-loop MetaDrive test | DROP | `test_diffusion_runtime_load.py` | W2 scope is pretraining + checkpoint/runtime compatibility. Scenario closed-loop evaluation belongs integration/evaluation windows. |
-| checkpoint/resume | ADAPT | Lightning `.ckpt` + `pretraining/checkpoint_io.py` | Lightning checkpoint remains resumeable; planner-only state is additionally embedded and exported to Runtime-compatible `.pt`. |
-| MetaDrive/NavSim camera/LiDAR/NavSim dependencies | DROP | none | AllMerge structured features are authoritative. |
-| W1/W2 schema guard | NEW | `pretraining/contract.py` | Minimal glue to prevent silent cross-window interface drift. |
-| W2 runtime load test | NEW | `test_diffusion_runtime_load.py` | Required because frozen runtime expects a planner-only `state_dict`, while Lightning resume checkpoints contain wrapper prefixes. |
+AllMerge main after W1 expert-dataset acceptance. The frozen planner trunk remains unchanged:
+`config.py`, `tensor_adapter.py`, `encoders.py`, `diffusion_schedule.py`,
+`mode_assignment.py`, `structured_model.py`, `runtime.py`.
 
-## Frozen ownership boundary
+## Dependency rule
 
-W2 does **not** modify:
+W2 must run in the existing AllMerge environment. `requirements.txt` provides
+PyTorch and TensorBoard but does not require PyTorch Lightning or PyYAML.
+Therefore the migrated orchestration uses pure PyTorch and a JSON config.
+No new training-framework dependency is introduced.
 
-```text
-highway_env/planner/diffusion/config.py
-highway_env/planner/diffusion/tensor_adapter.py
-highway_env/planner/diffusion/encoders.py
-highway_env/planner/diffusion/diffusion_schedule.py
-highway_env/planner/diffusion/mode_assignment.py
-highway_env/planner/diffusion/structured_model.py
-highway_env/planner/diffusion/runtime.py
-```
+## Porting table
 
-W2 consumes W1 directly:
+| Diffusion-metadrive source | Decision | AllMerge target | Adaptation |
+| --- | --- | --- | --- |
+| diffusion train entry / train-val loop | ADAPT | `train_diffusion_pretrain.py`, `pretraining/trainer.py` | Preserve train/val/optimizer/checkpoint flow; replace Lightning wrapper with dependency-free PyTorch orchestration. |
+| optimizer | COPY/ADAPT | `pretraining/trainer.py` | AdamW retained. |
+| warmup + cosine scheduler | COPY | `pretraining/warmup_cos_lr.py` | Mathematical schedule retained. |
+| checkpoint / resume | ADAPT | `pretraining/trainer.py`, `checkpoint_io.py` | Save planner, optimizer, scheduler, scaler, epoch and global step; runtime export stays planner-only. |
+| TensorBoard logging | COPY/ADAPT | `pretraining/trainer.py` | Uses `torch.utils.tensorboard`; JSONL fallback if TensorBoard is unavailable. |
+| old dataset | DROP | W1 `expert_dataset.py` | Consume W1 `build_dataset()` directly. |
+| V2Transfuser model/loss | DROP | `StructuredDiffusionPlanner.forward_train()` | Planner owns target assignment and supervised losses. |
+| camera/LiDAR/NavSim preprocessing | DROP | structured W1 features | Not part of current AllMerge contract. |
+| open-loop evaluation | ADAPT | `eval_diffusion_open_loop.py` | ADE/FDE, minADE/minFDE and mode metrics retained for current output format. |
 
-```text
-batch["features"]
-batch["expert_trajectory"]  -> StructuredDiffusionPlanner.forward_train(..., target_trajectory=...)
-batch["expert_semantic"]    -> StructuredDiffusionPlanner.forward_train(..., target_semantic=...)
-batch["expert_mode"]        -> diagnostic only
-```
+## Hard boundary
 
-No target mode, diffusion target, regression loss, or classification loss is recomputed in W2.
+The trainer must not recompute `target_mode`, semantic assignment, diffusion
+noise targets, trajectory regression loss, or classification loss. Those remain
+inside `StructuredDiffusionPlanner.forward_train()`.

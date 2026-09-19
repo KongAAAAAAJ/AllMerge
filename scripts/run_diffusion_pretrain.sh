@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CONFIG="${CONFIG:-configs/diffusion_pretrain.yaml}"
-DATASET_ROOT="${DATASET_ROOT:-data/expert/allmerge_planner_v1}"
+CONFIG="${CONFIG:-configs/diffusion_pretrain.json}"
+DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/allmerge_expert}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/diffusion_pretrain}"
 
 "${PYTHON_BIN}" train_diffusion_pretrain.py \

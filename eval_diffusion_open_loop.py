@@ -14,7 +14,7 @@ from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
 from pretraining.checkpoint_io import load_checkpoint_file
 from pretraining.contract import validate_model_schema
 from pretraining.dataset_adapter import build_w1_dataloader, metadata_item, unpack_w1_batch
-from train_diffusion_pretrain import load_yaml, resolve_pin_memory
+from pretraining.config_io import load_config, resolve_pin_memory
 
 
 def resolve_device(value: str) -> torch.device:
@@ -31,7 +31,7 @@ def compute_ade_fde(pred: torch.Tensor, target: torch.Tensor):
 def parse_args():
     parser = argparse.ArgumentParser(description="Open-loop AllMerge diffusion evaluation.")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--config", default="configs/diffusion_pretrain.yaml")
+    parser.add_argument("--config", default="configs/diffusion_pretrain.json")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("all", "train", "val", "test"), default="val")
     parser.add_argument("--num-samples", type=int, default=1000)
@@ -45,7 +45,7 @@ def parse_args():
 
 def main() -> int:
     args = parse_args()
-    cfg = load_yaml(args.config)
+    cfg = load_config(args.config)
     model_overrides = dict(cfg.get("model") or {})
     train_cfg = dict(cfg.get("training") or {})
     dataset_root = Path(
