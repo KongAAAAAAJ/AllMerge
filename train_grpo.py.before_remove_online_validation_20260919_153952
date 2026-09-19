@@ -352,6 +352,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
+    parser.add_argument(
+        "--paired-validation-interval",
+        type=int,
+        default=1,
+        help=(
+            "online W4 same-noise current-vs-frozen validation cadence; "
+            "0 disables, 1 validates every step"
+        ),
+    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument(
@@ -490,7 +499,7 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
                 features,
                 context=context,
                 generator=generator,
-                paired_validation=False,
+                paired_validation=paired_now,
             )
 
             fixed_interval = int(args.fixed_validation_interval)
@@ -534,6 +543,8 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
 
 def main() -> int:
     args = parse_args()
+    if args.paired_validation_interval < 0:
+        raise SystemExit("--paired-validation-interval must be >= 0")
     if args.fixed_validation_states < 0:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:
