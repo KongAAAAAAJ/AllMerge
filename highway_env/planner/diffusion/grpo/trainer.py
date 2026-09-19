@@ -306,7 +306,7 @@ class GRPOTrainer:
 
             current_mean = current_rewards[gain_mask].mean()
             frozen_mean = frozen_rewards[gain_mask].mean()
-            positive_fraction = (gain_values > 0.0).to(gain.dtype).mean()
+            positive_fraction = (gain_values > 1e-6).to(gain.dtype).mean()
 
             waypoint_delta = torch.linalg.vector_norm(
                 trace.candidates[..., :2]
