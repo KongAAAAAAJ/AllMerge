@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# GRPO B PAIRED DELTA V1
-
 import argparse
 import csv
 from pathlib import Path
@@ -329,92 +327,6 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
         )
 
 
-
-# GRPO DIAGNOSTICS BASE V1
-
-def _diagnostics_csv_path(args) -> Path:
-    if args.diagnostics_csv is not None:
-        return Path(args.diagnostics_csv)
-    output = Path(args.output)
-    return output.with_name(output.stem + ".diagnostics.csv")
-
-
-def _write_diagnostics_csv(
-    path: Path,
-    *,
-    step: int,
-    metrics: Dict[str, float],
-    initialize: bool,
-) -> None:
-    diagnostics = {
-        key: float(value)
-        for key, value in metrics.items()
-        if key.startswith("diagnostics/")
-    }
-    if not diagnostics:
-        return
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if initialize:
-        fieldnames = ["step", *sorted(diagnostics.keys())]
-        with path.open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.DictWriter(file, fieldnames=fieldnames)
-            writer.writeheader()
-            row = {"step": int(step), **diagnostics}
-            writer.writerow(row)
-        return
-
-    with path.open("r", newline="", encoding="utf-8-sig") as file:
-        reader = csv.reader(file)
-        fieldnames = next(reader)
-
-    row = {name: "" for name in fieldnames}
-    row["step"] = int(step)
-    for key, value in diagnostics.items():
-        if key not in row:
-            raise RuntimeError(
-                "diagnostics CSV schema changed after initialization: " + key
-            )
-        row[key] = value
-
-    with path.open("a", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writerow(row)
-
-
-def _print_diagnostics(step: int, metrics: Dict[str, float]) -> None:
-    gain = metrics.get("diagnostics/online_paired_reward_gain", float("nan"))
-    positive = metrics.get(
-        "diagnostics/online_paired_positive_fraction", float("nan")
-    )
-    reward_std = metrics.get(
-        "diagnostics/within_group_reward_std", float("nan")
-    )
-    pair_distance = metrics.get(
-        "diagnostics/candidate_pairwise_distance_m", float("nan")
-    )
-    message = (
-        f"[diag step {step:03d}] "
-        f"online_gain={gain:.5f} "
-        f"positive_fraction={positive:.3f} "
-        f"group_reward_std={reward_std:.5f} "
-        f"pairwise_distance_m={pair_distance:.5f}"
-    )
-    if "diagnostics/policy_grad_norm" in metrics:
-        message += (
-            f" policy_g={metrics['diagnostics/policy_grad_norm']:.3f}"
-            f" weighted_kl_g={metrics['diagnostics/reference_kl_weighted_grad_norm']:.3f}"
-            f" policy_kl_cos={metrics['diagnostics/policy_kl_grad_cosine']:.3f}"
-        )
-        for key in (
-            "diagnostics/vehicle_01_grad_cosine",
-            "diagnostics/vehicle_02_grad_cosine",
-            "diagnostics/vehicle_12_grad_cosine",
-        ):
-            if key in metrics:
-                message += f" {key.rsplit('/', 1)[-1]}={metrics[key]:.3f}"
-    print(message)
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AllMerge migration-first GRPO trainer")
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -431,7 +343,7 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
@@ -440,24 +352,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
-    parser.add_argument(
-        "--advantage-source",
-        choices=("raw_reward", "paired_delta"),
-        default="raw_reward",
-        help=(
-            "GRPO credit source. raw_reward preserves Gate7 behavior; "
-            "paired_delta uses same-state/same-noise current-minus-frozen reward"
-        ),
-    )
-    parser.add_argument(
-        "--paired-delta-bootstrap-steps",
-        type=int,
-        default=1,
-        help=(
-            "raw-reward train steps used only to bootstrap paired_delta away "
-            "from the current==frozen zero-credit fixed point"
-        ),
-    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument(
@@ -493,30 +387,6 @@ def parse_args() -> argparse.Namespace:
             "<output-stem>.fixed_validation.csv"
         ),
     )
-    parser.add_argument(
-        "--diagnostics-interval",
-        type=int,
-        default=0,
-        help=(
-            "online same-state/same-noise reward + group diagnostics interval; "
-            "0 disables. Step 1 and final step are always included when enabled"
-        ),
-    )
-    parser.add_argument(
-        "--gradient-diagnostics-interval",
-        type=int,
-        default=0,
-        help=(
-            "policy/KL/vehicle gradient diagnostics interval; 0 disables. "
-            "Step 1 and final step are always included when enabled"
-        ),
-    )
-    parser.add_argument(
-        "--diagnostics-csv",
-        type=Path,
-        default=None,
-        help="optional diagnostics CSV path; default is <output-stem>.diagnostics.csv",
-    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=Path, default=Path("outputs/grpo_smoke.pt"))
@@ -543,16 +413,10 @@ def _build_trainer(args: argparse.Namespace):
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
-            advantage_source=args.advantage_source,
-            paired_delta_bootstrap_steps=args.paired_delta_bootstrap_steps,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
-    print(
-        f"[grpo] advantage_source={args.advantage_source} "
-        f"paired_delta_bootstrap_steps={args.paired_delta_bootstrap_steps}"
-    )
     return adapter, trainer, device
 
 
@@ -610,62 +474,18 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
 
         env.reset(seed=int(args.seed))
 
-        diagnostics_enabled = (
-            int(args.diagnostics_interval) > 0
-            or int(args.gradient_diagnostics_interval) > 0
-        )
-        diagnostics_csv = (
-            _diagnostics_csv_path(args)
-            if diagnostics_enabled
-            else None
-        )
-        diagnostics_csv_initialized = False
-
         for step in range(1, args.steps + 1):
             _, _, terminated, truncated, _ = env.step(int(args.group_action))
             features = _scenario_features(env, adapter)
             context = _frozen_reward_context(trainer, features, env)
 
 
-            diagnostic_now = (
-                int(args.diagnostics_interval) > 0
-                and (
-                    step == 1
-                    or step == args.steps
-                    or step % int(args.diagnostics_interval) == 0
-                )
-            )
-            gradient_diagnostic_now = (
-                int(args.gradient_diagnostics_interval) > 0
-                and (
-                    step == 1
-                    or step == args.steps
-                    or step % int(args.gradient_diagnostics_interval) == 0
-                )
-            )
-            diagnostic_now = bool(
-                diagnostic_now or gradient_diagnostic_now
-            )
-
             metrics = trainer.train_step(
                 features,
                 context=context,
                 generator=generator,
                 paired_validation=False,
-                diagnostics=diagnostic_now,
-                gradient_diagnostics=gradient_diagnostic_now,
             )
-
-            if diagnostic_now:
-                _print_diagnostics(step, metrics)
-                assert diagnostics_csv is not None
-                _write_diagnostics_csv(
-                    diagnostics_csv,
-                    step=step,
-                    metrics=metrics,
-                    initialize=not diagnostics_csv_initialized,
-                )
-                diagnostics_csv_initialized = True
 
             fixed_interval = int(args.fixed_validation_interval)
             fixed_now = bool(fixed_states) and (
@@ -712,12 +532,6 @@ def main() -> int:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:
         raise SystemExit("--fixed-validation-interval must be >= 1")
-    if args.diagnostics_interval < 0:
-        raise SystemExit("--diagnostics-interval must be >= 0")
-    if args.gradient_diagnostics_interval < 0:
-        raise SystemExit("--gradient-diagnostics-interval must be >= 0")
-    if args.paired_delta_bootstrap_steps < 0:
-        raise SystemExit("--paired-delta-bootstrap-steps must be >= 0")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
