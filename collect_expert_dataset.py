@@ -1,0 +1,790 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from stable_baselines3.common.utils import set_random_seed
+
+from collect_expert_pilot import (
+    FEATURE_KEYS,
+    MODE_NAMES,
+    SEMANTIC_NAMES,
+    SOURCE_COMMIT as PILOT_SOURCE_COMMIT,
+    _configure_episode_video,
+    _episode_terminal_summary,
+    _write_episode_video_manifest,
+    build_frame_record,
+    get_vec_attr,
+)
+from decide.decide import decide
+from env_reset import env_reset
+from expert_dataset import split_shards
+from mode_selector.mode_selector import set_platoon_mode
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "expert_dataset"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Production AllMerge Polynomial-expert dataset collector. "
+            "Reuses collect_expert_pilot.py for the feature/label contract, "
+            "and adds per-ego flattening, sharding, resume, splits and manifest."
+        )
+    )
+    parser.add_argument("--target-samples", type=int, default=1000)
+    parser.add_argument("--samples-per-shard", type=int, default=2048)
+    parser.add_argument("--start-seed", type=int, default=1)
+    parser.add_argument("--env-name", type=str, default="highway-platoon-v0")
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--dataset-name", type=str, default="allmerge_expert")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--allow-contract-mismatch", action="store_true")
+    parser.add_argument("--save-episode-videos", action="store_true")
+    parser.add_argument("--video-dir", type=Path, default=None)
+    parser.add_argument("--train-split-ratio", type=float, default=0.8)
+    parser.add_argument("--val-split-ratio", type=float, default=0.1)
+    parser.add_argument("--test-split-ratio", type=float, default=0.1)
+    parser.add_argument("--split-seed", type=int, default=0)
+    parser.add_argument("--max-consecutive-empty-episodes", type=int, default=20)
+    args = parser.parse_args()
+
+    if args.target_samples <= 0:
+        parser.error("--target-samples must be positive")
+    if args.samples_per_shard <= 0:
+        parser.error("--samples-per-shard must be positive")
+    if args.max_consecutive_empty_episodes <= 0:
+        parser.error("--max-consecutive-empty-episodes must be positive")
+    return args
+
+
+def resolve_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _scalar_array(value, dtype) -> np.ndarray:
+    return np.asarray(value, dtype=dtype)
+
+
+def _select_ego_value(
+    value: np.ndarray,
+    ego_index: int,
+    ego_count: int,
+) -> np.ndarray:
+    value = np.asarray(value)
+    if value.ndim >= 1 and value.shape[0] == ego_count:
+        return np.asarray(value[ego_index]).copy()
+    return value.copy()
+
+
+def flatten_frame_record(record: Dict) -> List[Dict[str, np.ndarray]]:
+    """
+    Convert the existing pilot frame record to one sample per controlled ego.
+
+    No feature or target is recomputed here. build_frame_record() stays the
+    single authoritative source of expert labels.
+    """
+    target_mode = np.asarray(record["target_mode"])
+    if target_mode.ndim != 1:
+        raise ValueError(
+            "Expected target_mode [num_egos], got "
+            f"{target_mode.shape}"
+        )
+
+    ego_count = int(target_mode.shape[0])
+    per_ego_keys = (
+        "expert_trajectory_xy",
+        "target_mode",
+        "target_semantic",
+        "target_mode_traffic_valid",
+        "target_mode_geometry_valid",
+        "target_mode_assignment_distance",
+        "selected_anchor_xy",
+        "geometry_semantic_residual_xy",
+        "geometry_semantic_ade",
+        "geometry_semantic_fde",
+        "geometry_semantic_max_abs_dx",
+        "geometry_semantic_max_abs_dy",
+    )
+
+    samples: List[Dict[str, np.ndarray]] = []
+    for ego_index in range(ego_count):
+        sample: Dict[str, np.ndarray] = {}
+
+        for key in FEATURE_KEYS:
+            value = np.asarray(record["features"][key])
+            if value.ndim == 0 or value.shape[0] != ego_count:
+                raise ValueError(
+                    f"Feature {key} shape={value.shape}, "
+                    f"expected leading ego dimension={ego_count}"
+                )
+            sample[key] = np.asarray(value[ego_index]).copy()
+
+        for key in per_ego_keys:
+            sample[key] = _select_ego_value(
+                np.asarray(record[key]),
+                ego_index,
+                ego_count,
+            )
+
+        sample["trajectory_time_s"] = _select_ego_value(
+            np.asarray(record["trajectory_time_s"]),
+            ego_index,
+            ego_count,
+        ).astype(np.float32, copy=False)
+
+        sample["frame_index"] = _scalar_array(record["frame_index"], np.int64)
+        sample["episode_index"] = _scalar_array(record["episode_index"], np.int64)
+        sample["episode_step"] = _scalar_array(record["episode_step"], np.int64)
+        sample["seed"] = _scalar_array(record["seed"], np.int64)
+        sample["ego_index"] = _scalar_array(ego_index, np.int64)
+        sample["contract_ok"] = _scalar_array(record["contract_ok"], np.bool_)
+        samples.append(sample)
+
+    return samples
+
+
+class ShardWriter:
+    """
+    Diffusion-metadrive-style buffered NPZ writer, adapted with:
+      - sample schema checking;
+      - atomic shard replacement.
+    """
+
+    def __init__(
+        self,
+        output_dir: Path,
+        samples_per_shard: int,
+        start_shard_index: int = 0,
+    ):
+        self.output_dir = Path(output_dir)
+        self.samples_per_shard = int(samples_per_shard)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
+        self.buffer_size = 0
+        self.shard_index = int(start_shard_index)
+        self.schema = None
+
+    @staticmethod
+    def _sample_schema(sample: Dict[str, np.ndarray]):
+        return {
+            key: (
+                tuple(np.asarray(value).shape),
+                str(np.asarray(value).dtype),
+            )
+            for key, value in sample.items()
+        }
+
+    def _validate_sample(self, sample: Dict[str, np.ndarray]) -> None:
+        schema = self._sample_schema(sample)
+        if self.schema is None:
+            self.schema = schema
+            return
+
+        if schema != self.schema:
+            missing = sorted(set(self.schema) - set(schema))
+            extra = sorted(set(schema) - set(self.schema))
+            changed = {
+                key: (self.schema[key], schema[key])
+                for key in set(self.schema) & set(schema)
+                if self.schema[key] != schema[key]
+            }
+            raise ValueError(
+                "Dataset sample schema drift detected. "
+                f"missing={missing}, extra={extra}, changed={changed}"
+            )
+
+    def add_samples(self, samples: List[Dict[str, np.ndarray]]) -> int:
+        if not samples:
+            return 0
+
+        for sample in samples:
+            self._validate_sample(sample)
+            for key, value in sample.items():
+                self.buffers[key].append(np.asarray(value))
+
+        self.buffer_size += len(samples)
+        written = 0
+        while self.buffer_size >= self.samples_per_shard:
+            self._flush_one(self.samples_per_shard)
+            written += self.samples_per_shard
+        return written
+
+    def close(self) -> int:
+        if self.buffer_size == 0:
+            return 0
+        remaining = int(self.buffer_size)
+        self._flush_one(remaining)
+        return remaining
+
+    def _flush_one(self, count: int) -> None:
+        stacked = {
+            key: np.stack(values[:count], axis=0)
+            for key, values in self.buffers.items()
+        }
+
+        shard_path = self.output_dir / f"shard_{self.shard_index:06d}.npz"
+        tmp_path = self.output_dir / f".shard_{self.shard_index:06d}.npz.tmp"
+
+        with tmp_path.open("wb") as handle:
+            np.savez_compressed(handle, **stacked)
+        os.replace(tmp_path, shard_path)
+
+        for values in self.buffers.values():
+            del values[:count]
+
+        self.buffer_size -= count
+        self.shard_index += 1
+        print(f"[shard] wrote {count} samples -> {shard_path}")
+
+
+def _parse_shard_index(path: Path) -> int:
+    if not path.stem.startswith("shard_"):
+        return -1
+    try:
+        return int(path.stem[len("shard_"):])
+    except ValueError:
+        return -1
+
+
+def detect_existing_state(shard_dir: Path) -> Dict[str, int]:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    total_samples = 0
+    max_episode_index = -1
+    max_frame_index = -1
+    max_sample_index = -1
+
+    for shard_path in shard_paths:
+        with np.load(shard_path, allow_pickle=False) as shard:
+            if "expert_trajectory_xy" not in shard.files:
+                raise KeyError(
+                    f"{shard_path} missing expert_trajectory_xy"
+                )
+
+            shard_len = int(shard["expert_trajectory_xy"].shape[0])
+            total_samples += shard_len
+
+            if "episode_index" in shard.files and shard_len:
+                max_episode_index = max(
+                    max_episode_index,
+                    int(np.max(shard["episode_index"])),
+                )
+            if "frame_index" in shard.files and shard_len:
+                max_frame_index = max(
+                    max_frame_index,
+                    int(np.max(shard["frame_index"])),
+                )
+            if "sample_index" in shard.files and shard_len:
+                max_sample_index = max(
+                    max_sample_index,
+                    int(np.max(shard["sample_index"])),
+                )
+
+    next_shard_index = 0
+    if shard_paths:
+        next_shard_index = max(
+            _parse_shard_index(path)
+            for path in shard_paths
+        ) + 1
+
+    return {
+        "shard_count": len(shard_paths),
+        "next_shard_index": next_shard_index,
+        "total_samples": total_samples,
+        "next_episode_index": max_episode_index + 1,
+        "next_frame_index": max_frame_index + 1,
+        "next_sample_index": (
+            max_sample_index + 1
+            if max_sample_index >= 0
+            else total_samples
+        ),
+    }
+
+
+def summarize_shards(shard_dir: Path) -> Dict:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    mode_counts = {name: 0 for name in MODE_NAMES}
+    semantic_counts = {name: 0 for name in SEMANTIC_NAMES}
+    sample_count = 0
+    contract_failures = 0
+    traffic_valid_count = 0
+    geometry_valid_count = 0
+
+    for shard_path in shard_paths:
+        with np.load(shard_path, allow_pickle=False) as shard:
+            n = int(shard["expert_trajectory_xy"].shape[0])
+            sample_count += n
+            modes = np.asarray(shard["target_mode"], dtype=np.int64).reshape(-1)
+            semantics = np.asarray(
+                shard["target_semantic"],
+                dtype=np.int64,
+            ).reshape(-1)
+
+            for idx, name in enumerate(MODE_NAMES):
+                mode_counts[name] += int((modes == idx).sum())
+            for idx, name in enumerate(SEMANTIC_NAMES):
+                semantic_counts[name] += int((semantics == idx).sum())
+
+            if "contract_ok" in shard.files:
+                contract = np.asarray(
+                    shard["contract_ok"],
+                    dtype=bool,
+                ).reshape(-1)
+                contract_failures += int((~contract).sum())
+
+            if "target_mode_traffic_valid" in shard.files:
+                traffic_valid_count += int(
+                    np.asarray(
+                        shard["target_mode_traffic_valid"],
+                        dtype=bool,
+                    ).sum()
+                )
+
+            if "target_mode_geometry_valid" in shard.files:
+                geometry_valid_count += int(
+                    np.asarray(
+                        shard["target_mode_geometry_valid"],
+                        dtype=bool,
+                    ).sum()
+                )
+
+    denom = max(sample_count, 1)
+    return {
+        "sample_count": sample_count,
+        "shard_count": len(shard_paths),
+        "target_mode_distribution": {
+            name: {
+                "count": int(count),
+                "ratio": float(count / denom),
+            }
+            for name, count in mode_counts.items()
+        },
+        "semantic_distribution": {
+            name: {
+                "count": int(count),
+                "ratio": float(count / denom),
+            }
+            for name, count in semantic_counts.items()
+        },
+        "contract_failures": int(contract_failures),
+        "target_mode_traffic_valid_ratio": float(
+            traffic_valid_count / denom
+        ),
+        "target_mode_geometry_valid_ratio": float(
+            geometry_valid_count / denom
+        ),
+    }
+
+
+def infer_schema(shard_dir: Path) -> Dict:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    if not shard_paths:
+        return {}
+
+    with np.load(shard_paths[0], allow_pickle=False) as shard:
+        return {
+            key: {
+                "sample_shape": list(shard[key].shape[1:]),
+                "dtype": str(shard[key].dtype),
+            }
+            for key in shard.files
+        }
+
+
+def write_manifest(
+    *,
+    args: argparse.Namespace,
+    dataset_root: Path,
+    split_summary: Dict,
+    collection_wall_time_sec: float,
+    resumed_from_samples: int,
+) -> Path:
+    shard_dir = dataset_root / "shards"
+    report_dir = dataset_root / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = summarize_shards(shard_dir)
+    manifest_path = report_dir / "manifest.json"
+
+    existing_manifest = {}
+    if args.resume and manifest_path.exists():
+        try:
+            existing_manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            existing_manifest = {}
+
+    manifest = {
+        "dataset_name": args.dataset_name,
+        "repo_commit": resolve_git_commit(),
+        "pilot_source_commit_constant": PILOT_SOURCE_COMMIT,
+        "collector_contract_source": (
+            "collect_expert_pilot.build_frame_record + "
+            "latest_planner_features/latest_expert_alignment"
+        ),
+        "expert_type": "Polynomial",
+        "sample_unit": "one controlled ego at one valid 10-Hz planning frame",
+        "target_samples": int(args.target_samples),
+        "collected_samples": int(summary["sample_count"]),
+        "feature_keys": list(FEATURE_KEYS),
+        "mode_names": list(MODE_NAMES),
+        "semantic_names": list(SEMANTIC_NAMES),
+        "trajectory_horizon": {
+            "steps": 8,
+            "dt_sec": 0.5,
+            "horizon_sec": 4.0,
+        },
+        "schema": infer_schema(shard_dir),
+        "summary": summary,
+        "splits": {
+            name: len(names)
+            for name, names in split_summary.items()
+        },
+        "collection_wall_time_sec": float(collection_wall_time_sec),
+        "config": {
+            "env_name": args.env_name,
+            "start_seed": int(args.start_seed),
+            "samples_per_shard": int(args.samples_per_shard),
+            "allow_contract_mismatch": bool(args.allow_contract_mismatch),
+            "save_episode_videos": bool(args.save_episode_videos),
+            "split_seed": int(args.split_seed),
+            "split_ratios": [
+                float(args.train_split_ratio),
+                float(args.val_split_ratio),
+                float(args.test_split_ratio),
+            ],
+        },
+        "resume_history": existing_manifest.get("resume_history", [])
+        + (
+            [
+                {
+                    "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+                    "resumed_from_samples": int(resumed_from_samples),
+                    "final_samples": int(summary["sample_count"]),
+                }
+            ]
+            if args.resume
+            else []
+        ),
+    }
+
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def main() -> None:
+    args = parse_args()
+
+    set_random_seed(
+        args.start_seed,
+        using_cuda=torch.cuda.is_available(),
+    )
+
+    dataset_root = (
+        Path(args.output_root).resolve()
+        / args.dataset_name
+    )
+    shard_dir = dataset_root / "shards"
+    report_dir = dataset_root / "reports"
+    video_output_dir = (
+        Path(args.video_dir).resolve()
+        if args.video_dir
+        else report_dir / "videos"
+    )
+
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_episode_videos:
+        video_output_dir.mkdir(parents=True, exist_ok=True)
+
+    episode_video_manifest_path = (
+        video_output_dir / "episode_video_manifest.json"
+    )
+    episode_video_records = []
+
+    if args.resume:
+        state = detect_existing_state(shard_dir)
+    else:
+        existing_shards = list(shard_dir.glob("shard_*.npz"))
+        if existing_shards:
+            raise FileExistsError(
+                f"{shard_dir} already contains shards. "
+                "Use --resume or choose another --dataset-name."
+            )
+        state = {
+            "shard_count": 0,
+            "next_shard_index": 0,
+            "total_samples": 0,
+            "next_episode_index": 0,
+            "next_frame_index": 0,
+            "next_sample_index": 0,
+        }
+
+    resumed_from_samples = int(state["total_samples"])
+
+    if resumed_from_samples >= args.target_samples:
+        print(
+            "[resume] target already satisfied: "
+            f"{resumed_from_samples} >= {args.target_samples}"
+        )
+        split_summary = split_shards(
+            dataset_root=dataset_root,
+            train_ratio=args.train_split_ratio,
+            val_ratio=args.val_split_ratio,
+            test_ratio=args.test_split_ratio,
+            seed=args.split_seed,
+        )
+        manifest_path = write_manifest(
+            args=args,
+            dataset_root=dataset_root,
+            split_summary=split_summary,
+            collection_wall_time_sec=0.0,
+            resumed_from_samples=resumed_from_samples,
+        )
+        print(f"manifest: {manifest_path}")
+        return
+
+    writer = ShardWriter(
+        shard_dir,
+        args.samples_per_shard,
+        start_shard_index=state["next_shard_index"],
+    )
+
+    total_samples = int(state["total_samples"])
+    episode_index = int(state["next_episode_index"])
+    frame_index = int(state["next_frame_index"])
+    next_sample_index = int(state["next_sample_index"])
+
+    skipped_done_steps = 0
+    consecutive_empty_episodes = 0
+    start_time = time.time()
+
+    print("=" * 108)
+    print("ALLMERGE EXPERT DATASET COLLECTION")
+    print("=" * 108)
+    print("repo commit:", resolve_git_commit())
+    print("pilot source commit constant:", PILOT_SOURCE_COMMIT)
+    print("target samples:", args.target_samples)
+    print("existing samples:", total_samples)
+    print("samples per shard:", args.samples_per_shard)
+    print("dataset root:", dataset_root)
+    print("=" * 108)
+
+    while total_samples < args.target_samples:
+        episode_seed = args.start_seed + episode_index
+        env = None
+        video_env = None
+        episode_step = 0
+        episode_added = 0
+        episode_done = False
+        episode_terminal = {
+            "reason": "collection_target_reached",
+            "terminated": False,
+            "truncated": False,
+        }
+        episode_video_path = None
+
+        try:
+            env, video_env, obs = env_reset(
+                args.env_name,
+                seed=episode_seed,
+            )
+
+            if args.save_episode_videos:
+                episode_video_path = (
+                    video_output_dir
+                    / (
+                        f"episode_{episode_index:06d}"
+                        f"_seed_{episode_seed:08d}.mp4"
+                    )
+                )
+                episode_video_path = _configure_episode_video(
+                    video_env,
+                    episode_video_path,
+                )
+
+            runner_env = (
+                video_env
+                if args.save_episode_videos
+                else env
+            )
+
+            while total_samples < args.target_samples:
+                mode = set_platoon_mode()
+                action = decide(obs, mode)
+
+                obs, _reward, done, infos = runner_env.step(action)
+                episode_step += 1
+
+                if bool(done[0]):
+                    skipped_done_steps += 1
+                    episode_done = True
+                    terminal_info = infos[0] if infos else {}
+                    episode_terminal = _episode_terminal_summary(
+                        terminal_info
+                    )
+                    break
+
+                features = get_vec_attr(
+                    env,
+                    "latest_planner_features",
+                )
+                alignment = get_vec_attr(
+                    env,
+                    "latest_expert_alignment",
+                )
+
+                frame_record = build_frame_record(
+                    frame_index=frame_index,
+                    episode_index=episode_index,
+                    episode_step=episode_step,
+                    seed=episode_seed,
+                    features=features,
+                    alignment=alignment,
+                    allow_contract_mismatch=args.allow_contract_mismatch,
+                )
+
+                samples = flatten_frame_record(frame_record)
+                remaining = args.target_samples - total_samples
+                samples = samples[:remaining]
+
+                for sample in samples:
+                    sample["sample_index"] = _scalar_array(
+                        next_sample_index,
+                        np.int64,
+                    )
+                    next_sample_index += 1
+
+                writer.add_samples(samples)
+                total_samples += len(samples)
+                episode_added += len(samples)
+                frame_index += 1
+
+                if (
+                    total_samples % 100 == 0
+                    or total_samples == args.target_samples
+                ):
+                    print(
+                        "[collect] "
+                        f"{total_samples}/{args.target_samples} samples | "
+                        f"episode={episode_index} | "
+                        f"step={episode_step} | "
+                        f"buffer={writer.buffer_size}"
+                    )
+
+        finally:
+            if video_env is not None:
+                try:
+                    video_env.close()
+                except Exception:
+                    pass
+            elif env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
+        if args.save_episode_videos:
+            if (
+                episode_video_path is None
+                or not episode_video_path.exists()
+            ):
+                raise RuntimeError(
+                    "Episode video requested but not created. "
+                    f"episode={episode_index}, expected={episode_video_path}"
+                )
+
+            episode_video_records.append(
+                {
+                    "episode_index": int(episode_index),
+                    "seed": int(episode_seed),
+                    "video_path": str(episode_video_path),
+                    "environment_steps": int(episode_step),
+                    "done": bool(episode_done),
+                    "collected_samples": int(episode_added),
+                    "terminal": episode_terminal,
+                }
+            )
+            _write_episode_video_manifest(
+                episode_video_records,
+                episode_video_manifest_path,
+            )
+
+        if episode_added == 0:
+            consecutive_empty_episodes += 1
+        else:
+            consecutive_empty_episodes = 0
+
+        if (
+            consecutive_empty_episodes
+            >= args.max_consecutive_empty_episodes
+        ):
+            raise RuntimeError(
+                "Too many consecutive episodes produced no valid samples: "
+                f"{consecutive_empty_episodes}"
+            )
+
+        episode_index += 1
+
+    writer.close()
+
+    split_summary = split_shards(
+        dataset_root=dataset_root,
+        train_ratio=args.train_split_ratio,
+        val_ratio=args.val_split_ratio,
+        test_ratio=args.test_split_ratio,
+        seed=args.split_seed,
+    )
+
+    wall_time = time.time() - start_time
+    manifest_path = write_manifest(
+        args=args,
+        dataset_root=dataset_root,
+        split_summary=split_summary,
+        collection_wall_time_sec=wall_time,
+        resumed_from_samples=resumed_from_samples,
+    )
+    final_summary = summarize_shards(shard_dir)
+
+    print("\n" + "=" * 108)
+    print("EXPERT DATASET COMPLETE")
+    print("=" * 108)
+    print("samples:", final_summary["sample_count"])
+    print("shards:", final_summary["shard_count"])
+    print("contract failures:", final_summary["contract_failures"])
+    print(
+        "target-mode traffic-valid ratio:",
+        f"{final_summary['target_mode_traffic_valid_ratio']:.2%}",
+    )
+    print(
+        "target-mode geometry-valid ratio:",
+        f"{final_summary['target_mode_geometry_valid_ratio']:.2%}",
+    )
+    print("manifest:", manifest_path)
+    print("done transitions skipped:", skipped_done_steps)
+    print("=" * 108)
+
+
+if __name__ == "__main__":
+    main()
