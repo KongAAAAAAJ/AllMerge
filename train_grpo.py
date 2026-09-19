@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 from pathlib import Path
 from typing import Dict, Iterable
 
@@ -107,6 +108,225 @@ def _frozen_reward_context(
     )
 
 
+
+# FIXED-STATE PAIRED VALIDATION V1
+
+def _build_fixed_validation_states(
+    args,
+    adapter: PlannerTensorAdapter,
+    trainer: GRPOTrainer,
+):
+    """Create deterministic validation env states once and keep them frozen."""
+    count = int(args.fixed_validation_states)
+    if count <= 0:
+        return []
+
+    env_cls = SCENARIOS[args.scenario]
+    fixed_states = []
+    print(
+        f"[fixed-val] building {count} states | "
+        f"scenario={args.scenario} "
+        f"seed_offset={args.fixed_validation_seed_offset}"
+    )
+
+    try:
+        for index in range(count):
+            state_seed = (
+                int(args.seed)
+                + int(args.fixed_validation_seed_offset)
+                + index
+            )
+            sample_seed = (
+                int(args.seed)
+                + 2 * int(args.fixed_validation_seed_offset)
+                + index
+            )
+
+            env = env_cls(
+                config={
+                    "show_trajectories": False,
+                    "show_future_trajectories": False,
+                },
+                render_mode=None,
+            )
+            env.reset(seed=state_seed)
+
+            _, _, terminated, truncated, _ = env.step(int(args.group_action))
+            if bool(terminated) or bool(truncated):
+                env.close()
+                raise RuntimeError(
+                    "fixed validation state terminated on construction: "
+                    f"index={index}, seed={state_seed}"
+                )
+
+            raw_features = _scenario_features(env, adapter)
+            features = {
+                key: value.detach().clone()
+                for key, value in raw_features.items()
+            }
+            context = _frozen_reward_context(trainer, features, env)
+
+            fixed_states.append(
+                {
+                    "index": index,
+                    "state_seed": state_seed,
+                    "sample_seed": sample_seed,
+                    "env": env,
+                    "features": features,
+                    "context": context,
+                }
+            )
+    except Exception:
+        for item in fixed_states:
+            try:
+                item["env"].close()
+            except Exception:
+                pass
+        raise
+
+    print(f"[fixed-val] cached={len(fixed_states)}")
+    return fixed_states
+
+
+def _close_fixed_validation_states(fixed_states) -> None:
+    for item in fixed_states:
+        try:
+            item["env"].close()
+        except Exception:
+            pass
+
+
+def _fixed_state_paired_validation(
+    trainer: GRPOTrainer,
+    fixed_states,
+    *,
+    device: torch.device,
+) -> Dict[str, float]:
+    """Evaluate current/frozen policies on identical cached states and noise."""
+    if not fixed_states:
+        return {}
+
+    trainer.model.eval()
+    trainer.reference_model.eval()
+
+    per_state = []
+    with torch.no_grad():
+        for item in fixed_states:
+            current_generator = torch.Generator(
+                device=device.type
+            ).manual_seed(int(item["sample_seed"]))
+            frozen_generator = torch.Generator(
+                device=device.type
+            ).manual_seed(int(item["sample_seed"]))
+
+            features = item["features"]
+            context = item["context"]
+
+            current_trace = trainer.sampler.sample(
+                features,
+                generator=current_generator,
+            )
+            current_rewards = trainer.reward_adapter(
+                current_trace.candidates,
+                features=features,
+                context=context,
+            )
+            metrics = trainer.paired_validation(
+                current_trace,
+                current_rewards,
+                features,
+                context=context,
+                generator=frozen_generator,
+            )
+            per_state.append(metrics)
+
+    def array(key: str) -> np.ndarray:
+        return np.asarray(
+            [float(row[key]) for row in per_state],
+            dtype=np.float64,
+        )
+
+    gains = array("validation/paired_group_reward_gain")
+    current_rewards = array("validation/paired_group_current_reward_mean")
+    frozen_rewards = array("validation/paired_group_frozen_reward_mean")
+    candidate_delta = array("validation/paired_candidate_delta_m")
+
+    group_size = int(trainer.config.group_size)
+    result: Dict[str, float] = {
+        "fixed_validation/state_count": float(len(fixed_states)),
+        "fixed_validation/current_reward_mean": float(current_rewards.mean()),
+        "fixed_validation/frozen_reward_mean": float(frozen_rewards.mean()),
+        "fixed_validation/paired_reward_gain_mean": float(gains.mean()),
+        "fixed_validation/paired_reward_gain_median": float(np.median(gains)),
+        "fixed_validation/paired_reward_gain_p05": float(np.quantile(gains, 0.05)),
+        "fixed_validation/paired_reward_gain_p95": float(np.quantile(gains, 0.95)),
+        "fixed_validation/positive_fraction": float(np.mean(gains > 0.0)),
+        "fixed_validation/candidate_delta_m_mean": float(candidate_delta.mean()),
+        f"fixed_validation/paired_n{group_size}_reward_gain_mean": float(gains.mean()),
+    }
+
+    for role in range(3):
+        role_gains = array(f"validation/vehicle_{role}_reward_gain")
+        result[f"fixed_validation/vehicle_{role}_reward_gain_mean"] = float(
+            role_gains.mean()
+        )
+
+    return result
+
+
+def _fixed_validation_csv_path(args) -> Path:
+    if args.fixed_validation_csv is not None:
+        return Path(args.fixed_validation_csv)
+    output = Path(args.output)
+    return output.with_name(output.stem + ".fixed_validation.csv")
+
+
+def _write_fixed_validation_csv(
+    path: Path,
+    *,
+    step: int,
+    metrics: Dict[str, float],
+    initialize: bool,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["step", *sorted(metrics.keys())]
+    mode = "w" if initialize else "a"
+
+    with path.open(mode, newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        if initialize:
+            writer.writeheader()
+        row = {"step": int(step)}
+        row.update({key: float(value) for key, value in metrics.items()})
+        writer.writerow(row)
+
+
+def _print_fixed_validation(step: int, metrics: Dict[str, float]) -> None:
+    print(
+        f"[fixed-val step {step:03d}] "
+        f"states={int(metrics['fixed_validation/state_count'])} "
+        f"gain_mean={metrics['fixed_validation/paired_reward_gain_mean']:.5f} "
+        f"gain_median={metrics['fixed_validation/paired_reward_gain_median']:.5f} "
+        f"positive_fraction={metrics['fixed_validation/positive_fraction']:.3f} "
+        f"candidate_delta_m={metrics['fixed_validation/candidate_delta_m_mean']:.5f}"
+    )
+
+
+def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
+    gain = abs(float(metrics["fixed_validation/paired_reward_gain_mean"]))
+    delta = float(metrics["fixed_validation/candidate_delta_m_mean"])
+    if gain >= 1e-3:
+        raise RuntimeError(
+            "fixed validation step-0 paired reward gain is not near zero: "
+            f"{gain:.9g}"
+        )
+    if delta >= 1e-3:
+        raise RuntimeError(
+            "fixed validation step-0 paired candidate delta exceeds 1 mm: "
+            f"{delta:.9g} m"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AllMerge migration-first GRPO trainer")
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -143,6 +363,39 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
+    parser.add_argument(
+        "--fixed-validation-states",
+        type=int,
+        default=0,
+        help=(
+            "number of cached fixed online states; "
+            "0 disables fixed-state validation"
+        ),
+    )
+    parser.add_argument(
+        "--fixed-validation-interval",
+        type=int,
+        default=10,
+        help=(
+            "optimizer-step interval for fixed-state validation; "
+            "step 0 and final step are always evaluated"
+        ),
+    )
+    parser.add_argument(
+        "--fixed-validation-seed-offset",
+        type=int,
+        default=10000,
+        help="deterministic seed offset for fixed validation states",
+    )
+    parser.add_argument(
+        "--fixed-validation-csv",
+        type=Path,
+        default=None,
+        help=(
+            "optional CSV path; default is "
+            "<output-stem>.fixed_validation.csv"
+        ),
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=Path, default=Path("outputs/grpo_smoke.pt"))
@@ -191,38 +444,100 @@ def _run_fake(args, adapter, trainer, device, generator) -> Dict[str, float]:
 
 def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
     if args.batch_size != 1:
-        print("[INFO] --batch-size is ignored for online W4 reward; scenario batch is the 3-vehicle platoon")
+        print(
+            "[INFO] --batch-size is ignored for online W4 reward; "
+            "scenario batch is the 3-vehicle platoon"
+        )
 
     env_cls = SCENARIOS[args.scenario]
     env = env_cls(
-        config={"show_trajectories": False, "show_future_trajectories": False},
+        config={
+            "show_trajectories": False,
+            "show_future_trajectories": False,
+        },
         render_mode=None,
     )
+
+    fixed_states = []
     metrics: Dict[str, float] = {}
     try:
+        fixed_states = _build_fixed_validation_states(args, adapter, trainer)
+        fixed_csv = _fixed_validation_csv_path(args) if fixed_states else None
+
+        if fixed_states:
+            fixed_metrics = _fixed_state_paired_validation(
+                trainer,
+                fixed_states,
+                device=device,
+            )
+            _validate_fixed_step_zero(fixed_metrics)
+            _print_fixed_validation(0, fixed_metrics)
+            assert fixed_csv is not None
+            _write_fixed_validation_csv(
+                fixed_csv,
+                step=0,
+                metrics=fixed_metrics,
+                initialize=True,
+            )
+            print(f"[fixed-val] csv={fixed_csv}")
+
         env.reset(seed=int(args.seed))
+
         for step in range(1, args.steps + 1):
             _, _, terminated, truncated, _ = env.step(int(args.group_action))
             features = _scenario_features(env, adapter)
             context = _frozen_reward_context(trainer, features, env)
-            interval = int(args.paired_validation_interval)
-            paired_now = interval > 0 and (
+
+            online_interval = int(args.paired_validation_interval)
+            paired_now = online_interval > 0 and (
                 step == 1
                 or step == args.steps
-                or step % interval == 0
+                or step % online_interval == 0
             )
+
             metrics = trainer.train_step(
                 features,
                 context=context,
                 generator=generator,
                 paired_validation=paired_now,
             )
-            compact = " ".join(f"{key}={value:.5f}" for key, value in metrics.items())
-            print(f"[step {step:03d}/{args.steps}] scenario={args.scenario} {compact}")
+
+            fixed_interval = int(args.fixed_validation_interval)
+            fixed_now = bool(fixed_states) and (
+                step == args.steps
+                or step % fixed_interval == 0
+            )
+            if fixed_now:
+                fixed_metrics = _fixed_state_paired_validation(
+                    trainer,
+                    fixed_states,
+                    device=device,
+                )
+                metrics.update(fixed_metrics)
+                _print_fixed_validation(step, fixed_metrics)
+
+                assert fixed_csv is not None
+                _write_fixed_validation_csv(
+                    fixed_csv,
+                    step=step,
+                    metrics=fixed_metrics,
+                    initialize=False,
+                )
+
+            compact = " ".join(
+                f"{key}={value:.5f}" for key, value in metrics.items()
+            )
+            print(
+                f"[step {step:03d}/{args.steps}] "
+                f"scenario={args.scenario} {compact}"
+            )
+
             if bool(terminated) or bool(truncated):
                 env.reset(seed=int(args.seed) + step)
     finally:
         env.close()
+        _close_fixed_validation_states(fixed_states)
+
     return metrics
 
 
@@ -230,6 +545,10 @@ def main() -> int:
     args = parse_args()
     if args.paired_validation_interval < 0:
         raise SystemExit("--paired-validation-interval must be >= 0")
+    if args.fixed_validation_states < 0:
+        raise SystemExit("--fixed-validation-states must be >= 0")
+    if args.fixed_validation_interval < 1:
+        raise SystemExit("--fixed-validation-interval must be >= 1")
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
