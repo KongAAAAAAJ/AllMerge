@@ -1,0 +1,62 @@
+{
+  "name": "AllMerge W2 Diffusion Pretraining Migration",
+  "baseline": "d946cef",
+  "frozen_planner_files": [
+    "highway_env/planner/diffusion/config.py",
+    "highway_env/planner/diffusion/tensor_adapter.py",
+    "highway_env/planner/diffusion/encoders.py",
+    "highway_env/planner/diffusion/diffusion_schedule.py",
+    "highway_env/planner/diffusion/mode_assignment.py",
+    "highway_env/planner/diffusion/structured_model.py",
+    "highway_env/planner/diffusion/runtime.py"
+  ],
+  "w1_runtime_dependencies": [
+    "expert_dataset.py"
+  ],
+  "written_files": [
+    "HANDOFF_PRETRAIN.md",
+    "PRETRAIN_PORTING_MAP.md",
+    "STATIC_VERIFICATION.md",
+    "configs/diffusion_pretrain.yaml",
+    "eval_diffusion_open_loop.py",
+    "export_diffusion_runtime_checkpoint.py",
+    "pretraining/__init__.py",
+    "pretraining/checkpoint_io.py",
+    "pretraining/contract.py",
+    "pretraining/dataset_adapter.py",
+    "pretraining/lightning_module.py",
+    "pretraining/smoke_test_contract.py",
+    "pretraining/warmup_cos_lr.py",
+    "reports/100_sample_overfit_report.md",
+    "reports/1k_smoke_report.md",
+    "scripts/run_diffusion_open_loop_eval.sh",
+    "scripts/run_diffusion_overfit_100.sh",
+    "scripts/run_diffusion_pretrain.sh",
+    "scripts/run_diffusion_smoke_1k.sh",
+    "test_diffusion_runtime_load.py",
+    "train_diffusion_pretrain.py"
+  ],
+  "sha256": {
+    "HANDOFF_PRETRAIN.md": "b830f63fe7f6df554637d524367098834043229760602fbfa2870754fdd2fce8",
+    "PRETRAIN_PORTING_MAP.md": "e00e8dfb37e6d6ebbb33728b09e4b1242de0c3ccafd13bcab4d44c12925c4ded",
+    "STATIC_VERIFICATION.md": "c9ac55a53986f6dc2b066c0b4ce4b907953679f8c386061fb46da73b9096d18f",
+    "configs/diffusion_pretrain.yaml": "acda83a8be63463e8124241dc8fc24a1124a90006de34d60b704c45f7fce122e",
+    "eval_diffusion_open_loop.py": "c01e8e758722d4417207daca43534ffe39b9473020530dde3a013fca9162da52",
+    "export_diffusion_runtime_checkpoint.py": "c4d7eea9ad7d2315f861cdd4e2ff630d75be3e9eeec9b108386cea8073505f6b",
+    "pretraining/__init__.py": "5c74534f815254fea271f8817d1488fc2f6917b5bd76904b3996290bbf0fa8f9",
+    "pretraining/checkpoint_io.py": "c1fcb9fd539fbf7fa83811d2944659c2d3636d9fdffdce1dc1713730791c2a52",
+    "pretraining/contract.py": "75859e506429e36b6276f41a4c29fb8963c71edeff4158c4215133cb0be7938a",
+    "pretraining/dataset_adapter.py": "bf4e703185b558e7ac3f21ea72289e0a4fcae1b5fbc893013cf30312465e1d89",
+    "pretraining/lightning_module.py": "6bf60d045c0906d122e751bd67da3ed5c0ee18ec317a617dc7cf2ba4c5a4571a",
+    "pretraining/smoke_test_contract.py": "8a5291cc684370363c077d020f62cd27052f6a3faa5a019198b1b6150295c2c1",
+    "pretraining/warmup_cos_lr.py": "9ca7dbef11c3c3a175d79737890704e7c15ce5b34f25da24b1848d3710058827",
+    "reports/100_sample_overfit_report.md": "06b6303c2f7a243a74b66d985f0a319da086b34db93ce9e6819d8bee6164f359",
+    "reports/1k_smoke_report.md": "6c94df492b340261ec585bd5d0d42a95aa0ced0771cb463f36dcf7c128dd4252",
+    "scripts/run_diffusion_open_loop_eval.sh": "a5fe4165ad5b444e97510ce425f4069f7c62b102413b8fb4f12216fdb9e8d2e2",
+    "scripts/run_diffusion_overfit_100.sh": "12a0bf1065f92a44f7b98635bd3a499ef1a6dec2672347206f3dc11522f49944",
+    "scripts/run_diffusion_pretrain.sh": "31c0a11cdbe594d3186f0c91751ccf934db9f71a8e5de88a11b28a1b86afa4da",
+    "scripts/run_diffusion_smoke_1k.sh": "b55468b79a861c3d35fa7212e0e896cf1f57fc23ef7e52e846db7855caccfdb1",
+    "test_diffusion_runtime_load.py": "2955d8cde2ed035ede0322b280b1928bb4f565f6f4e1b9d6a545b73783800a22",
+    "train_diffusion_pretrain.py": "5aaf66dda198033c8695d87a62d6ccebd5472e80fdf4dbb515074db92ccdf08e"
+  }
+}
