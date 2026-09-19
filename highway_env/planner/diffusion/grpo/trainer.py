@@ -1,0 +1,177 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, Tuple
+
+import torch
+
+from .objective import group_relative_advantage, grpo_clipped_objective
+from .reward_adapter import CandidateRewardAdapter
+from .sampling import DiffusionTrace, GroupDiffusionSampler
+
+
+@dataclass
+class GRPOConfig:
+    group_size: int = 4
+    learning_rate: float = 5e-5
+    eta: float = 0.02
+    clip_eps: float = 0.2
+    kl_coef: float = 0.01
+    max_grad_norm: float = 10.0
+    advantage_eps: float = 1e-6
+    trainable_prefixes: Tuple[str, ...] = (
+        "denoiser.layers",
+        "denoiser.reg_head",
+    )
+
+
+class GRPOTrainer:
+    """Small GRPO core around the existing StructuredDiffusionPlanner.
+
+    The trainer deliberately owns no reward definition and no planner network.
+    It only coordinates sampling/replay, W4 reward delegation, group-relative
+    advantages, clipped policy optimization, KL regularization and checkpointable
+    optimizer state.
+    """
+
+    def __init__(
+        self,
+        model,
+        reward_adapter: CandidateRewardAdapter,
+        *,
+        config: GRPOConfig | None = None,
+    ) -> None:
+        self.model = model
+        self.reward_adapter = reward_adapter
+        self.config = config or GRPOConfig()
+        self._configure_trainable_parameters()
+        parameters = [p for p in self.model.parameters() if p.requires_grad]
+        if not parameters:
+            raise RuntimeError("GRPO has no trainable parameters after freezing")
+        self.optimizer = torch.optim.AdamW(parameters, lr=self.config.learning_rate)
+
+        self.reference_model = copy.deepcopy(self.model).eval()
+        self.reference_model.requires_grad_(False)
+        self.sampler = GroupDiffusionSampler(
+            self.model,
+            group_size=self.config.group_size,
+            eta=self.config.eta,
+        )
+
+    def _configure_trainable_parameters(self) -> None:
+        self.model.requires_grad_(False)
+        matched = []
+        for name, parameter in self.model.named_parameters():
+            if any(name.startswith(prefix) for prefix in self.config.trainable_prefixes):
+                parameter.requires_grad_(True)
+                matched.append(name)
+        if not matched:
+            raise RuntimeError(
+                "No parameters matched trainable_prefixes="
+                f"{self.config.trainable_prefixes}. Check current StructuredDiffusionPlanner names."
+            )
+
+    @property
+    def trainable_parameter_count(self) -> int:
+        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+
+    def refresh_reference(self) -> None:
+        """Explicit reference refresh; never called implicitly during an update."""
+        self.reference_model.load_state_dict(self.model.state_dict())
+        self.reference_model.eval()
+        self.reference_model.requires_grad_(False)
+
+    def collect(
+        self,
+        features: Dict[str, torch.Tensor],
+        *,
+        context: Any = None,
+        generator: torch.Generator | None = None,
+    ) -> tuple[DiffusionTrace, torch.Tensor, torch.Tensor]:
+        # Keep dropout disabled: diffusion transition log-prob must describe all policy stochasticity.
+        self.model.eval()
+        with torch.no_grad():
+            trace = self.sampler.sample(features, generator=generator)
+            rewards = self.reward_adapter(
+                trace.candidates,
+                features=features,
+                context=context,
+            )
+            advantages = group_relative_advantage(
+                rewards,
+                eps=self.config.advantage_eps,
+                valid_mask=features.get("mode_valid_mask"),
+            )
+        return trace, rewards, advantages
+
+    @staticmethod
+    def _reference_kl(new_log_prob: torch.Tensor, ref_log_prob: torch.Tensor) -> torch.Tensor:
+        # k3 estimator from log-ratio; non-negative and zero when policies match.
+        log_ratio = ref_log_prob - new_log_prob
+        return (torch.exp(log_ratio) - log_ratio - 1.0).mean()
+
+    def update(
+        self,
+        trace: DiffusionTrace,
+        advantages: torch.Tensor,
+        *,
+        valid_mask: torch.Tensor | None = None,
+    ) -> Dict[str, float]:
+        # eval() disables dropout but does not disable gradients.
+        self.model.eval()
+        self.optimizer.zero_grad(set_to_none=True)
+        new_log_prob = self.sampler.replay(trace)
+        objective = grpo_clipped_objective(
+            new_log_prob,
+            trace.old_log_prob,
+            advantages,
+            clip_eps=self.config.clip_eps,
+            valid_mask=valid_mask,
+        )
+
+        with torch.no_grad():
+            ref_log_prob = self.sampler.replay(trace, model=self.reference_model)
+        ref_kl = self._reference_kl(new_log_prob, ref_log_prob)
+        loss = objective.policy_loss + self.config.kl_coef * ref_kl
+        if not torch.isfinite(loss):
+            raise FloatingPointError("Non-finite GRPO loss")
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            [p for p in self.model.parameters() if p.requires_grad],
+            max_norm=self.config.max_grad_norm,
+        )
+        self.optimizer.step()
+
+        return {
+            "loss": float(loss.detach()),
+            "policy_loss": float(objective.policy_loss.detach()),
+            "reference_kl": float(ref_kl.detach()),
+            "approx_kl": float(objective.approx_kl.detach()),
+            "clip_fraction": float(objective.clip_fraction.detach()),
+            "ratio_mean": float(objective.ratio_mean.detach()),
+            "grad_norm": float(torch.as_tensor(grad_norm).detach()),
+        }
+
+    def train_step(
+        self,
+        features: Dict[str, torch.Tensor],
+        *,
+        context: Any = None,
+        generator: torch.Generator | None = None,
+    ) -> Dict[str, float]:
+        trace, rewards, advantages = self.collect(
+            features, context=context, generator=generator
+        )
+        metrics = self.update(
+            trace,
+            advantages,
+            valid_mask=features.get("mode_valid_mask"),
+        )
+        metrics.update(
+            reward_mean=float(rewards.mean().detach()),
+            reward_std=float(rewards.std(unbiased=False).detach()),
+            advantage_mean=float(advantages.mean().detach()),
+            advantage_std=float(advantages.std(unbiased=False).detach()),
+        )
+        return metrics

@@ -1,0 +1,13 @@
+# Migration-first defaults. Keep the model/pretraining config owned by W2.
+group_size: 4
+learning_rate: 5.0e-5
+eta: 0.02
+clip_eps: 0.20
+kl_coef: 0.01
+max_grad_norm: 10.0
+trainable_prefixes:
+  - denoiser.layers
+  - denoiser.reg_head
+
+# Correctness gates before long training.
+smoke_steps: [3, 10, 100]
