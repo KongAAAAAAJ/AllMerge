@@ -593,6 +593,9 @@ class StructuredDiffusionPlanner(nn.Module):
             noise,
             start_timesteps,
         )
+        # EVAL_VIZ_V1: retain the physical noisy trajectory for
+        # start-vs-end denoising visualization.
+        initial_noisy = sample.clone()
 
         final_logits = None
         final_x0 = None
@@ -700,6 +703,10 @@ class StructuredDiffusionPlanner(nn.Module):
             "trajectory_mode_logits": final_logits,
             "trajectory_mode_logits_masked": masked_logits,
             "trajectory_mode_idx": mode_index,
+            # EVAL_VIZ_V1
+            "trajectory_noisy_initial": (
+                self.adapter.denormalize_trajectory(initial_noisy)
+            ),
         }
 
     def forward_train(

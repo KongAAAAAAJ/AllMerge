@@ -127,13 +127,11 @@ class DiffusionPlannerRuntime:
             map_location="cpu",
         )
 
-        if isinstance(
-            payload,
-            dict,
-        ) and "state_dict" in payload:
-            state_dict = payload[
-                "state_dict"
-            ]
+        if isinstance(payload, dict) and "state_dict" in payload:
+            state_dict = payload["state_dict"]
+        elif isinstance(payload, dict) and "planner_state_dict" in payload:
+            # EVAL_VIZ_V1: native W2 pretraining checkpoint.
+            state_dict = payload["planner_state_dict"]
         else:
             state_dict = payload
 

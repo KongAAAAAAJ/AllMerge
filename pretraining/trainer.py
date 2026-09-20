@@ -316,6 +316,22 @@ class DiffusionPretrainer:
     ) -> dict:
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # EVAL_VIZ_V1: preserve the exact model state before any optimizer
+        # update so evaluation can compare identical noise before/after training.
+        initial_path = checkpoint_dir / "initial.pt"
+        if (
+            self.start_epoch == 0
+            and self.global_step == 0
+            and not initial_path.exists()
+        ):
+            self.save_checkpoint(
+                initial_path,
+                epoch=-1,
+                metrics={"stage": "initial"},
+                train_config=train_config,
+            )
+
         train_limit = 1 if fast_dev_run else _batch_limit(train_loader, overfit_batches)
         val_limit = 1 if fast_dev_run else _batch_limit(val_loader, overfit_batches)
         epochs = min(int(max_epochs), 1) if fast_dev_run else int(max_epochs)
@@ -389,6 +405,9 @@ class DiffusionPretrainer:
                 break
 
         return {
+            "initial_checkpoint": (
+                str(initial_path) if initial_path.is_file() else None
+            ),
             "best_checkpoint": str(best_path) if best_path else None,
             "last_checkpoint": str(last_path) if last_path else None,
             "metrics": last_metrics,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import math
+import random
 import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional
@@ -11,6 +12,14 @@ import torch
 from evaluation.open_loop_metrics import (
     compute_open_loop_metrics,
     finite_metric_check,
+)
+from evaluation.open_loop_visualization import (
+    TrajectoryVisualizationSample,
+    compute_open_loop_safety_proxies,
+    plot_ade_fde_boxplot,
+    plot_initial_vs_final_denoising,
+    plot_metrics_table,
+    plot_random_trajectory_gallery,
 )
 from highway_env.planner.diffusion.mode_assignment import (
     assign_expert_mode,
@@ -182,10 +191,23 @@ def evaluate_open_loop(
     device: Optional[str] = None,
     inference_seed: Optional[int] = 0,
     strict_checkpoint: bool = False,
+    visualize: bool = True,
+    figure_dir: Optional[str | Path] = None,
+    visualization_seed: Optional[int] = None,
+    initial_checkpoint: Optional[str | Path] = None,
+    miss_threshold_m: float = 2.0,
+    collision_distance_m: float = 2.5,
+    offroad_distance_m: float = 2.5,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
     output_csv = Path(output_csv)
+    if figure_dir is None:
+        figure_dir = output_csv.parent / "figures"
+    figure_dir = Path(figure_dir)
+
+    # None intentionally means a fresh random 9-sample gallery each run.
+    visualization_rng = random.Random(visualization_seed)
 
     if not checkpoint.is_file():
         raise FileNotFoundError(
@@ -233,6 +255,10 @@ def evaluate_open_loop(
 
     rows: List[dict] = []
     batch_latencies_ms: List[float] = []
+    collision_flags: List[bool] = []
+    offroad_flags: List[bool] = []
+    gallery_samples: List[TrajectoryVisualizationSample] = []
+    gallery_seen = 0
     sample_offset = 0
 
     with torch.no_grad():
@@ -354,6 +380,58 @@ def evaluate_open_loop(
                     sample_index = (
                         sample_offset + i
                     )
+
+                # EVAL_VIZ_V2_SAMPLE_COLLECTION
+                collision_flag, offroad_flag = (
+                    compute_open_loop_safety_proxies(
+                        output["trajectory"][i],
+                        features,
+                        i,
+                        collision_distance_m=collision_distance_m,
+                        offroad_distance_m=offroad_distance_m,
+                    )
+                )
+                if collision_flag is not None:
+                    collision_flags.append(bool(collision_flag))
+                if offroad_flag is not None:
+                    offroad_flags.append(bool(offroad_flag))
+
+                if visualize:
+                    # Uniform reservoir sampling across all evaluated samples.
+                    gallery_seen += 1
+                    if len(gallery_samples) < 9:
+                        gallery_slot = len(gallery_samples)
+                    else:
+                        candidate_slot = visualization_rng.randrange(gallery_seen)
+                        gallery_slot = (
+                            candidate_slot if candidate_slot < 9 else None
+                        )
+                    if gallery_slot is not None:
+                        visual_sample = TrajectoryVisualizationSample(
+                            sample_index=sample_index,
+                            expert_trajectory=(
+                                expert_trajectory[i].detach().cpu().numpy()
+                            ),
+                            predicted_trajectory=(
+                                output["trajectory"][i].detach().cpu().numpy()
+                            ),
+                            selected_ade=_float(metrics.selected_ade, i),
+                            selected_fde=_float(metrics.selected_fde, i),
+                            target_mode=eval_mode,
+                            selected_mode=_int(
+                                metrics.selected_pred_mode,
+                                i,
+                            ),
+                            features_cpu={
+                                key: value[i : i + 1].detach().cpu()
+                                for key, value in features.items()
+                                if hasattr(value, "detach")
+                            },
+                        )
+                        if gallery_slot == len(gallery_samples):
+                            gallery_samples.append(visual_sample)
+                        else:
+                            gallery_samples[gallery_slot] = visual_sample
 
                 rows.append(
                     {
@@ -557,6 +635,85 @@ def evaluate_open_loop(
             output_csv.resolve()
         ),
     }
+    # EVAL_VIZ_V2_SUMMARY
+    miss_rate = float(
+        sum(
+            1
+            for row in rows
+            if float(row["minFDE_at_M_all"]) > float(miss_threshold_m)
+        )
+        / len(rows)
+    )
+    collision_rate = (
+        float(sum(collision_flags) / len(collision_flags))
+        if collision_flags
+        else float("nan")
+    )
+    offroad_rate = (
+        float(sum(offroad_flags) / len(offroad_flags))
+        if offroad_flags
+        else float("nan")
+    )
+    summary["miss_rate"] = miss_rate
+    summary["collision_rate_open_loop_proxy"] = collision_rate
+    summary["offroad_rate_open_loop_proxy"] = offroad_rate
+
+    if visualize:
+        figure_dir.mkdir(parents=True, exist_ok=True)
+        plot_ade_fde_boxplot(
+            rows,
+            figure_dir / "01_ade_fde_boxplot.png",
+        )
+        plot_random_trajectory_gallery(
+            gallery_samples,
+            figure_dir / "02_random_trajectory_gallery_3x3.png",
+        )
+        plot_metrics_table(
+            min_ade=_mean(rows, "minADE_at_M_all"),
+            min_fde=_mean(rows, "minFDE_at_M_all"),
+            miss_rate=miss_rate,
+            collision_rate=(
+                collision_rate if math.isfinite(collision_rate) else None
+            ),
+            offroad_rate=(
+                offroad_rate if math.isfinite(offroad_rate) else None
+            ),
+            miss_threshold_m=miss_threshold_m,
+            collision_distance_m=collision_distance_m,
+            offroad_distance_m=offroad_distance_m,
+            output_path=figure_dir / "04_metrics_table.png",
+            output_csv=figure_dir / "metrics_table.csv",
+        )
+
+        resolved_initial = (
+            Path(initial_checkpoint).expanduser().resolve()
+            if initial_checkpoint is not None
+            else checkpoint.parent / "initial.pt"
+        )
+        if gallery_samples and resolved_initial.is_file():
+            comparison_seed = (
+                int(inference_seed) if inference_seed is not None else 0
+            )
+            plot_initial_vs_final_denoising(
+                final_model=model,
+                initial_checkpoint=resolved_initial,
+                sample=gallery_samples[0],
+                output_path=(
+                    figure_dir / "03_denoising_initial_vs_final.png"
+                ),
+                seed=comparison_seed,
+                strict_checkpoint=strict_checkpoint,
+            )
+            summary["initial_checkpoint_for_visualization"] = str(
+                resolved_initial
+            )
+        else:
+            summary["initial_checkpoint_for_visualization"] = (
+                "not found; pass --initial-checkpoint or retrain once "
+                "to create checkpoints/initial.pt"
+            )
+        summary["figure_dir"] = str(figure_dir.resolve())
+
     return summary
 
 
