@@ -260,7 +260,7 @@ def _fixed_state_paired_validation(
         "fixed_validation/paired_reward_gain_median": float(np.median(gains)),
         "fixed_validation/paired_reward_gain_p05": float(np.quantile(gains, 0.05)),
         "fixed_validation/paired_reward_gain_p95": float(np.quantile(gains, 0.95)),
-        "fixed_validation/positive_fraction": float(np.mean(gains > 0.0)),
+        "fixed_validation/positive_fraction": float(np.mean(gains > 1e-6)),
         "fixed_validation/candidate_delta_m_mean": float(candidate_delta.mean()),
         f"fixed_validation/paired_n{group_size}_reward_gain_mean": float(gains.mean()),
     }
