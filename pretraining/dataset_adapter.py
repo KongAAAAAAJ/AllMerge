@@ -57,9 +57,13 @@ def unpack_w1_batch(batch) -> dict:
     metadata = batch[2] if len(batch) == 3 else None
     if not isinstance(features, Mapping) or not isinstance(targets, Mapping):
         raise TypeError("W1 features and targets must be mappings")
+    # STAGE3_DENSE_EXPERT_V2
     return {
         "features": features,
         "expert_trajectory": targets["trajectory"],
+        "expert_trajectory_dense": targets.get("trajectory_dense"),
+        "dense_dt": targets.get("dense_dt"),
+        "trajectory_horizon_s": targets.get("trajectory_horizon_s"),
         "expert_mode": targets["target_mode"],
         "expert_semantic": targets["target_semantic"],
         "metadata": metadata,

@@ -1877,23 +1877,40 @@ class FOLLOWVehicle(ControlledVehicle):
                         axis=-1,
                     )
 
-                    planner_trajectory = PlannerTrajectory.from_world_path(
+                    # STAGE3_DENSE_EXPERT_V2
+                    from highway_env.planner.expert_dense_trajectory import (
+                        build_native_dense_expert_targets,
+                    )
+
+                    horizon_steps = int(anchor_config.get("horizon_steps", 8))
+                    sparse_dt = float(anchor_config.get("trajectory_dt", 0.5))
+                    dense_contract = build_native_dense_expert_targets(
                         source_time_s=source_time_s,
                         world_xy=world_xy,
                         ego_position_world=planning_origin_position,
                         ego_heading_world=planning_origin_heading,
-                        horizon_steps=int(
-                            anchor_config.get("horizon_steps", 8)
-                        ),
-                        trajectory_dt=float(
-                            anchor_config.get("trajectory_dt", 0.5)
-                        ),
-                        source="Polynomial-aligned",
+                        horizon_steps=horizon_steps,
+                        sparse_dt=sparse_dt,
+                        dense_dt=0.1,
                     )
 
-                    self.latest_planner_trajectory = (
-                        planner_trajectory.as_dict()
+                    planner_trajectory = PlannerTrajectory(
+                        xy=dense_contract["sparse_xy"],
+                        time_s=dense_contract["sparse_time_s"],
+                        source="Polynomial-aligned-native10hz",
+                        ego_position_world=planning_origin_position,
+                        ego_heading_world=planning_origin_heading,
                     )
+                    trajectory_payload = planner_trajectory.as_dict()
+                    trajectory_payload.update(
+                        {
+                            "future_trajectory_dense": dense_contract["future_trajectory_dense"].copy(),
+                            "dense_time_s": dense_contract["dense_time_s"].copy(),
+                            "dense_dt": np.float32(dense_contract["dense_dt"]),
+                            "trajectory_horizon_s": np.float32(dense_contract["trajectory_horizon_s"]),
+                        }
+                    )
+                    self.latest_planner_trajectory = trajectory_payload
 
             else:
                 path = None

@@ -36,8 +36,12 @@ BOOL_FEATURE_KEYS = {
     "mode_valid_mask",
 }
 
+# STAGE3_DENSE_EXPERT_V2
 TARGET_KEYS: Tuple[str, ...] = (
     "expert_trajectory_xy",
+    "future_trajectory_dense",
+    "dense_dt",
+    "trajectory_horizon_s",
     "target_mode",
     "target_semantic",
 )
@@ -208,6 +212,31 @@ class AllMergeExpertShardDataset(Dataset):
                 dtype=torch.long,
             ),
         }
+
+        # STAGE3_DENSE_EXPERT_V2: optional for backward compatibility with v1 shards.
+        if "future_trajectory_dense" in shard:
+            required_dense_keys = (
+                "dense_dt",
+                "trajectory_horizon_s",
+            )
+            missing_dense = [
+                key for key in required_dense_keys if key not in shard
+            ]
+            if missing_dense:
+                raise KeyError(
+                    f"{self.shard_paths[shard_idx]} dense target missing "
+                    f"{missing_dense}"
+                )
+            targets["trajectory_dense"] = torch.from_numpy(
+                np.asarray(shard["future_trajectory_dense"][sample_idx])
+            ).float()
+            targets["dense_dt"] = torch.as_tensor(
+                shard["dense_dt"][sample_idx], dtype=torch.float32
+            )
+            targets["trajectory_horizon_s"] = torch.as_tensor(
+                shard["trajectory_horizon_s"][sample_idx],
+                dtype=torch.float32,
+            )
 
         if self.config.include_diagnostics:
             diagnostics = {}

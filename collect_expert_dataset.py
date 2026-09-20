@@ -140,8 +140,10 @@ def flatten_frame_record(record: Dict) -> List[Dict[str, np.ndarray]]:
         )
 
     ego_count = int(target_mode.shape[0])
+    # STAGE3_DENSE_EXPERT_V2
     per_ego_keys = (
         "expert_trajectory_xy",
+        "future_trajectory_dense",
         "target_mode",
         "target_semantic",
         "target_mode_traffic_valid",
@@ -180,6 +182,10 @@ def flatten_frame_record(record: Dict) -> List[Dict[str, np.ndarray]]:
             ego_index,
             ego_count,
         ).astype(np.float32, copy=False)
+        sample["dense_dt"] = _scalar_array(record["dense_dt"], np.float32)
+        sample["trajectory_horizon_s"] = _scalar_array(
+            record["trajectory_horizon_s"], np.float32
+        )
 
         sample["frame_index"] = _scalar_array(record["frame_index"], np.int64)
         sample["episode_index"] = _scalar_array(record["episode_index"], np.int64)
@@ -484,6 +490,15 @@ def write_manifest(
             "horizon_sec": 4.0,
         },
         "schema": infer_schema(shard_dir),
+        "dataset_schema_version": "allmerge_expert_dense10hz_v2",
+        "dense_trajectory_contract": {
+            "field": "future_trajectory_dense",
+            "shape": [40, 2],
+            "dense_dt": 0.1,
+            "trajectory_horizon_s": 4.0,
+            "source": "Polynomial native 10Hz path before sparse downsampling",
+            "sparse_indices": [4, 9, 14, 19, 24, 29, 34, 39],
+        },
         "summary": summary,
         "splits": {
             name: len(names)

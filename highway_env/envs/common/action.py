@@ -849,6 +849,61 @@ class MultiAgentAction(ActionType):
 
         expert_xy = np.stack(expert_xy, axis=0)
 
+        # STAGE3_DENSE_EXPERT_V2
+        reference_dense_time_s = np.asarray(
+            trajectories[0]["dense_time_s"],
+            dtype=np.float32,
+        )
+        dense_dt = float(trajectories[0]["dense_dt"])
+        trajectory_horizon_s = float(
+            trajectories[0]["trajectory_horizon_s"]
+        )
+        future_trajectory_dense = []
+
+        for ego_idx, trajectory in enumerate(trajectories):
+            dense_time_s = np.asarray(
+                trajectory.get("dense_time_s"),
+                dtype=np.float32,
+            )
+            dense_xy = np.asarray(
+                trajectory.get("future_trajectory_dense"),
+                dtype=np.float32,
+            )
+            if dense_xy.shape != (40, 2):
+                raise RuntimeError(
+                    f"Dense expert shape mismatch for ego {ego_idx}: "
+                    f"{dense_xy.shape}, expected (40, 2)"
+                )
+            if not np.allclose(
+                dense_time_s, reference_dense_time_s, atol=1e-6, rtol=0.0
+            ):
+                raise RuntimeError(
+                    f"Dense expert time-grid mismatch for ego {ego_idx}"
+                )
+            if not np.isclose(float(trajectory["dense_dt"]), dense_dt):
+                raise RuntimeError("Dense expert dt mismatch across egos")
+            if not np.isclose(
+                float(trajectory["trajectory_horizon_s"]),
+                trajectory_horizon_s,
+            ):
+                raise RuntimeError("Dense expert horizon mismatch across egos")
+
+            expected_sparse = dense_xy[[4, 9, 14, 19, 24, 29, 34, 39]]
+            sparse_xy = np.asarray(trajectory["xy"], dtype=np.float32)
+            if not np.allclose(
+                sparse_xy, expected_sparse, atol=1e-5, rtol=0.0
+            ):
+                max_error = float(np.max(np.abs(sparse_xy - expected_sparse)))
+                raise RuntimeError(
+                    "Sparse/dense expert target inconsistency for ego "
+                    f"{ego_idx}: max_abs_error={max_error:.6g}"
+                )
+            future_trajectory_dense.append(dense_xy)
+
+        future_trajectory_dense = np.stack(
+            future_trajectory_dense, axis=0
+        ).astype(np.float32, copy=False)
+
         from highway_env.planner.expert_alignment import (
             ExpertTrajectoryAligner,
         )
@@ -881,6 +936,9 @@ class MultiAgentAction(ActionType):
             "mode",
             "legacy",
         )
+        result["future_trajectory_dense"] = future_trajectory_dense.copy()
+        result["dense_dt"] = np.float32(dense_dt)
+        result["trajectory_horizon_s"] = np.float32(trajectory_horizon_s)
 
         self.env.latest_expert_alignment = result
 
