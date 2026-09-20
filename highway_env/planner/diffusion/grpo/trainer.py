@@ -628,6 +628,10 @@ class GRPOTrainer:
         diagnostic_metrics: Dict[str, float] = {}
         if diagnostics:
             assert diagnostic_generator is not None
+            # GRPO REWARD DECOMPOSITION DIAGNOSTICS V1
+            diagnostic_metrics.update(
+                self.reward_adapter.reward_decomposition_diagnostics()
+            )
             diagnostic_metrics.update(
                 self.group_diagnostics(trace, rewards, features)
             )

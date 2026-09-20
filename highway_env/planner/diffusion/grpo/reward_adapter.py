@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping
 
 import numpy as np
@@ -255,11 +255,164 @@ def w4_to_grpo_rewards(
     )
 
 
+
+# GRPO REWARD DECOMPOSITION DIAGNOSTICS V1
+def _reward_decomposition_metrics(result: Any) -> Dict[str, float]:
+    # Summarize the exact W4 result already computed for the last rollout.
+    if result is None:
+        return {}
+
+    required = (
+        "rewards",
+        "pretrain_rewards",
+        "valid_mode_mask",
+        "components",
+        "pretrain_components",
+    )
+    if any(not hasattr(result, name) for name in required):
+        return {}
+
+    rewards = np.asarray(result.rewards, dtype=np.float64)
+    pretrain_rewards = np.asarray(
+        result.pretrain_rewards,
+        dtype=np.float64,
+    )
+    valid = np.asarray(
+        result.valid_mode_mask,
+        dtype=np.bool_,
+    )
+
+    if (
+        rewards.ndim != 3
+        or rewards.shape[:2] != valid.shape
+        or pretrain_rewards.shape != valid.shape
+    ):
+        raise ValueError(
+            "reward decomposition expects rewards [V,M,N], "
+            "pretrain_rewards/valid_mode_mask [V,M]"
+        )
+
+    metrics: Dict[str, float] = {}
+
+    for role in range(rewards.shape[0]):
+        role_valid = valid[role]
+        if not bool(role_valid.any()):
+            continue
+
+        current_reward = rewards[role, role_valid, :]
+        frozen_reward = pretrain_rewards[role, role_valid]
+        reward_gain = current_reward - frozen_reward[:, None]
+
+        prefix = f"diagnostics/reward_decomp/vehicle_{role}"
+
+        metrics[f"{prefix}_reward_mean"] = float(current_reward.mean())
+        metrics[f"{prefix}_reward_std"] = float(current_reward.std())
+        metrics[f"{prefix}_pretrain_reward_mean"] = float(
+            frozen_reward.mean()
+        )
+        metrics[f"{prefix}_reward_delta_vs_pretrain"] = float(
+            reward_gain.mean()
+        )
+        metrics[f"{prefix}_candidate_positive_fraction"] = float(
+            (reward_gain > 1.0e-6).mean()
+        )
+        metrics[f"{prefix}_candidate_best_gain"] = float(
+            reward_gain.max()
+        )
+        metrics[f"{prefix}_candidate_gain_std"] = float(
+            reward_gain.std()
+        )
+
+        current_components = result.components
+        frozen_components = result.pretrain_components
+
+        common_names = sorted(
+            set(current_components).intersection(frozen_components)
+        )
+        for name in common_names:
+            current = np.asarray(
+                current_components[name],
+                dtype=np.float64,
+            )
+            frozen = np.asarray(
+                frozen_components[name],
+                dtype=np.float64,
+            )
+
+            if current.shape != rewards.shape or frozen.shape != valid.shape:
+                continue
+
+            current_values = current[role, role_valid, :]
+            frozen_values = frozen[role, role_valid]
+            delta = current_values - frozen_values[:, None]
+
+            metrics[f"{prefix}_{name}_mean"] = float(
+                current_values.mean()
+            )
+            metrics[f"{prefix}_{name}_delta_vs_pretrain"] = float(
+                delta.mean()
+            )
+
+            if name.startswith("minimum_"):
+                metrics[f"{prefix}_{name}_p10"] = float(
+                    np.percentile(current_values, 10.0)
+                )
+
+        for name in (
+            "collision",
+            "out_of_drivable",
+            "clearance_violation",
+            "unsafe",
+        ):
+            pre_name = f"pretrain_{name}"
+            if (
+                not hasattr(result, name)
+                or not hasattr(result, pre_name)
+            ):
+                continue
+
+            current = np.asarray(
+                getattr(result, name),
+                dtype=np.bool_,
+            )
+            frozen = np.asarray(
+                getattr(result, pre_name),
+                dtype=np.bool_,
+            )
+            if current.shape != rewards.shape or frozen.shape != valid.shape:
+                continue
+
+            current_rate = float(
+                current[role, role_valid, :].mean()
+            )
+            frozen_rate = float(
+                frozen[role, role_valid].mean()
+            )
+            metrics[f"{prefix}_{name}_rate"] = current_rate
+            metrics[
+                f"{prefix}_{name}_rate_delta_vs_pretrain"
+            ] = current_rate - frozen_rate
+
+    return metrics
+
+
 @dataclass
 class CandidateRewardAdapter:
     """Thin GRPO bridge; production W4 scoring is not reimplemented here."""
 
     evaluator: Callable[..., Any]
+    last_result: Any = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+
+    def reward_decomposition_diagnostics(
+        self,
+    ) -> Dict[str, float]:
+        return _reward_decomposition_metrics(
+            self.last_result
+        )
 
     def evaluate_result(
         self,
@@ -401,12 +554,14 @@ class CandidateRewardAdapter:
                 features=features,
                 context=context,
             )
+            self.last_result = result
             return w4_to_grpo_rewards(
                 result.rewards,
                 device=candidates.device,
                 dtype=candidates.dtype,
             )
 
+        self.last_result = None
         result = self._legacy_call(
             candidates,
             features=features,
