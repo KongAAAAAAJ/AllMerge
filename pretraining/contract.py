@@ -78,3 +78,47 @@ def validate_training_batch(batch, model_config) -> int:
                 f"expected {(batch_size,)} torch.long"
             )
     return batch_size
+
+
+# STAGED_DENSE_SUPERVISION_V1
+def validate_dense_supervision_batch(
+    batch,
+    model_config,
+    *,
+    dense_dt: float = 0.1,
+) -> int:
+    normalized = unpack_w1_batch(batch)
+    dense = normalized.get("expert_trajectory_dense")
+    if dense is None:
+        raise ValueError(
+            "Dense loss is enabled, but this dataset does not contain the real "
+            "Stage-3 10 Hz trajectory_dense target"
+        )
+    batch_size = int(normalized["features"]["ego_state"].shape[0])
+    horizon_s = float(model_config.horizon_steps) * float(model_config.trajectory_dt)
+    dense_steps = int(round(horizon_s / float(dense_dt)))
+    expected = (batch_size, dense_steps, 2)
+    if tuple(dense.shape) != expected:
+        raise ValueError(
+            f"trajectory_dense: shape={tuple(dense.shape)}, expected={expected}"
+        )
+    if dense.dtype != torch.float32 or not torch.isfinite(dense).all():
+        raise ValueError("trajectory_dense must be finite torch.float32")
+
+    dense_dt_tensor = normalized.get("dense_dt")
+    horizon_tensor = normalized.get("trajectory_horizon_s")
+    if dense_dt_tensor is None or horizon_tensor is None:
+        raise ValueError(
+            "Dense loss requires dense_dt and trajectory_horizon_s from Stage 3"
+        )
+    expected_dt = torch.full_like(dense_dt_tensor.float(), float(dense_dt))
+    expected_horizon = torch.full_like(horizon_tensor.float(), horizon_s)
+    if not torch.allclose(dense_dt_tensor.float(), expected_dt, atol=1e-6, rtol=0.0):
+        raise ValueError(
+            f"dense_dt must be {float(dense_dt):.6g}s for Stage D"
+        )
+    if not torch.allclose(horizon_tensor.float(), expected_horizon, atol=1e-6, rtol=0.0):
+        raise ValueError(
+            f"trajectory_horizon_s must be {horizon_s:.6g}s for Stage D"
+        )
+    return batch_size

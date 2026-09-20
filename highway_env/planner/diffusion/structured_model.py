@@ -9,6 +9,8 @@ from torch import nn
 
 from .config import StructuredDiffusionConfig
 from .diffusion_schedule import TruncatedDDIMSchedule
+from .dense_supervision import dense_position_loss, dense_timestep_weight
+from .trajectory_spline import ClampedCubicTrajectorySpline
 from .encoders import (
     SceneEncoding,
     StructuredSceneEncoder,
@@ -523,6 +525,14 @@ class StructuredDiffusionPlanner(nn.Module):
             )
         )
 
+        # STAGED_DENSE_SUPERVISION_V1
+        # Parameter-free differentiable decoder reused by the Stage-D objective.
+        self.dense_trajectory_spline = ClampedCubicTrajectorySpline(
+            horizon_s=float(config.horizon_steps) * float(config.trajectory_dt),
+            sparse_dt=float(config.trajectory_dt),
+            dense_dt=0.1,
+        )
+
     @staticmethod
     def _masked_logits(
         logits: torch.Tensor,
@@ -709,6 +719,119 @@ class StructuredDiffusionPlanner(nn.Module):
             ),
         }
 
+    # STAGED_DENSE_SUPERVISION_V1
+    def _dense_terminal_auxiliary(
+        self,
+        *,
+        scene: SceneEncoding,
+        clean_anchor_norm: torch.Tensor,
+        noise: torch.Tensor,
+        features: Dict[str, torch.Tensor],
+        target_mode: torch.Tensor,
+        target_trajectory_dense: torch.Tensor,
+        dense_loss_type: str,
+        dense_loss_lambda_p: float,
+        dense_loss_terminal_timestep: int,
+        dense_loss_weight_mode: str,
+        dense_loss_terminal_weight: float,
+    ) -> Dict[str, torch.Tensor]:
+        batch = int(clean_anchor_norm.shape[0])
+        terminal_t = int(dense_loss_terminal_timestep)
+        if terminal_t < 0 or terminal_t >= int(self.config.num_train_timesteps):
+            raise ValueError(
+                "dense_loss_terminal_timestep must lie in scheduler range "
+                f"[0,{int(self.config.num_train_timesteps) - 1}], got {terminal_t}"
+            )
+        if terminal_t >= int(self.config.train_timestep_max):
+            raise ValueError(
+                "dense_loss_terminal_timestep should be inside the training "
+                f"timestep range [0,{int(self.config.train_timestep_max) - 1}]"
+            )
+
+        expected_dense_steps = int(round(
+            float(self.config.horizon_steps)
+            * float(self.config.trajectory_dt)
+            / 0.1
+        ))
+        expected_shape = (batch, expected_dense_steps, 2)
+        if tuple(target_trajectory_dense.shape) != expected_shape:
+            raise ValueError(
+                "real 10 Hz dense target has wrong shape: "
+                f"got {tuple(target_trajectory_dense.shape)}, expected {expected_shape}"
+            )
+        if not torch.isfinite(target_trajectory_dense).all():
+            raise ValueError("real 10 Hz dense target contains NaN/Inf")
+
+        terminal_timesteps = torch.full(
+            (batch,),
+            terminal_t,
+            dtype=torch.long,
+            device=clean_anchor_norm.device,
+        )
+        terminal_noisy = self.schedule.add_noise(
+            clean_anchor_norm,
+            noise,
+            terminal_timesteps,
+        )
+        terminal_x0_norm, _ = self.denoiser(
+            terminal_noisy,
+            terminal_timesteps,
+            scene,
+        )
+        terminal_candidates_m = self.adapter.denormalize_trajectory(
+            terminal_x0_norm
+        )
+        gather_index = (
+            target_mode[:, None, None, None]
+            .expand(-1, 1, self.config.horizon_steps, 2)
+        )
+        selected_terminal_m = torch.gather(
+            terminal_candidates_m,
+            dim=1,
+            index=gather_index,
+        ).squeeze(1)
+
+        # Keep the spline solve in fp32 even under AMP. Casting does not break
+        # autograd and avoids half-precision linalg limitations/instability.
+        selected_terminal_m = selected_terminal_m.float()
+        start_xy = torch.zeros_like(selected_terminal_m[:, 0, :])
+        start_velocity_xy = features["ego_state"][:, 0:2].float()
+        pred_dense_all_m = self.dense_trajectory_spline(
+            selected_terminal_m,
+            start_xy=start_xy,
+            start_velocity_xy=start_velocity_xy,
+        )
+        pred_dense_future_m = pred_dense_all_m[:, 1:, :]
+        expert_dense_m = target_trajectory_dense.to(
+            device=pred_dense_future_m.device,
+            dtype=torch.float32,
+        )
+
+        raw = dense_position_loss(
+            pred_dense_future_m,
+            expert_dense_m,
+            loss_type=dense_loss_type,
+        )
+        weight_per_sample = dense_timestep_weight(
+            terminal_timesteps,
+            mode=dense_loss_weight_mode,
+            terminal_weight=dense_loss_terminal_weight,
+        )
+        weight = weight_per_sample.mean()
+        weighted = raw * float(dense_loss_lambda_p) * weight
+        ade_m = torch.linalg.vector_norm(
+            pred_dense_future_m - expert_dense_m,
+            dim=-1,
+        ).mean()
+
+        return {
+            "dense_loss_raw": raw,
+            "dense_loss_weighted": weighted,
+            "dense_ade_m": ade_m,
+            "dense_weight_t": weight,
+            "dense_terminal_fraction": raw.new_ones(()),
+        }
+
     def forward_train(
         self,
         features: Dict[str, torch.Tensor],
@@ -716,6 +839,14 @@ class StructuredDiffusionPlanner(nn.Module):
         target_semantic: Optional[
             torch.Tensor
         ] = None,
+        *,
+        target_trajectory_dense: Optional[torch.Tensor] = None,
+        dense_loss_enabled: bool = False,
+        dense_loss_lambda_p: float = 0.0,
+        dense_loss_type: str = "smooth_l1",
+        dense_loss_terminal_timestep: int = 0,
+        dense_loss_weight_mode: str = "terminal_constant",
+        dense_loss_terminal_weight: float = 1.0,
     ) -> Dict[str, torch.Tensor]:
         """
         Supervised multimodal pretraining with semantic-constrained
@@ -863,9 +994,43 @@ class StructuredDiffusionPlanner(nn.Module):
             )
         )
 
+        # STAGED_DENSE_SUPERVISION_V1
+        dense_loss_raw = regression_loss.new_zeros(())
+        dense_loss_weighted = regression_loss.new_zeros(())
+        dense_ade_m = regression_loss.new_zeros(())
+        dense_weight_t = regression_loss.new_zeros(())
+        dense_terminal_fraction = regression_loss.new_zeros(())
+
+        dense_active = bool(dense_loss_enabled) and float(dense_loss_lambda_p) > 0.0
+        if dense_active:
+            if target_trajectory_dense is None:
+                raise ValueError(
+                    "dense supervision requires the real 10 Hz dense target from "
+                    "Stage 3; no sparse-to-dense fallback is allowed"
+                )
+            dense_aux = self._dense_terminal_auxiliary(
+                scene=scene,
+                clean_anchor_norm=clean_anchor_norm,
+                noise=noise,
+                features=features,
+                target_mode=target_mode,
+                target_trajectory_dense=target_trajectory_dense,
+                dense_loss_type=dense_loss_type,
+                dense_loss_lambda_p=float(dense_loss_lambda_p),
+                dense_loss_terminal_timestep=int(dense_loss_terminal_timestep),
+                dense_loss_weight_mode=dense_loss_weight_mode,
+                dense_loss_terminal_weight=float(dense_loss_terminal_weight),
+            )
+            dense_loss_raw = dense_aux["dense_loss_raw"]
+            dense_loss_weighted = dense_aux["dense_loss_weighted"]
+            dense_ade_m = dense_aux["dense_ade_m"]
+            dense_weight_t = dense_aux["dense_weight_t"]
+            dense_terminal_fraction = dense_aux["dense_terminal_fraction"]
+
         loss = (
             regression_loss
             + classification_loss
+            + dense_loss_weighted
         )
 
         mode_valid_mask = features[
@@ -905,6 +1070,22 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "trajectory_classification_loss":
                 classification_loss,
+
+            # STAGED_DENSE_SUPERVISION_V1
+            "dense_loss_raw":
+                dense_loss_raw,
+
+            "dense_loss_weighted":
+                dense_loss_weighted,
+
+            "dense_ade_m":
+                dense_ade_m,
+
+            "dense_weight_t":
+                dense_weight_t,
+
+            "dense_terminal_fraction":
+                dense_terminal_fraction,
 
             "target_mode":
                 target_mode,

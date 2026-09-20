@@ -67,6 +67,12 @@ def parse_args():
     parser.add_argument("--limit-val-samples", type=int, default=0)
     parser.add_argument("--overfit-batches", type=float, default=0.0)
     parser.add_argument("--fast-dev-run", type=int, choices=(0, 1), default=0)
+    # STAGED_DENSE_SUPERVISION_V1
+    parser.add_argument("--dense-loss-enabled", type=int, choices=(0, 1), default=None)
+    parser.add_argument("--dense-loss-lambda-p", type=float, default=None)
+    parser.add_argument("--dense-loss-type", choices=("smooth_l1", "l1", "mse"), default=None)
+    parser.add_argument("--dense-loss-terminal-timestep", type=int, default=None)
+    parser.add_argument("--dense-loss-terminal-weight", type=float, default=None)
     return parser.parse_args()
 
 
@@ -92,6 +98,20 @@ def main() -> int:
     precision = str(pick(args.precision, "precision", "auto"))
     grad_clip = float(pick(args.grad_clip, "grad_clip", 5.0))
     seed = int(train_cfg.get("seed", 0))
+
+    # STAGED_DENSE_SUPERVISION_V1
+    dense_loss_enabled = bool(int(pick(args.dense_loss_enabled, "dense_loss_enabled", 0)))
+    dense_loss_lambda_p = float(pick(args.dense_loss_lambda_p, "dense_loss_lambda_p", 0.0))
+    dense_loss_type = str(pick(args.dense_loss_type, "dense_loss_type", "smooth_l1"))
+    dense_loss_terminal_only = bool(train_cfg.get("dense_loss_terminal_only", True))
+    dense_loss_weight_mode = str(train_cfg.get("dense_loss_weight_mode", "terminal_constant"))
+    dense_loss_terminal_timestep = int(pick(
+        args.dense_loss_terminal_timestep, "dense_loss_terminal_timestep", 0
+    ))
+    dense_loss_terminal_weight = float(pick(
+        args.dense_loss_terminal_weight, "dense_loss_terminal_weight", 1.0
+    ))
+    dense_loss_dense_dt = float(train_cfg.get("dense_loss_dense_dt", 0.1))
 
     validate_dataset_root(dataset_root, (train_split, val_split))
     seed_everything(seed)
@@ -133,6 +153,15 @@ def main() -> int:
             "device": device,
             "precision": precision,
             "grad_clip": grad_clip,
+            # STAGED_DENSE_SUPERVISION_V1
+            "dense_loss_enabled": dense_loss_enabled,
+            "dense_loss_lambda_p": dense_loss_lambda_p,
+            "dense_loss_type": dense_loss_type,
+            "dense_loss_terminal_only": dense_loss_terminal_only,
+            "dense_loss_weight_mode": dense_loss_weight_mode,
+            "dense_loss_terminal_timestep": dense_loss_terminal_timestep,
+            "dense_loss_terminal_weight": dense_loss_terminal_weight,
+            "dense_loss_dense_dt": dense_loss_dense_dt,
         },
     }
     (run_dir / "resolved_config.json").write_text(
@@ -148,6 +177,11 @@ def main() -> int:
         f"[pretrain] backend=pure_torch torch={torch.__version__} "
         f"cuda={torch.cuda.is_available()}"
     )
+    print(
+        "[pretrain] dense_supervision="
+        f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
+        f"type={dense_loss_type} terminal_t={dense_loss_terminal_timestep}"
+    )
 
     trainer = DiffusionPretrainer(
         model_config=model_cfg,
@@ -162,6 +196,15 @@ def main() -> int:
         log_dir=run_dir / "tb",
         init_checkpoint=args.init_checkpoint,
         strict_init_checkpoint=bool(args.strict_init_checkpoint),
+        # STAGED_DENSE_SUPERVISION_V1
+        dense_loss_enabled=dense_loss_enabled,
+        dense_loss_lambda_p=dense_loss_lambda_p,
+        dense_loss_type=dense_loss_type,
+        dense_loss_terminal_only=dense_loss_terminal_only,
+        dense_loss_weight_mode=dense_loss_weight_mode,
+        dense_loss_terminal_timestep=dense_loss_terminal_timestep,
+        dense_loss_terminal_weight=dense_loss_terminal_weight,
+        dense_loss_dense_dt=dense_loss_dense_dt,
     )
     try:
         if args.resume_from_checkpoint:
