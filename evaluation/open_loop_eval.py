@@ -407,6 +407,7 @@ def evaluate_open_loop(
                             candidate_slot if candidate_slot < 9 else None
                         )
                     if gallery_slot is not None:
+                        # OPEN_LOOP_DENSE_VIZ_V1: eval
                         visual_sample = TrajectoryVisualizationSample(
                             sample_index=sample_index,
                             expert_trajectory=(
@@ -421,6 +422,24 @@ def evaluate_open_loop(
                             selected_mode=_int(
                                 metrics.selected_pred_mode,
                                 i,
+                            ),
+                            trajectory_time_s=metadata_item(
+                                metadata,
+                                "trajectory_time_s",
+                                i,
+                                default=None,
+                            ),
+                            expert_trajectory_10hz=metadata_item(
+                                metadata,
+                                "expert_trajectory_10hz_xy",
+                                i,
+                                default=None,
+                            ),
+                            expert_trajectory_10hz_time_s=metadata_item(
+                                metadata,
+                                "expert_trajectory_10hz_time_s",
+                                i,
+                                default=None,
                             ),
                             features_cpu={
                                 key: value[i : i + 1].detach().cpu()

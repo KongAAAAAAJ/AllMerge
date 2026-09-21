@@ -20,7 +20,98 @@ class TrajectoryVisualizationSample:
     selected_fde: float
     target_mode: int
     selected_mode: int
+    trajectory_time_s: Optional[object] = None
+    expert_trajectory_10hz: Optional[object] = None
+    expert_trajectory_10hz_time_s: Optional[object] = None
     features_cpu: Optional[Dict[str, torch.Tensor]] = None
+
+
+# OPEN_LOOP_DENSE_VIZ_V1: visualization
+def _clamped_cubic_spline_10hz(
+    sparse_xy: np.ndarray,
+    sparse_time_s: Optional[object],
+    *,
+    sample_dt_s: float = 0.1,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Interpolate sparse planner points with a clamped cubic spline.
+
+    The diffusion output is defined at t=[0.5, ..., 4.0] s. For execution
+    visualization we prepend the current ego origin (0, 0) at t=0 and use
+    first/last secants as the clamped endpoint derivatives. The spline passes
+    through every sparse point and is sampled at 10 Hz.
+    """
+    from scipy.interpolate import CubicSpline
+
+    xy = np.asarray(sparse_xy, dtype=np.float64)
+    if xy.ndim != 2 or xy.shape[1] < 2:
+        raise ValueError(f"sparse_xy must be [T,2+], got {xy.shape}")
+    xy = xy[:, :2]
+
+    if sparse_time_s is None:
+        time_s = (
+            np.arange(1, xy.shape[0] + 1, dtype=np.float64)
+            * 0.5
+        )
+    else:
+        time_s = np.asarray(sparse_time_s, dtype=np.float64).reshape(-1)
+        if time_s.shape[0] != xy.shape[0]:
+            raise ValueError(
+                "sparse trajectory/time length mismatch: "
+                f"xy={xy.shape[0]} time={time_s.shape[0]}"
+            )
+
+    if xy.shape[0] < 2:
+        raise ValueError("Need at least two sparse trajectory points")
+    if not np.isfinite(xy).all() or not np.isfinite(time_s).all():
+        raise ValueError("Spline input contains NaN/Inf")
+    if np.any(np.diff(time_s) <= 0.0):
+        raise ValueError("sparse_time_s must be strictly increasing")
+
+    # Include the current ego pose so the executable curve starts at t=0.
+    if float(time_s[0]) > 1e-8:
+        time_s = np.concatenate(([0.0], time_s))
+        xy = np.concatenate((np.zeros((1, 2), dtype=np.float64), xy), axis=0)
+
+    dt_start = float(time_s[1] - time_s[0])
+    dt_end = float(time_s[-1] - time_s[-2])
+    start_derivative = (xy[1] - xy[0]) / dt_start
+    end_derivative = (xy[-1] - xy[-2]) / dt_end
+
+    spline = CubicSpline(
+        time_s,
+        xy,
+        axis=0,
+        bc_type=(
+            (1, start_derivative),
+            (1, end_derivative),
+        ),
+    )
+
+    start_s = float(time_s[0])
+    end_s = float(time_s[-1])
+    count = int(round((end_s - start_s) / float(sample_dt_s)))
+    dense_time_s = (
+        start_s
+        + np.arange(count + 1, dtype=np.float64) * float(sample_dt_s)
+    )
+    dense_time_s[-1] = end_s
+    dense_xy = np.asarray(spline(dense_time_s), dtype=np.float64)
+    return dense_time_s, dense_xy
+
+
+def _optional_xy(value: Optional[object]) -> Optional[np.ndarray]:
+    if value is None:
+        return None
+    try:
+        array = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if array.ndim != 2 or array.shape[0] < 2 or array.shape[1] < 2:
+        return None
+    array = array[:, :2]
+    if not np.isfinite(array).all():
+        return None
+    return array
 
 
 def compute_open_loop_safety_proxies(
@@ -175,38 +266,90 @@ def plot_random_trajectory_gallery(
             continue
 
         sample = samples[axis_index]
-        gt = np.asarray(sample.expert_trajectory, dtype=np.float64)
-        pred = np.asarray(sample.predicted_trajectory, dtype=np.float64)
+        gt_sparse = np.asarray(sample.expert_trajectory, dtype=np.float64)[:, :2]
+        pred_sparse = np.asarray(sample.predicted_trajectory, dtype=np.float64)[:, :2]
 
-        points = min(len(gt), len(pred))
-        gt = gt[:points, :2]
-        pred = pred[:points, :2]
+        points = min(len(gt_sparse), len(pred_sparse))
+        gt_sparse = gt_sparse[:points]
+        pred_sparse = pred_sparse[:points]
 
-        for step in range(points):
+        sparse_time_s = sample.trajectory_time_s
+        if sparse_time_s is not None:
+            sparse_time_s = np.asarray(
+                sparse_time_s,
+                dtype=np.float64,
+            ).reshape(-1)[:points]
+
+        # True Polynomial GT line. This exists only in datasets recollected
+        # after OPEN_LOOP_DENSE_VIZ_V1; old shards are intentionally not faked.
+        gt_dense = _optional_xy(sample.expert_trajectory_10hz)
+        gt_dense_time = sample.expert_trajectory_10hz_time_s
+        if gt_dense is not None:
+            if gt_dense_time is not None:
+                gt_dense_time = np.asarray(
+                    gt_dense_time,
+                    dtype=np.float64,
+                ).reshape(-1)
+                if gt_dense_time.shape[0] != gt_dense.shape[0]:
+                    gt_dense = None
+
+        if gt_dense is not None:
             ax.plot(
-                [gt[step, 0], pred[step, 0]],
-                [gt[step, 1], pred[step, 1]],
-                linewidth=0.7,
-                alpha=0.22,
+                gt_dense[:, 0],
+                gt_dense[:, 1],
+                linewidth=2.2,
+                label="GT Polynomial (10 Hz)",
+            )
+        else:
+            ax.text(
+                0.02,
+                0.04,
+                "GT Polynomial 10 Hz not stored\nin this dataset",
+                transform=ax.transAxes,
+                fontsize=7.5,
+                alpha=0.68,
+                va="bottom",
             )
 
+        # Predicted execution curve: clamped cubic interpolation through all
+        # sparse diffusion outputs, sampled at the same 10 Hz visualization rate.
+        _, pred_spline = _clamped_cubic_spline_10hz(
+            pred_sparse,
+            sparse_time_s,
+            sample_dt_s=0.1,
+        )
         ax.plot(
-            gt[:, 0],
-            gt[:, 1],
+            pred_spline[:, 0],
+            pred_spline[:, 1],
+            linewidth=1.9,
+            label="Clamped cubic spline (10 Hz)",
+        )
+
+        # Sparse points are MARKERS ONLY: never connect them directly.
+        ax.scatter(
+            gt_sparse[:, 0],
+            gt_sparse[:, 1],
+            s=16,
             marker="o",
-            markersize=3.0,
-            linewidth=2.0,
-            label="Expert",
+            label="GT sparse (0.5 s)",
+            zorder=3,
         )
-        ax.plot(
-            pred[:, 0],
-            pred[:, 1],
+        ax.scatter(
+            pred_sparse[:, 0],
+            pred_sparse[:, 1],
+            s=23,
             marker="x",
-            markersize=4.0,
-            linewidth=1.8,
-            label="Prediction",
+            label="Prediction sparse (0.5 s)",
+            zorder=4,
         )
-        ax.scatter([0.0], [0.0], s=18, marker="s", label="Ego")
+        ax.scatter(
+            [0.0],
+            [0.0],
+            s=20,
+            marker="s",
+            label="Ego",
+            zorder=5,
+        )
 
         ax.set_title(
             f"sample={sample.sample_index}  "
@@ -216,15 +359,14 @@ def plot_random_trajectory_gallery(
         )
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
-        ax.margins(y=0.05)
+        ax.margins(y=0.06)
         ax.set_aspect("auto")
         ax.grid(alpha=0.22)
-        # ax.set_aspect("equal", adjustable="datalim")
         if axis_index == 0:
-            ax.legend(fontsize=8, loc="best")
+            ax.legend(fontsize=7.5, loc="best")
 
     fig.suptitle(
-        "Random 9-sample trajectory prediction deviations",
+        "Random 9-sample: sparse predictions and 10 Hz trajectories",
         fontsize=14,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
