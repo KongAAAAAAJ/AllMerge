@@ -125,6 +125,139 @@ def _select_ego_value(
     return value.copy()
 
 
+# OPEN_LOOP_DENSE_VIZ_V1: collector
+
+def _extract_polynomial_gt_10hz(
+    env,
+    alignment: Dict,
+    *,
+    dense_dt_s: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract true Polynomial path at 10 Hz in the planner ego frame.
+
+    The Polynomial planner internally produces a 0.1 s path in world
+    coordinates. The standard expert label stores only the aligned 8-point
+    0.5 s samples. For visualization we preserve the original path on a fixed
+    10 Hz grid and transform it with the SAME planning origin used by
+    PlannerTrajectory.from_world_path().
+    """
+    from highway_env.planner.geometry import world_to_ego_point
+
+    sparse_time_s = np.asarray(
+        alignment["trajectory_time_s"],
+        dtype=np.float32,
+    ).reshape(-1)
+    if sparse_time_s.size == 0:
+        raise RuntimeError("Empty expert trajectory_time_s")
+
+    horizon_s = float(sparse_time_s[-1])
+    if horizon_s <= 0.0:
+        raise RuntimeError(f"Invalid expert horizon: {horizon_s}")
+    if dense_dt_s <= 0.0:
+        raise ValueError("dense_dt_s must be positive")
+
+    steps = int(round(horizon_s / float(dense_dt_s)))
+    dense_time_s = (
+        np.arange(steps + 1, dtype=np.float32)
+        * np.float32(dense_dt_s)
+    )
+    # Keep the last timestamp exactly aligned with the sparse planner horizon.
+    if not np.isclose(
+        float(dense_time_s[-1]),
+        horizon_s,
+        atol=1e-5,
+        rtol=0.0,
+    ):
+        raise RuntimeError(
+            "Planner horizon is not compatible with 10 Hz dense GT: "
+            f"horizon={horizon_s:.6f}s"
+        )
+    dense_time_s[-1] = np.float32(horizon_s)
+
+    dense_ego_xy = []
+    for ego_idx, vehicle in enumerate(env.controlled_vehicles):
+        path = getattr(vehicle, "path", None)
+        planner_trajectory = getattr(
+            vehicle,
+            "latest_planner_trajectory",
+            None,
+        )
+        if path is None or planner_trajectory is None:
+            raise RuntimeError(
+                "Polynomial dense GT unavailable for ego "
+                f"{ego_idx}: missing vehicle.path/latest_planner_trajectory"
+            )
+
+        source_time_s = np.asarray(
+            path.get("time_s"),
+            dtype=np.float32,
+        ).reshape(-1)
+        if source_time_s.size < 2:
+            raise RuntimeError(
+                f"Polynomial dense GT path too short for ego {ego_idx}"
+            )
+
+        def _scalar_path(values, name: str) -> np.ndarray:
+            values = list(values)
+            result = np.asarray(
+                [
+                    float(np.asarray(value).reshape(-1)[0])
+                    for value in values
+                ],
+                dtype=np.float32,
+            )
+            if result.shape[0] != source_time_s.shape[0]:
+                raise RuntimeError(
+                    f"Polynomial {name}/time length mismatch for ego "
+                    f"{ego_idx}: {result.shape[0]} vs {source_time_s.shape[0]}"
+                )
+            return result
+
+        world_x = _scalar_path(path["x"], "x")
+        world_y = _scalar_path(path["y"], "y")
+
+        if np.any(np.diff(source_time_s) <= 0.0):
+            raise RuntimeError(
+                f"Polynomial time grid is not strictly increasing for ego {ego_idx}"
+            )
+        if float(source_time_s[0]) > 1e-5:
+            raise RuntimeError(
+                "Polynomial path starts after t=0 for ego "
+                f"{ego_idx}: {float(source_time_s[0]):.6f}s"
+            )
+        if float(source_time_s[-1]) < horizon_s - 1e-5:
+            raise RuntimeError(
+                "Polynomial path does not cover sparse expert horizon for ego "
+                f"{ego_idx}: source_end={float(source_time_s[-1]):.6f}s, "
+                f"horizon={horizon_s:.6f}s"
+            )
+
+        dense_world_xy = np.stack(
+            [
+                np.interp(dense_time_s, source_time_s, world_x),
+                np.interp(dense_time_s, source_time_s, world_y),
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+        origin = planner_trajectory.get("ego_position_world")
+        heading = planner_trajectory.get("ego_heading_world")
+        if origin is None or heading is None:
+            raise RuntimeError(
+                "PlannerTrajectory is missing planning origin for ego "
+                f"{ego_idx}"
+            )
+
+        local_xy = world_to_ego_point(
+            dense_world_xy,
+            np.asarray(origin, dtype=np.float32),
+            float(heading),
+        ).astype(np.float32)
+        dense_ego_xy.append(local_xy)
+
+    return np.stack(dense_ego_xy, axis=0), dense_time_s
+
+
 def flatten_frame_record(record: Dict) -> List[Dict[str, np.ndarray]]:
     """
     Convert the existing pilot frame record to one sample per controlled ego.
@@ -733,7 +866,26 @@ def main() -> None:
                     allow_contract_mismatch=args.allow_contract_mismatch,
                 )
 
+                dense_gt_xy, dense_gt_time_s = _extract_polynomial_gt_10hz(
+                    env,
+                    alignment,
+                )
+
                 samples = flatten_frame_record(frame_record)
+                if len(samples) != int(dense_gt_xy.shape[0]):
+                    raise RuntimeError(
+                        "Dense GT ego count does not match flattened samples: "
+                        f"dense={dense_gt_xy.shape[0]} samples={len(samples)}"
+                    )
+
+                for ego_idx, sample in enumerate(samples):
+                    sample["expert_trajectory_10hz_xy"] = (
+                        dense_gt_xy[ego_idx].astype(np.float32, copy=True)
+                    )
+                    sample["expert_trajectory_10hz_time_s"] = (
+                        dense_gt_time_s.astype(np.float32, copy=True)
+                    )
+
                 remaining = args.target_samples - total_samples
                 samples = samples[:remaining]
 
