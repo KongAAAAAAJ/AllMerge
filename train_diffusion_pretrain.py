@@ -73,6 +73,8 @@ def parse_args():
     parser.add_argument("--dense-loss-type", choices=("smooth_l1", "l1", "mse"), default=None)
     parser.add_argument("--dense-loss-terminal-timestep", type=int, default=None)
     parser.add_argument("--dense-loss-terminal-weight", type=float, default=None)
+    # DENSE_RESIDUAL_SEPARATE_LR_V1
+    parser.add_argument("--dense-residual-lr", type=float, default=None)
     return parser.parse_args()
 
 
@@ -112,6 +114,10 @@ def main() -> int:
         args.dense_loss_terminal_weight, "dense_loss_terminal_weight", 1.0
     ))
     dense_loss_dense_dt = float(train_cfg.get("dense_loss_dense_dt", 0.1))
+    # DENSE_RESIDUAL_SEPARATE_LR_V1
+    dense_residual_lr = float(pick(
+        args.dense_residual_lr, "dense_residual_learning_rate", learning_rate
+    ))
 
     validate_dataset_root(dataset_root, (train_split, val_split))
     seed_everything(seed)
@@ -162,6 +168,8 @@ def main() -> int:
             "dense_loss_terminal_timestep": dense_loss_terminal_timestep,
             "dense_loss_terminal_weight": dense_loss_terminal_weight,
             "dense_loss_dense_dt": dense_loss_dense_dt,
+            # DENSE_RESIDUAL_SEPARATE_LR_V1
+            "dense_residual_learning_rate": dense_residual_lr,
         },
     }
     (run_dir / "resolved_config.json").write_text(
@@ -180,7 +188,8 @@ def main() -> int:
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
-        f"type={dense_loss_type} terminal_t={dense_loss_terminal_timestep}"
+        f"type={dense_loss_type} terminal_t={dense_loss_terminal_timestep} "
+        f"residual_lr={dense_residual_lr:g}"
     )
 
     trainer = DiffusionPretrainer(
@@ -205,6 +214,8 @@ def main() -> int:
         dense_loss_terminal_timestep=dense_loss_terminal_timestep,
         dense_loss_terminal_weight=dense_loss_terminal_weight,
         dense_loss_dense_dt=dense_loss_dense_dt,
+        # DENSE_RESIDUAL_SEPARATE_LR_V1
+        dense_residual_learning_rate=dense_residual_lr,
     )
     try:
         if args.resume_from_checkpoint:

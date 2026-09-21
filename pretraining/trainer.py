@@ -172,6 +172,8 @@ class DiffusionPretrainer:
         dense_loss_terminal_timestep: int = 0,
         dense_loss_terminal_weight: float = 1.0,
         dense_loss_dense_dt: float = 0.1,
+        # DENSE_RESIDUAL_SEPARATE_LR_V1
+        dense_residual_learning_rate: Optional[float] = None,
     ) -> None:
         self.model_config_dict = dict(model_config or {})
         self.model_config = build_structured_diffusion_config(**self.model_config_dict)
@@ -179,15 +181,10 @@ class DiffusionPretrainer:
         self.device = resolve_device(device)
         self.adapter = PlannerTensorAdapter(self.model_config, self.device)
         self.planner = StructuredDiffusionPlanner(self.model_config, self.adapter).to(self.device)
-        self.optimizer = torch.optim.AdamW(
-            self.planner.parameters(),
-            lr=float(learning_rate),
-            weight_decay=float(weight_decay),
-        )
+
         # DENSE_RESIDUAL_HEAD_V2
-        # Same optimizer/step, but clip the two gradient-isolated parameter
-        # sets independently so a large residual gradient cannot rescale the
-        # Diffusion planner gradient through global norm clipping.
+        # Same optimizer/step, but keep base planner and residual-head params in
+        # distinct groups so the residual head can use an independent LR.
         self._dense_residual_params = list(
             self.planner.dense_residual_head.parameters()
         )
@@ -196,6 +193,44 @@ class DiffusionPretrainer:
             p for p in self.planner.parameters()
             if id(p) not in residual_param_ids
         ]
+
+        # DENSE_RESIDUAL_SEPARATE_LR_V1
+        base_lr = float(learning_rate)
+        residual_lr = (
+            base_lr
+            if dense_residual_learning_rate is None
+            else float(dense_residual_learning_rate)
+        )
+        if base_lr <= 0.0:
+            raise ValueError("learning_rate must be positive")
+        if residual_lr <= 0.0:
+            raise ValueError("dense_residual_learning_rate must be positive")
+
+        self.dense_residual_learning_rate = residual_lr
+        residual_lr_scale = residual_lr / base_lr
+
+        self.optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": self._base_planner_params,
+                    "lr": base_lr,
+                    "lr_scale": 1.0,
+                    "group_name": "base_planner",
+                },
+                {
+                    "params": self._dense_residual_params,
+                    "lr": residual_lr,
+                    "lr_scale": residual_lr_scale,
+                    "group_name": "dense_residual",
+                },
+            ],
+            lr=base_lr,
+            weight_decay=float(weight_decay),
+        )
+
+        # Clip the two gradient-isolated parameter sets independently so a
+        # large residual gradient cannot rescale the Diffusion planner gradient
+        # through global norm clipping.
         self.scheduler = WarmupCosLR(
             optimizer=self.optimizer,
             lr=float(learning_rate),
