@@ -77,6 +77,8 @@ METRIC_KEYS = (
     "dense_residual_max_abs_y_m",
     "dense_residual_x_saturation_ratio",
     "dense_residual_y_saturation_ratio",
+    # INFERENCE_CONSISTENT_RESIDUAL_V1
+    "dense_runtime_mode_match",
     "dense_weight_t",
     "dense_terminal_fraction",
     "target_mode_assignment_distance",
@@ -151,6 +153,8 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
         "dense_residual_max_abs_y_m": output["dense_residual_max_abs_y_m"],
         "dense_residual_x_saturation_ratio": output["dense_residual_x_saturation_ratio"],
         "dense_residual_y_saturation_ratio": output["dense_residual_y_saturation_ratio"],
+        # INFERENCE_CONSISTENT_RESIDUAL_V1
+        "dense_runtime_mode_match": output["dense_runtime_mode_match"],
         "dense_weight_t": output["dense_weight_t"],
         "dense_terminal_fraction": output["dense_terminal_fraction"],
         "target_mode_assignment_distance": output["target_mode_assignment_distance"].mean(),
@@ -588,7 +592,8 @@ class DiffusionPretrainer:
                         f"res_x={metrics['val/dense_residual_mean_abs_x_m']:.3f} "
                         f"res_y={metrics['val/dense_residual_mean_abs_y_m']:.3f} "
                         f"sat_x={metrics['val/dense_residual_x_saturation_ratio']:.3f} "
-                        f"sat_y={metrics['val/dense_residual_y_saturation_ratio']:.3f}"
+                        f"sat_y={metrics['val/dense_residual_y_saturation_ratio']:.3f} "
+                        f"runtime_mode_match={metrics['val/dense_runtime_mode_match']:.3f}"
                     )
             summary += f" lr={lr:.3e} step={self.global_step}"
             print(summary)

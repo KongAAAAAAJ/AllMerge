@@ -576,35 +576,31 @@ class StructuredDiffusionPlanner(nn.Module):
             ).min,
         )
 
-    @torch.no_grad()
-    def infer_multimodal(
+    # INFERENCE_CONSISTENT_RESIDUAL_V1
+    def _runtime_base_sample(
         self,
         features: Dict[str, torch.Tensor],
         *,
-        generator: Optional[
-            torch.Generator
-        ] = None,
+        generator: Optional[torch.Generator] = None,
+        base_noise: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        self.eval()
+        """Run the exact base-planner path used by online inference.
 
-        scene = self.scene_encoder(
-            features
+        This helper intentionally stops before the residual head.  Both
+        ``infer_multimodal`` and dense residual training call this same helper
+        so the residual inputs come from the same reverse-diffusion chain,
+        mode masking and argmax selection.
+
+        ``base_noise`` is an unscaled N(0,1) sample.  When supplied by
+        ``forward_train`` it reuses that iteration's already-drawn noise, so
+        the auxiliary branch consumes no additional RNG state.
+        """
+        scene = self.scene_encoder(features)
+        clean_anchor_norm = self.adapter.normalize_trajectory(
+            features["coarse_trajectories"]
         )
-
-        clean_anchor_norm = (
-            self.adapter.normalize_trajectory(
-                features[
-                    "coarse_trajectories"
-                ]
-            )
-        )
-
-        batch = clean_anchor_norm.shape[0]
-
-        start_t = int(
-            self.config.inference_start_timestep
-        )
-
+        batch = int(clean_anchor_norm.shape[0])
+        start_t = int(self.config.inference_start_timestep)
         start_timesteps = torch.full(
             (batch,),
             start_t,
@@ -612,198 +608,172 @@ class StructuredDiffusionPlanner(nn.Module):
             device=clean_anchor_norm.device,
         )
 
-        noise = torch.randn(
-            clean_anchor_norm.shape,
-            dtype=clean_anchor_norm.dtype,
-            device=clean_anchor_norm.device,
-            generator=generator,
-        ) * float(
-            self.config.inference_noise_scale
-        )
+        if base_noise is None:
+            base_noise = torch.randn(
+                clean_anchor_norm.shape,
+                dtype=clean_anchor_norm.dtype,
+                device=clean_anchor_norm.device,
+                generator=generator,
+            )
+        else:
+            if tuple(base_noise.shape) != tuple(clean_anchor_norm.shape):
+                raise ValueError(
+                    "runtime base_noise shape mismatch: "
+                    f"got {tuple(base_noise.shape)}, "
+                    f"expected {tuple(clean_anchor_norm.shape)}"
+                )
+            base_noise = base_noise.to(
+                device=clean_anchor_norm.device,
+                dtype=clean_anchor_norm.dtype,
+            )
 
+        runtime_noise = base_noise * float(self.config.inference_noise_scale)
         sample = self.schedule.add_noise(
             clean_anchor_norm,
-            noise,
+            runtime_noise,
             start_timesteps,
         )
-        # EVAL_VIZ_V1: retain the physical noisy trajectory for
-        # start-vs-end denoising visualization.
         initial_noisy = sample.clone()
 
         final_logits = None
         final_x0 = None
-        final_mode_tokens = None  # DENSE_RESIDUAL_HEAD_V2
+        final_mode_tokens = None
 
-        timesteps = list(
-            self.config.inference_timesteps
-        )
-
+        timesteps = list(self.config.inference_timesteps)
         if not timesteps:
             timesteps = [start_t, 0]
-
-        # Ensure the sampling chain starts where the sample was noised.
         if timesteps[0] != start_t:
-            timesteps = [
-                start_t,
-                *timesteps,
-            ]
+            timesteps = [start_t, *timesteps]
 
-        for index, timestep in enumerate(
-            timesteps
-        ):
+        for index, timestep in enumerate(timesteps):
             t_batch = torch.full(
                 (batch,),
                 int(timestep),
                 dtype=torch.long,
                 device=sample.device,
             )
-
-            predicted_x0, logits, mode_tokens = (
-                self.denoiser(
-                    sample,
-                    t_batch,
-                    scene,
-                    return_mode_tokens=True,
-                )
+            predicted_x0, logits, mode_tokens = self.denoiser(
+                sample,
+                t_batch,
+                scene,
+                return_mode_tokens=True,
             )
-
             final_x0 = predicted_x0
             final_logits = logits
             final_mode_tokens = mode_tokens
 
             prev_timestep = (
                 timesteps[index + 1]
-                if index + 1 < len(
-                    timesteps
-                )
+                if index + 1 < len(timesteps)
                 else None
             )
-
-            sample = (
-                self.schedule.step_predict_x0(
-                    sample,
-                    predicted_x0,
-                    int(timestep),
-                    (
-                        int(prev_timestep)
-                        if prev_timestep
-                        is not None
-                        else None
-                    ),
-                )
+            sample = self.schedule.step_predict_x0(
+                sample,
+                predicted_x0,
+                int(timestep),
+                int(prev_timestep) if prev_timestep is not None else None,
             )
 
-        candidates = (
-            self.adapter.denormalize_trajectory(
-                final_x0
-            )
-        )
+        if final_x0 is None or final_logits is None or final_mode_tokens is None:
+            raise RuntimeError("runtime reverse-diffusion chain produced no output")
 
-        masked_logits = (
-            self._masked_logits(
-                final_logits,
-                features[
-                    "mode_valid_mask"
-                ],
-            )
+        candidates = self.adapter.denormalize_trajectory(final_x0)
+        masked_logits = self._masked_logits(
+            final_logits,
+            features["mode_valid_mask"],
         )
-
-        mode_index = masked_logits.argmax(
-            dim=-1
+        mode_index = masked_logits.argmax(dim=-1)
+        gather_index = mode_index[:, None, None, None].expand(
+            -1,
+            1,
+            self.config.horizon_steps,
+            2,
         )
-
-        gather_index = (
-            mode_index[
-                :,
-                None,
-                None,
-                None,
-            ]
-            .expand(
-                -1,
-                1,
-                self.config.horizon_steps,
-                2,
-            )
-        )
-
         best = torch.gather(
             candidates,
             dim=1,
             index=gather_index,
         ).squeeze(1)
-
-        # DENSE_RESIDUAL_HEAD_V2
-        # Keep raw Diffusion output unchanged for planner/open-loop metrics,
-        # while exposing an execution-corrected sparse trajectory for spline.
         selected_x0_norm = torch.gather(
             final_x0,
             dim=1,
             index=gather_index,
         ).squeeze(1)
         feature_index = mode_index[:, None, None].expand(
-            -1, 1, int(self.config.d_model)
+            -1,
+            1,
+            int(self.config.d_model),
         )
         selected_mode_feature = torch.gather(
             final_mode_tokens,
             dim=1,
             index=feature_index,
         ).squeeze(1)
-        execution_residual_m = self.dense_residual_head(
-            selected_mode_feature,
-            selected_x0_norm,
-        )
-        execution_sparse = best + execution_residual_m
 
         return {
             "trajectory": best,
-            "trajectory_execution_sparse": execution_sparse,
-            "trajectory_execution_residual": execution_residual_m,
             "trajectory_candidates": candidates,
             "trajectory_mode_logits": final_logits,
             "trajectory_mode_logits_masked": masked_logits,
             "trajectory_mode_idx": mode_index,
-            # EVAL_VIZ_V1
-            "trajectory_noisy_initial": (
-                self.adapter.denormalize_trajectory(initial_noisy)
+            "selected_x0_norm": selected_x0_norm,
+            "selected_mode_feature": selected_mode_feature,
+            "trajectory_noisy_initial": self.adapter.denormalize_trajectory(
+                initial_noisy
             ),
         }
 
-    # STAGED_DENSE_SUPERVISION_V1
-    # DENSE_RESIDUAL_HEAD_V2
-    def _dense_terminal_auxiliary(
+    @torch.no_grad()
+    def infer_multimodal(
+        self,
+        features: Dict[str, torch.Tensor],
+        *,
+        generator: Optional[torch.Generator] = None,
+    ) -> Dict[str, torch.Tensor]:
+        self.eval()
+        base = self._runtime_base_sample(
+            features,
+            generator=generator,
+        )
+        execution_residual_m = self.dense_residual_head(
+            base["selected_mode_feature"],
+            base["selected_x0_norm"],
+        )
+        execution_sparse = base["trajectory"] + execution_residual_m
+        return {
+            "trajectory": base["trajectory"],
+            "trajectory_execution_sparse": execution_sparse,
+            "trajectory_execution_residual": execution_residual_m,
+            "trajectory_candidates": base["trajectory_candidates"],
+            "trajectory_mode_logits": base["trajectory_mode_logits"],
+            "trajectory_mode_logits_masked": base[
+                "trajectory_mode_logits_masked"
+            ],
+            "trajectory_mode_idx": base["trajectory_mode_idx"],
+            "trajectory_noisy_initial": base["trajectory_noisy_initial"],
+        }
+
+    # INFERENCE_CONSISTENT_RESIDUAL_V1
+    def _dense_runtime_auxiliary(
         self,
         *,
-        scene: SceneEncoding,
-        clean_anchor_norm: torch.Tensor,
-        noise: torch.Tensor,
         features: Dict[str, torch.Tensor],
+        base_noise: torch.Tensor,
         target_mode: torch.Tensor,
         target_trajectory_dense: torch.Tensor,
         dense_loss_type: str,
         dense_loss_lambda_p: float,
-        dense_loss_terminal_timestep: int,
         dense_loss_weight_mode: str,
         dense_loss_terminal_weight: float,
     ) -> Dict[str, torch.Tensor]:
-        """Dense execution supervision with a hard gradient boundary.
+        """Train residual head from exactly the runtime base-planner inputs.
 
-        The terminal Diffusion prediction and its mode feature are treated as
-        fixed inputs. L_dense can only update ``dense_residual_head``.
+        The base planner is executed in eval mode and under ``no_grad`` using
+        the same start timestep, reverse schedule, traffic mask and predicted
+        argmax mode as ``infer_multimodal``.  Only the residual head is outside
+        the no-grad boundary.
         """
-        batch = int(clean_anchor_norm.shape[0])
-        terminal_t = int(dense_loss_terminal_timestep)
-        if terminal_t < 0 or terminal_t >= int(self.config.num_train_timesteps):
-            raise ValueError(
-                "dense_loss_terminal_timestep must lie in scheduler range "
-                f"[0,{int(self.config.num_train_timesteps) - 1}], got {terminal_t}"
-            )
-        if terminal_t >= int(self.config.train_timestep_max):
-            raise ValueError(
-                "dense_loss_terminal_timestep should be inside the training "
-                f"timestep range [0,{int(self.config.train_timestep_max) - 1}]"
-            )
-
+        batch = int(features["coarse_trajectories"].shape[0])
         expected_dense_steps = int(round(
             float(self.config.horizon_steps)
             * float(self.config.trajectory_dt)
@@ -813,73 +783,39 @@ class StructuredDiffusionPlanner(nn.Module):
         if tuple(target_trajectory_dense.shape) != expected_shape:
             raise ValueError(
                 "real 10 Hz dense target has wrong shape: "
-                f"got {tuple(target_trajectory_dense.shape)}, expected {expected_shape}"
+                f"got {tuple(target_trajectory_dense.shape)}, "
+                f"expected {expected_shape}"
             )
         if not torch.isfinite(target_trajectory_dense).all():
             raise ValueError("real 10 Hz dense target contains NaN/Inf")
 
-        terminal_timesteps = torch.full(
-            (batch,),
-            terminal_t,
-            dtype=torch.long,
-            device=clean_anchor_norm.device,
-        )
-        terminal_noisy = self.schedule.add_noise(
-            clean_anchor_norm,
-            noise,
-            terminal_timesteps,
-        )
-
-        # The auxiliary forward must not alter the Diffusion planner's RNG
-        # stream (dropout etc.), otherwise the base planner could diverge even
-        # with zero dense gradient. fork_rng restores CPU/CUDA RNG afterwards.
-        cuda_devices = []
-        if terminal_noisy.is_cuda:
-            cuda_devices = [terminal_noisy.device.index or 0]
-        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+        # Runtime uses planner.eval().  Reproduce that base-input distribution
+        # exactly, then restore the caller's train/eval state before running
+        # the residual head with gradients.
+        was_training = bool(self.training)
+        try:
+            self.eval()
             with torch.no_grad():
-                terminal_x0_norm, _, terminal_mode_tokens = self.denoiser(
-                    terminal_noisy,
-                    terminal_timesteps,
-                    scene,
-                    return_mode_tokens=True,
+                base = self._runtime_base_sample(
+                    features,
+                    base_noise=base_noise.detach(),
                 )
-                terminal_candidates_m = self.adapter.denormalize_trajectory(
-                    terminal_x0_norm
-                )
+        finally:
+            self.train(was_training)
 
-        gather_index = (
-            target_mode[:, None, None, None]
-            .expand(-1, 1, self.config.horizon_steps, 2)
-        )
-        selected_terminal_m = torch.gather(
-            terminal_candidates_m,
-            dim=1,
-            index=gather_index,
-        ).squeeze(1).detach()
-        selected_terminal_norm = torch.gather(
-            terminal_x0_norm,
-            dim=1,
-            index=gather_index,
-        ).squeeze(1).detach()
-        feature_index = target_mode[:, None, None].expand(
-            -1, 1, int(self.config.d_model)
-        )
-        selected_mode_feature = torch.gather(
-            terminal_mode_tokens,
-            dim=1,
-            index=feature_index,
-        ).squeeze(1).detach()
+        selected_raw_m = base["trajectory"].detach()
+        selected_x0_norm = base["selected_x0_norm"].detach()
+        selected_mode_feature = base["selected_mode_feature"].detach()
+        runtime_mode = base["trajectory_mode_idx"].detach()
 
         execution_residual_m = self.dense_residual_head(
             selected_mode_feature,
-            selected_terminal_norm,
+            selected_x0_norm,
         )
         execution_sparse_m = (
-            selected_terminal_m.float() + execution_residual_m.float()
+            selected_raw_m.float() + execution_residual_m.float()
         )
 
-        # Keep the spline solve in fp32 even under AMP.
         start_xy = torch.zeros_like(execution_sparse_m[:, 0, :])
         start_velocity_xy = features["ego_state"][:, 0:2].float().detach()
         pred_dense_all_m = self.dense_trajectory_spline(
@@ -898,22 +834,28 @@ class StructuredDiffusionPlanner(nn.Module):
             expert_dense_m,
             loss_type=dense_loss_type,
         )
+        # Keep the legacy constant weighting interface.  The residual input is
+        # now a full runtime chain, not a synthetic terminal-timestep sample.
+        weight_timesteps = torch.zeros(
+            (batch,),
+            dtype=torch.long,
+            device=pred_dense_future_m.device,
+        )
         weight_per_sample = dense_timestep_weight(
-            terminal_timesteps,
+            weight_timesteps,
             mode=dense_loss_weight_mode,
             terminal_weight=dense_loss_terminal_weight,
         )
         weight = weight_per_sample.mean()
         weighted = raw * float(dense_loss_lambda_p) * weight
+
         ade_m = torch.linalg.vector_norm(
             pred_dense_future_m - expert_dense_m,
             dim=-1,
         ).mean()
-
-        # Diagnostic baseline: same terminal sparse trajectory without residual.
         with torch.no_grad():
             base_dense_all_m = self.dense_trajectory_spline(
-                selected_terminal_m.float(),
+                selected_raw_m.float(),
                 start_xy=start_xy,
                 start_velocity_xy=start_velocity_xy,
             )
@@ -945,14 +887,18 @@ class StructuredDiffusionPlanner(nn.Module):
             "dense_residual_mean_abs_m": residual_abs.mean(),
             "dense_residual_max_abs_m": residual_abs.max(),
             "dense_residual_mean_l2_m": residual_l2.mean(),
-            # RESIDUAL_XY_DIAGNOSTICS_V1
             "dense_residual_mean_abs_x_m": residual_abs_x.mean(),
             "dense_residual_mean_abs_y_m": residual_abs_y.mean(),
             "dense_residual_max_abs_x_m": residual_abs_x.max(),
             "dense_residual_max_abs_y_m": residual_abs_y.max(),
             "dense_residual_x_saturation_ratio": x_saturation_ratio,
             "dense_residual_y_saturation_ratio": y_saturation_ratio,
+            "dense_runtime_mode_match": (
+                runtime_mode == target_mode.detach()
+            ).float().mean(),
             "dense_weight_t": weight,
+            # Backward-compatible metric key: now means full-runtime-chain
+            # dense auxiliary was active for the whole batch.
             "dense_terminal_fraction": raw.new_ones(()),
         }
 
@@ -1134,6 +1080,8 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_residual_max_abs_y_m = regression_loss.new_zeros(())
         dense_residual_x_saturation_ratio = regression_loss.new_zeros(())
         dense_residual_y_saturation_ratio = regression_loss.new_zeros(())
+        # INFERENCE_CONSISTENT_RESIDUAL_V1
+        dense_runtime_mode_match = regression_loss.new_zeros(())
         dense_weight_t = regression_loss.new_zeros(())
         dense_terminal_fraction = regression_loss.new_zeros(())
 
@@ -1144,16 +1092,13 @@ class StructuredDiffusionPlanner(nn.Module):
                     "dense supervision requires the real 10 Hz dense target from "
                     "Stage 3; no sparse-to-dense fallback is allowed"
                 )
-            dense_aux = self._dense_terminal_auxiliary(
-                scene=scene,
-                clean_anchor_norm=clean_anchor_norm,
-                noise=noise,
+            dense_aux = self._dense_runtime_auxiliary(
                 features=features,
+                base_noise=noise,
                 target_mode=target_mode,
                 target_trajectory_dense=target_trajectory_dense,
                 dense_loss_type=dense_loss_type,
                 dense_loss_lambda_p=float(dense_loss_lambda_p),
-                dense_loss_terminal_timestep=int(dense_loss_terminal_timestep),
                 dense_loss_weight_mode=dense_loss_weight_mode,
                 dense_loss_terminal_weight=float(dense_loss_terminal_weight),
             )
@@ -1172,6 +1117,7 @@ class StructuredDiffusionPlanner(nn.Module):
             dense_residual_max_abs_y_m = dense_aux["dense_residual_max_abs_y_m"]
             dense_residual_x_saturation_ratio = dense_aux["dense_residual_x_saturation_ratio"]
             dense_residual_y_saturation_ratio = dense_aux["dense_residual_y_saturation_ratio"]
+            dense_runtime_mode_match = dense_aux["dense_runtime_mode_match"]
             dense_weight_t = dense_aux["dense_weight_t"]
             dense_terminal_fraction = dense_aux["dense_terminal_fraction"]
 
@@ -1263,6 +1209,10 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "dense_residual_y_saturation_ratio":
                 dense_residual_y_saturation_ratio,
+
+            # INFERENCE_CONSISTENT_RESIDUAL_V1
+            "dense_runtime_mode_match":
+                dense_runtime_mode_match,
 
             "dense_weight_t":
                 dense_weight_t,

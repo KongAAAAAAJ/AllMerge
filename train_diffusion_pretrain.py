@@ -188,7 +188,8 @@ def main() -> int:
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
-        f"type={dense_loss_type} terminal_t={dense_loss_terminal_timestep} "
+        f"type={dense_loss_type} runtime_chain="
+        f"{tuple(model_cfg.get('inference_timesteps', (8, 0)))} "
         f"residual_lr={dense_residual_lr:g}"
     )
 

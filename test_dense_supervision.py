@@ -40,7 +40,7 @@ def _dense_target(cfg, device, lateral_offset=0.35):
     return expert_dense
 
 
-def test_dense_terminal_auxiliary_backpropagates_only_to_residual_head():
+def test_dense_runtime_auxiliary_backpropagates_only_to_residual_head():
     device = torch.device("cpu")
     cfg = build_structured_diffusion_config(
         d_model=32,
@@ -54,22 +54,18 @@ def test_dense_terminal_auxiliary_backpropagates_only_to_residual_head():
     adapter = PlannerTensorAdapter(cfg, device)
     planner = StructuredDiffusionPlanner(cfg, adapter).to(device)
     features = _synthetic_features(cfg, device)
-    scene = planner.scene_encoder(features)
     clean_anchor_norm = adapter.normalize_trajectory(features["coarse_trajectories"])
     noise = torch.zeros_like(clean_anchor_norm)
     target_mode = torch.zeros((2,), dtype=torch.long, device=device)
     expert_dense = _dense_target(cfg, device)
 
-    out = planner._dense_terminal_auxiliary(
-        scene=scene,
-        clean_anchor_norm=clean_anchor_norm,
-        noise=noise,
+    out = planner._dense_runtime_auxiliary(
         features=features,
+        base_noise=noise,
         target_mode=target_mode,
         target_trajectory_dense=expert_dense,
         dense_loss_type="smooth_l1",
         dense_loss_lambda_p=1.0,
-        dense_loss_terminal_timestep=0,
         dense_loss_weight_mode="terminal_constant",
         dense_loss_terminal_weight=1.0,
     )
@@ -223,3 +219,68 @@ def test_dense_enabled_requires_real_dense_target():
         assert "real 10 Hz dense target" in str(exc)
     else:
         raise AssertionError("dense supervision accepted a missing dense target")
+
+
+# INFERENCE_CONSISTENT_RESIDUAL_V1
+def test_runtime_base_helper_matches_infer_multimodal_raw_path():
+    device = torch.device("cpu")
+    cfg = build_structured_diffusion_config(
+        d_model=32,
+        d_ffn=64,
+        num_heads=4,
+        num_scene_layers=1,
+        num_denoiser_layers=1,
+        dropout=0.2,
+        dense_residual_hidden_dim=32,
+    )
+    adapter = PlannerTensorAdapter(cfg, device)
+    planner = StructuredDiffusionPlanner(cfg, adapter).to(device)
+    features = _synthetic_features(cfg, device)
+
+    planner.eval()
+    g1 = torch.Generator(device="cpu").manual_seed(2026)
+    with torch.no_grad():
+        base = planner._runtime_base_sample(features, generator=g1)
+    g2 = torch.Generator(device="cpu").manual_seed(2026)
+    out = planner.infer_multimodal(features, generator=g2)
+
+    assert torch.equal(base["trajectory"], out["trajectory"])
+    assert torch.equal(base["trajectory_mode_idx"], out["trajectory_mode_idx"])
+    assert torch.equal(
+        base["trajectory_mode_logits_masked"],
+        out["trajectory_mode_logits_masked"],
+    )
+
+
+def test_dense_runtime_auxiliary_restores_train_mode():
+    device = torch.device("cpu")
+    cfg = build_structured_diffusion_config(
+        d_model=32,
+        d_ffn=64,
+        num_heads=4,
+        num_scene_layers=1,
+        num_denoiser_layers=1,
+        dropout=0.2,
+        dense_residual_hidden_dim=32,
+    )
+    adapter = PlannerTensorAdapter(cfg, device)
+    planner = StructuredDiffusionPlanner(cfg, adapter).to(device).train()
+    features = _synthetic_features(cfg, device)
+    clean_anchor_norm = adapter.normalize_trajectory(features["coarse_trajectories"])
+    noise = torch.zeros_like(clean_anchor_norm)
+    target_mode = torch.zeros((2,), dtype=torch.long, device=device)
+    expert_dense = _dense_target(cfg, device)
+
+    planner._dense_runtime_auxiliary(
+        features=features,
+        base_noise=noise,
+        target_mode=target_mode,
+        target_trajectory_dense=expert_dense,
+        dense_loss_type="smooth_l1",
+        dense_loss_lambda_p=1.0,
+        dense_loss_weight_mode="terminal_constant",
+        dense_loss_terminal_weight=1.0,
+    )
+    assert planner.training
+    assert planner.scene_encoder.training
+    assert planner.denoiser.training
