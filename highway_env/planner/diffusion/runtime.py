@@ -240,7 +240,12 @@ class DiffusionPlannerRuntime:
                 torch.cuda.synchronize(self.device)
             spline_start = time.perf_counter()
 
-            selected_sparse = output["trajectory"]
+            # DENSE_RESIDUAL_HEAD_V2: preserve raw planner output but decode
+            # the execution-corrected sparse trajectory when available.
+            selected_sparse = output.get(
+                "trajectory_execution_sparse",
+                output["trajectory"],
+            )
             start_xy = torch.zeros_like(selected_sparse[..., 0, :])
             start_velocity_xy = torch_features["ego_state"][..., 0:2]
 

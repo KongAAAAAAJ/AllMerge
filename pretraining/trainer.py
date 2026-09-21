@@ -58,12 +58,18 @@ def _build_writer(log_dir: str | Path):
 
 METRIC_KEYS = (
     "loss",
+    "base_loss",
     "trajectory_regression_loss",
     "trajectory_classification_loss",
     # STAGED_DENSE_SUPERVISION_V1
     "dense_loss_raw",
     "dense_loss_weighted",
     "dense_ade_m",
+    "dense_base_ade_m",
+    "dense_ade_gain_m",
+    "dense_residual_mean_abs_m",
+    "dense_residual_max_abs_m",
+    "dense_residual_mean_l2_m",
     "dense_weight_t",
     "dense_terminal_fraction",
     "target_mode_assignment_distance",
@@ -119,12 +125,18 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
     ).float().mean()
     values = {
         "loss": output["loss"],
+        "base_loss": output["base_loss"],
         "trajectory_regression_loss": output["trajectory_regression_loss"],
         "trajectory_classification_loss": output["trajectory_classification_loss"],
         # STAGED_DENSE_SUPERVISION_V1
         "dense_loss_raw": output["dense_loss_raw"],
         "dense_loss_weighted": output["dense_loss_weighted"],
         "dense_ade_m": output["dense_ade_m"],
+        "dense_base_ade_m": output["dense_base_ade_m"],
+        "dense_ade_gain_m": output["dense_ade_gain_m"],
+        "dense_residual_mean_abs_m": output["dense_residual_mean_abs_m"],
+        "dense_residual_max_abs_m": output["dense_residual_max_abs_m"],
+        "dense_residual_mean_l2_m": output["dense_residual_mean_l2_m"],
         "dense_weight_t": output["dense_weight_t"],
         "dense_terminal_fraction": output["dense_terminal_fraction"],
         "target_mode_assignment_distance": output["target_mode_assignment_distance"].mean(),
@@ -172,6 +184,18 @@ class DiffusionPretrainer:
             lr=float(learning_rate),
             weight_decay=float(weight_decay),
         )
+        # DENSE_RESIDUAL_HEAD_V2
+        # Same optimizer/step, but clip the two gradient-isolated parameter
+        # sets independently so a large residual gradient cannot rescale the
+        # Diffusion planner gradient through global norm clipping.
+        self._dense_residual_params = list(
+            self.planner.dense_residual_head.parameters()
+        )
+        residual_param_ids = {id(p) for p in self._dense_residual_params}
+        self._base_planner_params = [
+            p for p in self.planner.parameters()
+            if id(p) not in residual_param_ids
+        ]
         self.scheduler = WarmupCosLR(
             optimizer=self.optimizer,
             lr=float(learning_rate),
@@ -336,8 +360,13 @@ class DiffusionPretrainer:
                     self.scaler.scale(loss).backward()
                     if self.grad_clip > 0:
                         self.scaler.unscale_(self.optimizer)
+                        # DENSE_RESIDUAL_HEAD_V2: independent clipping keeps
+                        # L_dense from indirectly changing base-planner updates.
                         torch.nn.utils.clip_grad_norm_(
-                            self.planner.parameters(), self.grad_clip
+                            self._base_planner_params, self.grad_clip
+                        )
+                        torch.nn.utils.clip_grad_norm_(
+                            self._dense_residual_params, self.grad_clip
                         )
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -353,6 +382,9 @@ class DiffusionPretrainer:
                 or self.global_step % max(int(log_every_n_steps), 1) == 0
             ):
                 self.writer.add_scalar("train_step/loss", values["loss"], self.global_step)
+                self.writer.add_scalar(
+                    "train_step/base_loss", values["base_loss"], self.global_step
+                )
                 self.writer.add_scalar(
                     "train_step/trajectory_regression_loss",
                     values["trajectory_regression_loss"],
@@ -377,6 +409,26 @@ class DiffusionPretrainer:
                 self.writer.add_scalar(
                     "train_step/dense_ade_m",
                     values["dense_ade_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_base_ade_m",
+                    values["dense_base_ade_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_ade_gain_m",
+                    values["dense_ade_gain_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_residual_mean_abs_m",
+                    values["dense_residual_mean_abs_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_residual_max_abs_m",
+                    values["dense_residual_max_abs_m"],
                     self.global_step,
                 )
 
@@ -461,8 +513,16 @@ class DiffusionPretrainer:
             if "val/loss" in metrics:
                 summary += (
                     f" val_loss={metrics['val/loss']:.6f} "
+                    f"base_val={metrics['val/base_loss']:.6f} "
                     f"mode_match={metrics['val/w1_target_mode_match']:.4f}"
                 )
+                if self.dense_loss_active:
+                    summary += (
+                        f" dense_ADE={metrics['val/dense_ade_m']:.3f} "
+                        f"base_dense_ADE={metrics['val/dense_base_ade_m']:.3f} "
+                        f"dense_gain={metrics['val/dense_ade_gain_m']:.3f} "
+                        f"res_abs={metrics['val/dense_residual_mean_abs_m']:.3f}"
+                    )
             summary += f" lr={lr:.3e} step={self.global_step}"
             print(summary)
 

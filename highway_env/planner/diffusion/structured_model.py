@@ -9,7 +9,11 @@ from torch import nn
 
 from .config import StructuredDiffusionConfig
 from .diffusion_schedule import TruncatedDDIMSchedule
-from .dense_supervision import dense_position_loss, dense_timestep_weight
+from .dense_supervision import (
+    DenseSparseResidualHead,
+    dense_position_loss,
+    dense_timestep_weight,
+)
 from .trajectory_spline import ClampedCubicTrajectorySpline
 from .encoders import (
     SceneEncoding,
@@ -399,6 +403,8 @@ class StructuredTrajectoryDenoiser(nn.Module):
         noisy_norm: torch.Tensor,
         timestep: torch.Tensor,
         scene: SceneEncoding,
+        *,
+        return_mode_tokens: bool = False,
     ):
         batch, modes, steps, dims = (
             noisy_norm.shape
@@ -470,6 +476,13 @@ class StructuredTrajectoryDenoiser(nn.Module):
             mode_tokens
         ).squeeze(-1)
 
+        if return_mode_tokens:
+            return (
+                predicted_x0_norm,
+                logits,
+                mode_tokens,
+            )
+
         return (
             predicted_x0_norm,
             logits,
@@ -531,6 +544,16 @@ class StructuredDiffusionPlanner(nn.Module):
             horizon_s=float(config.horizon_steps) * float(config.trajectory_dt),
             sparse_dt=float(config.trajectory_dt),
             dense_dt=0.1,
+        )
+
+        # DENSE_RESIDUAL_HEAD_V2
+        # L_dense trains only this small execution-correction MLP.
+        self.dense_residual_head = DenseSparseResidualHead(
+            feature_dim=int(config.d_model),
+            horizon_steps=int(config.horizon_steps),
+            hidden_dim=int(config.dense_residual_hidden_dim),
+            max_residual_x_m=float(config.dense_residual_max_x_m),
+            max_residual_y_m=float(config.dense_residual_max_y_m),
         )
 
     @staticmethod
@@ -609,6 +632,7 @@ class StructuredDiffusionPlanner(nn.Module):
 
         final_logits = None
         final_x0 = None
+        final_mode_tokens = None  # DENSE_RESIDUAL_HEAD_V2
 
         timesteps = list(
             self.config.inference_timesteps
@@ -634,16 +658,18 @@ class StructuredDiffusionPlanner(nn.Module):
                 device=sample.device,
             )
 
-            predicted_x0, logits = (
+            predicted_x0, logits, mode_tokens = (
                 self.denoiser(
                     sample,
                     t_batch,
                     scene,
+                    return_mode_tokens=True,
                 )
             )
 
             final_x0 = predicted_x0
             final_logits = logits
+            final_mode_tokens = mode_tokens
 
             prev_timestep = (
                 timesteps[index + 1]
@@ -707,8 +733,32 @@ class StructuredDiffusionPlanner(nn.Module):
             index=gather_index,
         ).squeeze(1)
 
+        # DENSE_RESIDUAL_HEAD_V2
+        # Keep raw Diffusion output unchanged for planner/open-loop metrics,
+        # while exposing an execution-corrected sparse trajectory for spline.
+        selected_x0_norm = torch.gather(
+            final_x0,
+            dim=1,
+            index=gather_index,
+        ).squeeze(1)
+        feature_index = mode_index[:, None, None].expand(
+            -1, 1, int(self.config.d_model)
+        )
+        selected_mode_feature = torch.gather(
+            final_mode_tokens,
+            dim=1,
+            index=feature_index,
+        ).squeeze(1)
+        execution_residual_m = self.dense_residual_head(
+            selected_mode_feature,
+            selected_x0_norm,
+        )
+        execution_sparse = best + execution_residual_m
+
         return {
             "trajectory": best,
+            "trajectory_execution_sparse": execution_sparse,
+            "trajectory_execution_residual": execution_residual_m,
             "trajectory_candidates": candidates,
             "trajectory_mode_logits": final_logits,
             "trajectory_mode_logits_masked": masked_logits,
@@ -720,6 +770,7 @@ class StructuredDiffusionPlanner(nn.Module):
         }
 
     # STAGED_DENSE_SUPERVISION_V1
+    # DENSE_RESIDUAL_HEAD_V2
     def _dense_terminal_auxiliary(
         self,
         *,
@@ -735,6 +786,11 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_loss_weight_mode: str,
         dense_loss_terminal_weight: float,
     ) -> Dict[str, torch.Tensor]:
+        """Dense execution supervision with a hard gradient boundary.
+
+        The terminal Diffusion prediction and its mode feature are treated as
+        fixed inputs. L_dense can only update ``dense_residual_head``.
+        """
         batch = int(clean_anchor_norm.shape[0])
         terminal_t = int(dense_loss_terminal_timestep)
         if terminal_t < 0 or terminal_t >= int(self.config.num_train_timesteps):
@@ -773,14 +829,25 @@ class StructuredDiffusionPlanner(nn.Module):
             noise,
             terminal_timesteps,
         )
-        terminal_x0_norm, _ = self.denoiser(
-            terminal_noisy,
-            terminal_timesteps,
-            scene,
-        )
-        terminal_candidates_m = self.adapter.denormalize_trajectory(
-            terminal_x0_norm
-        )
+
+        # The auxiliary forward must not alter the Diffusion planner's RNG
+        # stream (dropout etc.), otherwise the base planner could diverge even
+        # with zero dense gradient. fork_rng restores CPU/CUDA RNG afterwards.
+        cuda_devices = []
+        if terminal_noisy.is_cuda:
+            cuda_devices = [terminal_noisy.device.index or 0]
+        with torch.random.fork_rng(devices=cuda_devices, enabled=True):
+            with torch.no_grad():
+                terminal_x0_norm, _, terminal_mode_tokens = self.denoiser(
+                    terminal_noisy,
+                    terminal_timesteps,
+                    scene,
+                    return_mode_tokens=True,
+                )
+                terminal_candidates_m = self.adapter.denormalize_trajectory(
+                    terminal_x0_norm
+                )
+
         gather_index = (
             target_mode[:, None, None, None]
             .expand(-1, 1, self.config.horizon_steps, 2)
@@ -789,15 +856,34 @@ class StructuredDiffusionPlanner(nn.Module):
             terminal_candidates_m,
             dim=1,
             index=gather_index,
-        ).squeeze(1)
+        ).squeeze(1).detach()
+        selected_terminal_norm = torch.gather(
+            terminal_x0_norm,
+            dim=1,
+            index=gather_index,
+        ).squeeze(1).detach()
+        feature_index = target_mode[:, None, None].expand(
+            -1, 1, int(self.config.d_model)
+        )
+        selected_mode_feature = torch.gather(
+            terminal_mode_tokens,
+            dim=1,
+            index=feature_index,
+        ).squeeze(1).detach()
 
-        # Keep the spline solve in fp32 even under AMP. Casting does not break
-        # autograd and avoids half-precision linalg limitations/instability.
-        selected_terminal_m = selected_terminal_m.float()
-        start_xy = torch.zeros_like(selected_terminal_m[:, 0, :])
-        start_velocity_xy = features["ego_state"][:, 0:2].float()
+        execution_residual_m = self.dense_residual_head(
+            selected_mode_feature,
+            selected_terminal_norm,
+        )
+        execution_sparse_m = (
+            selected_terminal_m.float() + execution_residual_m.float()
+        )
+
+        # Keep the spline solve in fp32 even under AMP.
+        start_xy = torch.zeros_like(execution_sparse_m[:, 0, :])
+        start_velocity_xy = features["ego_state"][:, 0:2].float().detach()
         pred_dense_all_m = self.dense_trajectory_spline(
-            selected_terminal_m,
+            execution_sparse_m,
             start_xy=start_xy,
             start_velocity_xy=start_velocity_xy,
         )
@@ -824,10 +910,31 @@ class StructuredDiffusionPlanner(nn.Module):
             dim=-1,
         ).mean()
 
+        # Diagnostic baseline: same terminal sparse trajectory without residual.
+        with torch.no_grad():
+            base_dense_all_m = self.dense_trajectory_spline(
+                selected_terminal_m.float(),
+                start_xy=start_xy,
+                start_velocity_xy=start_velocity_xy,
+            )
+            base_dense_future_m = base_dense_all_m[:, 1:, :]
+            base_ade_m = torch.linalg.vector_norm(
+                base_dense_future_m - expert_dense_m,
+                dim=-1,
+            ).mean()
+
+        residual_abs = execution_residual_m.abs()
+        residual_l2 = torch.linalg.vector_norm(execution_residual_m, dim=-1)
+
         return {
             "dense_loss_raw": raw,
             "dense_loss_weighted": weighted,
             "dense_ade_m": ade_m,
+            "dense_base_ade_m": base_ade_m,
+            "dense_ade_gain_m": base_ade_m - ade_m,
+            "dense_residual_mean_abs_m": residual_abs.mean(),
+            "dense_residual_max_abs_m": residual_abs.max(),
+            "dense_residual_mean_l2_m": residual_l2.mean(),
             "dense_weight_t": weight,
             "dense_terminal_fraction": raw.new_ones(()),
         }
@@ -998,6 +1105,11 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_loss_raw = regression_loss.new_zeros(())
         dense_loss_weighted = regression_loss.new_zeros(())
         dense_ade_m = regression_loss.new_zeros(())
+        dense_base_ade_m = regression_loss.new_zeros(())
+        dense_ade_gain_m = regression_loss.new_zeros(())
+        dense_residual_mean_abs_m = regression_loss.new_zeros(())
+        dense_residual_max_abs_m = regression_loss.new_zeros(())
+        dense_residual_mean_l2_m = regression_loss.new_zeros(())
         dense_weight_t = regression_loss.new_zeros(())
         dense_terminal_fraction = regression_loss.new_zeros(())
 
@@ -1024,14 +1136,17 @@ class StructuredDiffusionPlanner(nn.Module):
             dense_loss_raw = dense_aux["dense_loss_raw"]
             dense_loss_weighted = dense_aux["dense_loss_weighted"]
             dense_ade_m = dense_aux["dense_ade_m"]
+            dense_base_ade_m = dense_aux["dense_base_ade_m"]
+            dense_ade_gain_m = dense_aux["dense_ade_gain_m"]
+            dense_residual_mean_abs_m = dense_aux["dense_residual_mean_abs_m"]
+            dense_residual_max_abs_m = dense_aux["dense_residual_max_abs_m"]
+            dense_residual_mean_l2_m = dense_aux["dense_residual_mean_l2_m"]
             dense_weight_t = dense_aux["dense_weight_t"]
             dense_terminal_fraction = dense_aux["dense_terminal_fraction"]
 
-        loss = (
-            regression_loss
-            + classification_loss
-            + dense_loss_weighted
-        )
+        # DENSE_RESIDUAL_HEAD_V2
+        base_loss = regression_loss + classification_loss
+        loss = base_loss + dense_loss_weighted
 
         mode_valid_mask = features[
             "mode_valid_mask"
@@ -1065,6 +1180,9 @@ class StructuredDiffusionPlanner(nn.Module):
             "loss":
                 loss,
 
+            "base_loss":
+                base_loss,
+
             "trajectory_regression_loss":
                 regression_loss,
 
@@ -1080,6 +1198,21 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "dense_ade_m":
                 dense_ade_m,
+
+            "dense_base_ade_m":
+                dense_base_ade_m,
+
+            "dense_ade_gain_m":
+                dense_ade_gain_m,
+
+            "dense_residual_mean_abs_m":
+                dense_residual_mean_abs_m,
+
+            "dense_residual_max_abs_m":
+                dense_residual_max_abs_m,
+
+            "dense_residual_mean_l2_m":
+                dense_residual_mean_l2_m,
 
             "dense_weight_t":
                 dense_weight_t,
