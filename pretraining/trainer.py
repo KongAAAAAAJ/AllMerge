@@ -70,6 +70,13 @@ METRIC_KEYS = (
     "dense_residual_mean_abs_m",
     "dense_residual_max_abs_m",
     "dense_residual_mean_l2_m",
+    # RESIDUAL_XY_DIAGNOSTICS_V1
+    "dense_residual_mean_abs_x_m",
+    "dense_residual_mean_abs_y_m",
+    "dense_residual_max_abs_x_m",
+    "dense_residual_max_abs_y_m",
+    "dense_residual_x_saturation_ratio",
+    "dense_residual_y_saturation_ratio",
     "dense_weight_t",
     "dense_terminal_fraction",
     "target_mode_assignment_distance",
@@ -137,6 +144,13 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
         "dense_residual_mean_abs_m": output["dense_residual_mean_abs_m"],
         "dense_residual_max_abs_m": output["dense_residual_max_abs_m"],
         "dense_residual_mean_l2_m": output["dense_residual_mean_l2_m"],
+        # RESIDUAL_XY_DIAGNOSTICS_V1
+        "dense_residual_mean_abs_x_m": output["dense_residual_mean_abs_x_m"],
+        "dense_residual_mean_abs_y_m": output["dense_residual_mean_abs_y_m"],
+        "dense_residual_max_abs_x_m": output["dense_residual_max_abs_x_m"],
+        "dense_residual_max_abs_y_m": output["dense_residual_max_abs_y_m"],
+        "dense_residual_x_saturation_ratio": output["dense_residual_x_saturation_ratio"],
+        "dense_residual_y_saturation_ratio": output["dense_residual_y_saturation_ratio"],
         "dense_weight_t": output["dense_weight_t"],
         "dense_terminal_fraction": output["dense_terminal_fraction"],
         "target_mode_assignment_distance": output["target_mode_assignment_distance"].mean(),
@@ -466,6 +480,20 @@ class DiffusionPretrainer:
                     values["dense_residual_max_abs_m"],
                     self.global_step,
                 )
+                # RESIDUAL_XY_DIAGNOSTICS_V1
+                for metric_name in (
+                    "dense_residual_mean_abs_x_m",
+                    "dense_residual_mean_abs_y_m",
+                    "dense_residual_max_abs_x_m",
+                    "dense_residual_max_abs_y_m",
+                    "dense_residual_x_saturation_ratio",
+                    "dense_residual_y_saturation_ratio",
+                ):
+                    self.writer.add_scalar(
+                        f"train_step/{metric_name}",
+                        values[metric_name],
+                        self.global_step,
+                    )
 
         if samples == 0:
             raise RuntimeError(f"No {stage} samples were processed")
@@ -556,7 +584,11 @@ class DiffusionPretrainer:
                         f" dense_ADE={metrics['val/dense_ade_m']:.3f} "
                         f"base_dense_ADE={metrics['val/dense_base_ade_m']:.3f} "
                         f"dense_gain={metrics['val/dense_ade_gain_m']:.3f} "
-                        f"res_abs={metrics['val/dense_residual_mean_abs_m']:.3f}"
+                        f"res_abs={metrics['val/dense_residual_mean_abs_m']:.3f} "
+                        f"res_x={metrics['val/dense_residual_mean_abs_x_m']:.3f} "
+                        f"res_y={metrics['val/dense_residual_mean_abs_y_m']:.3f} "
+                        f"sat_x={metrics['val/dense_residual_x_saturation_ratio']:.3f} "
+                        f"sat_y={metrics['val/dense_residual_y_saturation_ratio']:.3f}"
                     )
             summary += f" lr={lr:.3e} step={self.global_step}"
             print(summary)

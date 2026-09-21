@@ -925,6 +925,16 @@ class StructuredDiffusionPlanner(nn.Module):
 
         residual_abs = execution_residual_m.abs()
         residual_l2 = torch.linalg.vector_norm(execution_residual_m, dim=-1)
+        residual_abs_x = residual_abs[..., 0]
+        residual_abs_y = residual_abs[..., 1]
+        x_bound = float(self.config.dense_residual_max_x_m)
+        y_bound = float(self.config.dense_residual_max_y_m)
+        x_saturation_ratio = (
+            residual_abs_x >= (0.95 * x_bound)
+        ).float().mean()
+        y_saturation_ratio = (
+            residual_abs_y >= (0.95 * y_bound)
+        ).float().mean()
 
         return {
             "dense_loss_raw": raw,
@@ -935,6 +945,13 @@ class StructuredDiffusionPlanner(nn.Module):
             "dense_residual_mean_abs_m": residual_abs.mean(),
             "dense_residual_max_abs_m": residual_abs.max(),
             "dense_residual_mean_l2_m": residual_l2.mean(),
+            # RESIDUAL_XY_DIAGNOSTICS_V1
+            "dense_residual_mean_abs_x_m": residual_abs_x.mean(),
+            "dense_residual_mean_abs_y_m": residual_abs_y.mean(),
+            "dense_residual_max_abs_x_m": residual_abs_x.max(),
+            "dense_residual_max_abs_y_m": residual_abs_y.max(),
+            "dense_residual_x_saturation_ratio": x_saturation_ratio,
+            "dense_residual_y_saturation_ratio": y_saturation_ratio,
             "dense_weight_t": weight,
             "dense_terminal_fraction": raw.new_ones(()),
         }
@@ -1110,6 +1127,13 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_residual_mean_abs_m = regression_loss.new_zeros(())
         dense_residual_max_abs_m = regression_loss.new_zeros(())
         dense_residual_mean_l2_m = regression_loss.new_zeros(())
+        # RESIDUAL_XY_DIAGNOSTICS_V1
+        dense_residual_mean_abs_x_m = regression_loss.new_zeros(())
+        dense_residual_mean_abs_y_m = regression_loss.new_zeros(())
+        dense_residual_max_abs_x_m = regression_loss.new_zeros(())
+        dense_residual_max_abs_y_m = regression_loss.new_zeros(())
+        dense_residual_x_saturation_ratio = regression_loss.new_zeros(())
+        dense_residual_y_saturation_ratio = regression_loss.new_zeros(())
         dense_weight_t = regression_loss.new_zeros(())
         dense_terminal_fraction = regression_loss.new_zeros(())
 
@@ -1141,6 +1165,13 @@ class StructuredDiffusionPlanner(nn.Module):
             dense_residual_mean_abs_m = dense_aux["dense_residual_mean_abs_m"]
             dense_residual_max_abs_m = dense_aux["dense_residual_max_abs_m"]
             dense_residual_mean_l2_m = dense_aux["dense_residual_mean_l2_m"]
+            # RESIDUAL_XY_DIAGNOSTICS_V1
+            dense_residual_mean_abs_x_m = dense_aux["dense_residual_mean_abs_x_m"]
+            dense_residual_mean_abs_y_m = dense_aux["dense_residual_mean_abs_y_m"]
+            dense_residual_max_abs_x_m = dense_aux["dense_residual_max_abs_x_m"]
+            dense_residual_max_abs_y_m = dense_aux["dense_residual_max_abs_y_m"]
+            dense_residual_x_saturation_ratio = dense_aux["dense_residual_x_saturation_ratio"]
+            dense_residual_y_saturation_ratio = dense_aux["dense_residual_y_saturation_ratio"]
             dense_weight_t = dense_aux["dense_weight_t"]
             dense_terminal_fraction = dense_aux["dense_terminal_fraction"]
 
@@ -1213,6 +1244,25 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "dense_residual_mean_l2_m":
                 dense_residual_mean_l2_m,
+
+            # RESIDUAL_XY_DIAGNOSTICS_V1
+            "dense_residual_mean_abs_x_m":
+                dense_residual_mean_abs_x_m,
+
+            "dense_residual_mean_abs_y_m":
+                dense_residual_mean_abs_y_m,
+
+            "dense_residual_max_abs_x_m":
+                dense_residual_max_abs_x_m,
+
+            "dense_residual_max_abs_y_m":
+                dense_residual_max_abs_y_m,
+
+            "dense_residual_x_saturation_ratio":
+                dense_residual_x_saturation_ratio,
+
+            "dense_residual_y_saturation_ratio":
+                dense_residual_y_saturation_ratio,
 
             "dense_weight_t":
                 dense_weight_t,

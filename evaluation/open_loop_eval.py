@@ -62,6 +62,21 @@ CSV_FIELDS = [
     "minFDE_at_valid",
     "raw_mode_entropy",
     "selected_mode_entropy",
+    # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+    "execution_sparse_ADE",
+    "execution_sparse_FDE",
+    "base_dense_ADE",
+    "base_dense_FDE",
+    "execution_dense_ADE",
+    "execution_dense_FDE",
+    "dense_ADE_gain",
+    "dense_FDE_gain",
+    "residual_mean_abs_x_m",
+    "residual_mean_abs_y_m",
+    "residual_max_abs_x_m",
+    "residual_max_abs_y_m",
+    "residual_x_saturation_ratio",
+    "residual_y_saturation_ratio",
 ]
 
 
@@ -177,6 +192,93 @@ def _rate(
     )
 
 
+# OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+def _dense_execution_metrics(
+    *,
+    model,
+    output: Mapping[str, torch.Tensor],
+    features: Mapping[str, torch.Tensor],
+    expert_sparse: torch.Tensor,
+    expert_dense: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    # Compare raw/base spline and residual-corrected execution trajectories.
+    raw_sparse = output["trajectory"].float()
+    execution_sparse = output.get(
+        "trajectory_execution_sparse", raw_sparse
+    ).float()
+    residual = output.get(
+        "trajectory_execution_residual", execution_sparse - raw_sparse
+    ).float()
+    expert_sparse = expert_sparse.float()
+    expert_dense = expert_dense.float()
+
+    if expert_dense.ndim != 3 or expert_dense.shape[-1] != 2:
+        raise ValueError(
+            f"trajectory_dense must be [B,T,2], got {tuple(expert_dense.shape)}"
+        )
+
+    start_xy = torch.zeros_like(raw_sparse[:, 0, :])
+    start_velocity_xy = features["ego_state"][:, 0:2].float()
+    base_dense_all = model.dense_trajectory_spline(
+        raw_sparse,
+        start_xy=start_xy,
+        start_velocity_xy=start_velocity_xy,
+    )
+    execution_dense_all = model.dense_trajectory_spline(
+        execution_sparse,
+        start_xy=start_xy,
+        start_velocity_xy=start_velocity_xy,
+    )
+    base_dense = base_dense_all[:, 1:, :]
+    execution_dense = execution_dense_all[:, 1:, :]
+    if base_dense.shape != expert_dense.shape:
+        raise ValueError(
+            "dense prediction/GT shape mismatch: "
+            f"pred={tuple(base_dense.shape)} gt={tuple(expert_dense.shape)}"
+        )
+
+    exec_sparse_dist = torch.linalg.vector_norm(
+        execution_sparse - expert_sparse, dim=-1
+    )
+    base_dense_dist = torch.linalg.vector_norm(
+        base_dense - expert_dense, dim=-1
+    )
+    execution_dense_dist = torch.linalg.vector_norm(
+        execution_dense - expert_dense, dim=-1
+    )
+
+    abs_res = residual.abs()
+    abs_x = abs_res[..., 0]
+    abs_y = abs_res[..., 1]
+    x_bound = float(model.config.dense_residual_max_x_m)
+    y_bound = float(model.config.dense_residual_max_y_m)
+
+    return {
+        "execution_sparse_ADE": exec_sparse_dist.mean(dim=-1),
+        "execution_sparse_FDE": exec_sparse_dist[:, -1],
+        "base_dense_ADE": base_dense_dist.mean(dim=-1),
+        "base_dense_FDE": base_dense_dist[:, -1],
+        "execution_dense_ADE": execution_dense_dist.mean(dim=-1),
+        "execution_dense_FDE": execution_dense_dist[:, -1],
+        "dense_ADE_gain": (
+            base_dense_dist.mean(dim=-1) - execution_dense_dist.mean(dim=-1)
+        ),
+        "dense_FDE_gain": (
+            base_dense_dist[:, -1] - execution_dense_dist[:, -1]
+        ),
+        "residual_mean_abs_x_m": abs_x.mean(dim=-1),
+        "residual_mean_abs_y_m": abs_y.mean(dim=-1),
+        "residual_max_abs_x_m": abs_x.max(dim=-1).values,
+        "residual_max_abs_y_m": abs_y.max(dim=-1).values,
+        "residual_x_saturation_ratio": (
+            abs_x >= (0.95 * x_bound)
+        ).float().mean(dim=-1),
+        "residual_y_saturation_ratio": (
+            abs_y >= (0.95 * y_bound)
+        ).float().mean(dim=-1),
+    }
+
+
 def evaluate_open_loop(
     *,
     checkpoint: str | Path,
@@ -277,6 +379,20 @@ def evaluate_open_loop(
                     non_blocking=True,
                 )
             )
+            # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+            if unpacked.get("expert_trajectory_dense") is None:
+                raise ValueError(
+                    "Formal dense open-loop evaluation requires Stage-3 "
+                    "trajectory_dense [40,2] targets."
+                )
+            expert_trajectory_dense = (
+                unpacked["expert_trajectory_dense"]
+                .to(
+                    device=runtime.device,
+                    dtype=torch.float32,
+                    non_blocking=True,
+                )
+            )
             expert_semantic = (
                 unpacked["expert_semantic"]
                 .to(
@@ -356,6 +472,20 @@ def evaluate_open_loop(
                 ],
             )
             finite_metric_check(metrics)
+
+            # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+            dense_metrics = _dense_execution_metrics(
+                model=model,
+                output=output,
+                features=features,
+                expert_sparse=expert_trajectory,
+                expert_dense=expert_trajectory_dense,
+            )
+            for metric_name, metric_value in dense_metrics.items():
+                if not torch.isfinite(metric_value).all():
+                    raise FloatingPointError(
+                        f"Non-finite dense open-loop metric: {metric_name}"
+                    )
 
             metadata = unpacked["metadata"]
             batch_size_actual = int(
@@ -563,6 +693,11 @@ def evaluate_open_loop(
                             metrics.selected_mode_entropy,
                             i,
                         ),
+                        # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+                        **{
+                            name: _float(value, i)
+                            for name, value in dense_metrics.items()
+                        },
                     }
                 )
 
@@ -595,6 +730,21 @@ def evaluate_open_loop(
             rows,
             "selected_FDE",
         ),
+        # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
+        "mean_execution_sparse_ADE": _mean(rows, "execution_sparse_ADE"),
+        "mean_execution_sparse_FDE": _mean(rows, "execution_sparse_FDE"),
+        "mean_base_dense_ADE": _mean(rows, "base_dense_ADE"),
+        "mean_base_dense_FDE": _mean(rows, "base_dense_FDE"),
+        "mean_execution_dense_ADE": _mean(rows, "execution_dense_ADE"),
+        "mean_execution_dense_FDE": _mean(rows, "execution_dense_FDE"),
+        "mean_dense_ADE_gain": _mean(rows, "dense_ADE_gain"),
+        "mean_dense_FDE_gain": _mean(rows, "dense_FDE_gain"),
+        "mean_residual_abs_x_m": _mean(rows, "residual_mean_abs_x_m"),
+        "mean_residual_abs_y_m": _mean(rows, "residual_mean_abs_y_m"),
+        "mean_residual_max_abs_x_m": _mean(rows, "residual_max_abs_x_m"),
+        "mean_residual_max_abs_y_m": _mean(rows, "residual_max_abs_y_m"),
+        "residual_x_saturation_ratio": _mean(rows, "residual_x_saturation_ratio"),
+        "residual_y_saturation_ratio": _mean(rows, "residual_y_saturation_ratio"),
         f"mean_minADE_at_{num_modes}_all": _mean(
             rows,
             "minADE_at_M_all",
