@@ -75,6 +75,9 @@ def parse_args():
     parser.add_argument("--dense-loss-terminal-weight", type=float, default=None)
     # DENSE_RESIDUAL_SEPARATE_LR_V1
     parser.add_argument("--dense-residual-lr", type=float, default=None)
+    # DENSE_RESIDUAL_BOUND_CLI_V1
+    parser.add_argument("--dense-residual-max-x-m", type=float, default=None)
+    parser.add_argument("--dense-residual-max-y-m", type=float, default=None)
     return parser.parse_args()
 
 
@@ -83,6 +86,16 @@ def main() -> int:
     cfg = load_config(args.config)
     model_cfg = dict(cfg.get("model") or {})
     train_cfg = dict(cfg.get("training") or {})
+
+    # DENSE_RESIDUAL_BOUND_CLI_V1
+    if args.dense_residual_max_x_m is not None:
+        if float(args.dense_residual_max_x_m) <= 0.0:
+            raise ValueError("--dense-residual-max-x-m must be positive")
+        model_cfg["dense_residual_max_x_m"] = float(args.dense_residual_max_x_m)
+    if args.dense_residual_max_y_m is not None:
+        if float(args.dense_residual_max_y_m) <= 0.0:
+            raise ValueError("--dense-residual-max-y-m must be positive")
+        model_cfg["dense_residual_max_y_m"] = float(args.dense_residual_max_y_m)
 
     def pick(cli_value, name, default):
         return cli_value if cli_value is not None else train_cfg.get(name, default)
@@ -190,7 +203,10 @@ def main() -> int:
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
         f"type={dense_loss_type} runtime_chain="
         f"{tuple(model_cfg.get('inference_timesteps', (8, 0)))} "
-        f"residual_lr={dense_residual_lr:g}"
+        f"residual_lr={dense_residual_lr:g} "
+        f"residual_bound=("
+        f"{float(model_cfg.get('dense_residual_max_x_m', 2.0)):g}, "
+        f"{float(model_cfg.get('dense_residual_max_y_m', 0.75)):g})"
     )
 
     trainer = DiffusionPretrainer(
