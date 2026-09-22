@@ -120,6 +120,9 @@ CSV_FIELDS = [
     "residual_max_abs_y_m",
     "residual_x_saturation_ratio",
     "residual_y_saturation_ratio",
+    # DENSE_EXECUTION_SAFETY_PROXY_V1
+    "execution_collision_proxy",
+    "execution_offroad_proxy",
 ]
 
 
@@ -433,6 +436,9 @@ def evaluate_open_loop(
     batch_latencies_ms: List[float] = []
     collision_flags: List[bool] = []
     offroad_flags: List[bool] = []
+    # DENSE_EXECUTION_SAFETY_PROXY_V1
+    execution_collision_flags: List[bool] = []
+    execution_offroad_flags: List[bool] = []
     gallery_samples: List[TrajectoryVisualizationSample] = []
     gallery_seen = 0
     sample_offset = 0
@@ -561,6 +567,36 @@ def evaluate_open_loop(
                         f"Non-finite dense open-loop metric: {metric_name}"
                     )
 
+            # DENSE_EXECUTION_SAFETY_PROXY_V1
+            # Build the actual residual-corrected dense execution trajectory.
+            # dense_trajectory_spline returns [B, 41, 2] including t=0;
+            # geometry proxies use the future 40 samples at 10 Hz.
+            raw_sparse = output["trajectory"].float()
+            execution_sparse = output.get(
+                "trajectory_execution_sparse",
+                raw_sparse,
+            ).float()
+            start_xy = torch.zeros_like(execution_sparse[:, 0, :])
+            start_velocity_xy = features["ego_state"][:, 0:2].float()
+            execution_dense_all = model.dense_trajectory_spline(
+                execution_sparse,
+                start_xy=start_xy,
+                start_velocity_xy=start_velocity_xy,
+            )
+            execution_dense_trajectory = execution_dense_all[:, 1:, :]
+            if (
+                execution_dense_trajectory.ndim != 3
+                or execution_dense_trajectory.shape[-1] != 2
+            ):
+                raise RuntimeError(
+                    "Dense execution trajectory must be [B,T,2], got "
+                    f"{tuple(execution_dense_trajectory.shape)}"
+                )
+            if not torch.isfinite(execution_dense_trajectory).all():
+                raise FloatingPointError(
+                    "Dense execution trajectory contains NaN/Inf"
+                )
+
             metadata = unpacked["metadata"]
             batch_size_actual = int(
                 expert_trajectory.shape[0]
@@ -586,6 +622,7 @@ def evaluate_open_loop(
                     )
 
                 # EVAL_VIZ_V2_SAMPLE_COLLECTION
+                # Keep raw planner proxies for backward compatibility.
                 collision_flag, offroad_flag = (
                     compute_open_loop_safety_proxies(
                         output["trajectory"][i],
@@ -599,6 +636,25 @@ def evaluate_open_loop(
                     collision_flags.append(bool(collision_flag))
                 if offroad_flag is not None:
                     offroad_flags.append(bool(offroad_flag))
+
+                # DENSE_EXECUTION_SAFETY_PROXY_V1
+                execution_collision_flag, execution_offroad_flag = (
+                    compute_open_loop_safety_proxies(
+                        execution_dense_trajectory[i],
+                        features,
+                        i,
+                        collision_distance_m=collision_distance_m,
+                        offroad_distance_m=offroad_distance_m,
+                    )
+                )
+                if execution_collision_flag is not None:
+                    execution_collision_flags.append(
+                        bool(execution_collision_flag)
+                    )
+                if execution_offroad_flag is not None:
+                    execution_offroad_flags.append(
+                        bool(execution_offroad_flag)
+                    )
 
                 if visualize:
                     # Uniform reservoir sampling across all evaluated samples.
@@ -772,6 +828,17 @@ def evaluate_open_loop(
                             name: _float(value, i)
                             for name, value in dense_metrics.items()
                         },
+                        # DENSE_EXECUTION_SAFETY_PROXY_V1
+                        "execution_collision_proxy": (
+                            ""
+                            if execution_collision_flag is None
+                            else bool(execution_collision_flag)
+                        ),
+                        "execution_offroad_proxy": (
+                            ""
+                            if execution_offroad_flag is None
+                            else bool(execution_offroad_flag)
+                        ),
                     }
                 )
 
@@ -906,6 +973,30 @@ def evaluate_open_loop(
     summary["collision_rate_open_loop_proxy"] = collision_rate
     summary["offroad_rate_open_loop_proxy"] = offroad_rate
 
+    # DENSE_EXECUTION_SAFETY_PROXY_V1
+    execution_collision_rate = (
+        float(
+            sum(execution_collision_flags)
+            / len(execution_collision_flags)
+        )
+        if execution_collision_flags
+        else float("nan")
+    )
+    execution_offroad_rate = (
+        float(
+            sum(execution_offroad_flags)
+            / len(execution_offroad_flags)
+        )
+        if execution_offroad_flags
+        else float("nan")
+    )
+    summary["execution_collision_rate_open_loop_proxy"] = (
+        execution_collision_rate
+    )
+    summary["execution_offroad_rate_open_loop_proxy"] = (
+        execution_offroad_rate
+    )
+
     if visualize:
         figure_dir.mkdir(parents=True, exist_ok=True)
         plot_ade_fde_boxplot(
@@ -920,11 +1011,17 @@ def evaluate_open_loop(
             min_ade=_mean(rows, "minADE_at_M_all"),
             min_fde=_mean(rows, "minFDE_at_M_all"),
             miss_rate=miss_rate,
+            # DENSE_EXECUTION_SAFETY_PROXY_V1
+            # The rendered table reports final execution-trajectory proxies.
             collision_rate=(
-                collision_rate if math.isfinite(collision_rate) else None
+                execution_collision_rate
+                if math.isfinite(execution_collision_rate)
+                else None
             ),
             offroad_rate=(
-                offroad_rate if math.isfinite(offroad_rate) else None
+                execution_offroad_rate
+                if math.isfinite(execution_offroad_rate)
+                else None
             ),
             miss_threshold_m=miss_threshold_m,
             collision_distance_m=collision_distance_m,
