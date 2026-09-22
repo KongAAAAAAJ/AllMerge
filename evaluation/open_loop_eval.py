@@ -34,6 +34,49 @@ from pretraining.dataset_adapter import (
 )
 
 
+# OPEN_LOOP_CHECKPOINT_MODEL_CONFIG_V1
+def _load_checkpoint_model_config(checkpoint: Path) -> Dict[str, object]:
+    """Load model construction config from either training or runtime checkpoints.
+
+    Training checkpoints store ``allmerge_model_config`` while exported runtime
+    checkpoints store the same dictionary under ``model_config``.  Open-loop
+    evaluation must restore this config *before* constructing the planner;
+    otherwise architecture/behavior parameters such as residual hard bounds
+    silently fall back to local defaults.
+    """
+    payload = torch.load(checkpoint, map_location="cpu")
+    if not isinstance(payload, Mapping):
+        return {}
+
+    runtime_cfg = payload.get("model_config")
+    training_cfg = payload.get("allmerge_model_config")
+
+    if runtime_cfg:
+        if not isinstance(runtime_cfg, Mapping):
+            raise TypeError(
+                "checkpoint['model_config'] must be a mapping, got "
+                f"{type(runtime_cfg).__name__}"
+            )
+        return dict(runtime_cfg)
+
+    if training_cfg:
+        if not isinstance(training_cfg, Mapping):
+            raise TypeError(
+                "checkpoint['allmerge_model_config'] must be a mapping, got "
+                f"{type(training_cfg).__name__}"
+            )
+        return dict(training_cfg)
+
+    return {}
+
+
+def _residual_bound_from_config(config: Mapping[str, object]) -> tuple[float, float]:
+    return (
+        float(config.get("dense_residual_max_x_m", 2.0)),
+        float(config.get("dense_residual_max_y_m", 0.75)),
+    )
+
+
 CSV_FIELDS = [
     "sample_index",
     "seed",
@@ -320,12 +363,19 @@ def evaluate_open_loop(
             f"Dataset root does not exist: {dataset_root}"
         )
 
+    # OPEN_LOOP_CHECKPOINT_MODEL_CONFIG_V1
+    # Restore model construction/behavior config before constructing runtime.
+    # In particular this preserves the residual hard bounds used in training.
+    checkpoint_model_config = _load_checkpoint_model_config(checkpoint)
+
     runtime_config = {
         "checkpoint": str(checkpoint),
         "allow_random_weights": False,
         "strict_checkpoint": bool(strict_checkpoint),
         "deterministic_seed": inference_seed,
     }
+    if checkpoint_model_config:
+        runtime_config["model"] = checkpoint_model_config
     if device:
         runtime_config["device"] = device
 
@@ -334,6 +384,30 @@ def evaluate_open_loop(
     )
     model = runtime.model
     model.eval()
+
+    restored_bound = (
+        float(runtime.config.dense_residual_max_x_m),
+        float(runtime.config.dense_residual_max_y_m),
+    )
+    if checkpoint_model_config:
+        expected_bound = _residual_bound_from_config(checkpoint_model_config)
+        if restored_bound != expected_bound:
+            raise RuntimeError(
+                "Open-loop runtime residual-bound restore mismatch: "
+                f"checkpoint={expected_bound}, runtime={restored_bound}"
+            )
+        print(
+            "[open-loop] restored checkpoint model_config "
+            f"residual_bound=({restored_bound[0]:g}, {restored_bound[1]:g}) "
+            f"residual_hidden_dim="
+            f"{int(runtime.config.dense_residual_hidden_dim)}"
+        )
+    else:
+        print(
+            "[open-loop] checkpoint contains no model_config; using local "
+            f"defaults/overrides residual_bound="
+            f"({restored_bound[0]:g}, {restored_bound[1]:g})"
+        )
 
     loader = build_w1_dataloader(
         dataset_root=dataset_root,
@@ -797,6 +871,11 @@ def evaluate_open_loop(
             total_latency_ms
             / len(rows)
         ),
+        # OPEN_LOOP_CHECKPOINT_MODEL_CONFIG_V1
+        "residual_bound_x_m": float(runtime.config.dense_residual_max_x_m),
+        "residual_bound_y_m": float(runtime.config.dense_residual_max_y_m),
+        "residual_hidden_dim": int(runtime.config.dense_residual_hidden_dim),
+        "checkpoint_model_config_restored": bool(checkpoint_model_config),
         "checkpoint": str(checkpoint),
         "dataset_root": str(dataset_root),
         "split": split,
