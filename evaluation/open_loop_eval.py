@@ -120,6 +120,9 @@ CSV_FIELDS = [
     "residual_max_abs_y_m",
     "residual_x_saturation_ratio",
     "residual_y_saturation_ratio",
+    # BASE_DENSE_SAFETY_PROXY_V1
+    "base_dense_collision_proxy",
+    "base_dense_offroad_proxy",
     # DENSE_EXECUTION_SAFETY_PROXY_V1
     "execution_collision_proxy",
     "execution_offroad_proxy",
@@ -436,6 +439,9 @@ def evaluate_open_loop(
     batch_latencies_ms: List[float] = []
     collision_flags: List[bool] = []
     offroad_flags: List[bool] = []
+    # BASE_DENSE_SAFETY_PROXY_V1
+    base_dense_collision_flags: List[bool] = []
+    base_dense_offroad_flags: List[bool] = []
     # DENSE_EXECUTION_SAFETY_PROXY_V1
     execution_collision_flags: List[bool] = []
     execution_offroad_flags: List[bool] = []
@@ -578,23 +584,43 @@ def evaluate_open_loop(
             ).float()
             start_xy = torch.zeros_like(execution_sparse[:, 0, :])
             start_velocity_xy = features["ego_state"][:, 0:2].float()
+            # BASE_DENSE_SAFETY_PROXY_V1
+            # Fair safety comparison: both trajectories use the same spline,
+            # same start state and the same 40 future samples at 10 Hz.
+            base_dense_all = model.dense_trajectory_spline(
+                raw_sparse,
+                start_xy=start_xy,
+                start_velocity_xy=start_velocity_xy,
+            )
+            base_dense_trajectory = base_dense_all[:, 1:, :]
+
             execution_dense_all = model.dense_trajectory_spline(
                 execution_sparse,
                 start_xy=start_xy,
                 start_velocity_xy=start_velocity_xy,
             )
             execution_dense_trajectory = execution_dense_all[:, 1:, :]
-            if (
-                execution_dense_trajectory.ndim != 3
-                or execution_dense_trajectory.shape[-1] != 2
+
+            for dense_name, dense_traj in (
+                ("base", base_dense_trajectory),
+                ("execution", execution_dense_trajectory),
             ):
+                if dense_traj.ndim != 3 or dense_traj.shape[-1] != 2:
+                    raise RuntimeError(
+                        f"Dense {dense_name} trajectory must be [B,T,2], got "
+                        f"{tuple(dense_traj.shape)}"
+                    )
+                if not torch.isfinite(dense_traj).all():
+                    raise FloatingPointError(
+                        f"Dense {dense_name} trajectory contains NaN/Inf"
+                    )
+
+            if base_dense_trajectory.shape != execution_dense_trajectory.shape:
                 raise RuntimeError(
-                    "Dense execution trajectory must be [B,T,2], got "
+                    "Base/execution dense safety trajectories must have the "
+                    "same shape, got "
+                    f"{tuple(base_dense_trajectory.shape)} vs "
                     f"{tuple(execution_dense_trajectory.shape)}"
-                )
-            if not torch.isfinite(execution_dense_trajectory).all():
-                raise FloatingPointError(
-                    "Dense execution trajectory contains NaN/Inf"
                 )
 
             metadata = unpacked["metadata"]
@@ -636,6 +662,25 @@ def evaluate_open_loop(
                     collision_flags.append(bool(collision_flag))
                 if offroad_flag is not None:
                     offroad_flags.append(bool(offroad_flag))
+
+                # BASE_DENSE_SAFETY_PROXY_V1
+                base_dense_collision_flag, base_dense_offroad_flag = (
+                    compute_open_loop_safety_proxies(
+                        base_dense_trajectory[i],
+                        features,
+                        i,
+                        collision_distance_m=collision_distance_m,
+                        offroad_distance_m=offroad_distance_m,
+                    )
+                )
+                if base_dense_collision_flag is not None:
+                    base_dense_collision_flags.append(
+                        bool(base_dense_collision_flag)
+                    )
+                if base_dense_offroad_flag is not None:
+                    base_dense_offroad_flags.append(
+                        bool(base_dense_offroad_flag)
+                    )
 
                 # DENSE_EXECUTION_SAFETY_PROXY_V1
                 execution_collision_flag, execution_offroad_flag = (
@@ -828,6 +873,17 @@ def evaluate_open_loop(
                             name: _float(value, i)
                             for name, value in dense_metrics.items()
                         },
+                        # BASE_DENSE_SAFETY_PROXY_V1
+                        "base_dense_collision_proxy": (
+                            ""
+                            if base_dense_collision_flag is None
+                            else bool(base_dense_collision_flag)
+                        ),
+                        "base_dense_offroad_proxy": (
+                            ""
+                            if base_dense_offroad_flag is None
+                            else bool(base_dense_offroad_flag)
+                        ),
                         # DENSE_EXECUTION_SAFETY_PROXY_V1
                         "execution_collision_proxy": (
                             ""
@@ -973,6 +1029,30 @@ def evaluate_open_loop(
     summary["collision_rate_open_loop_proxy"] = collision_rate
     summary["offroad_rate_open_loop_proxy"] = offroad_rate
 
+    # BASE_DENSE_SAFETY_PROXY_V1
+    base_dense_collision_rate = (
+        float(
+            sum(base_dense_collision_flags)
+            / len(base_dense_collision_flags)
+        )
+        if base_dense_collision_flags
+        else float("nan")
+    )
+    base_dense_offroad_rate = (
+        float(
+            sum(base_dense_offroad_flags)
+            / len(base_dense_offroad_flags)
+        )
+        if base_dense_offroad_flags
+        else float("nan")
+    )
+    summary["base_dense_collision_rate_open_loop_proxy"] = (
+        base_dense_collision_rate
+    )
+    summary["base_dense_offroad_rate_open_loop_proxy"] = (
+        base_dense_offroad_rate
+    )
+
     # DENSE_EXECUTION_SAFETY_PROXY_V1
     execution_collision_rate = (
         float(
@@ -995,6 +1075,26 @@ def evaluate_open_loop(
     )
     summary["execution_offroad_rate_open_loop_proxy"] = (
         execution_offroad_rate
+    )
+
+    # BASE_DENSE_SAFETY_PROXY_V1
+    # Positive delta: execution triggers the proxy more often than base dense.
+    # Negative delta: execution triggers the proxy less often.
+    summary["collision_proxy_delta"] = (
+        execution_collision_rate - base_dense_collision_rate
+        if (
+            math.isfinite(execution_collision_rate)
+            and math.isfinite(base_dense_collision_rate)
+        )
+        else float("nan")
+    )
+    summary["offroad_proxy_delta"] = (
+        execution_offroad_rate - base_dense_offroad_rate
+        if (
+            math.isfinite(execution_offroad_rate)
+            and math.isfinite(base_dense_offroad_rate)
+        )
+        else float("nan")
     )
 
     if visualize:
