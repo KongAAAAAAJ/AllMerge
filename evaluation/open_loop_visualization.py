@@ -512,8 +512,39 @@ def plot_initial_vs_final_denoising(
             f"Initial checkpoint does not exist: {initial_checkpoint}"
         )
 
-    final_model = final_model.to("cpu").eval()
-    initial_model = copy.deepcopy(final_model).to("cpu").eval()
+    # VISUALIZATION_ADAPTER_DEVICE_FIX_V1
+    # PlannerTensorAdapter owns plain tensors rather than registered buffers,
+    # so nn.Module.to(...) alone does not move its normalization scales.
+    try:
+        device = next(final_model.parameters()).device
+    except StopIteration:
+        device = torch.device("cpu")
+
+    def move_model_and_adapter(
+        model: torch.nn.Module,
+        target_device: torch.device,
+    ) -> torch.nn.Module:
+        model = model.to(target_device).eval()
+        adapter = getattr(model, "adapter", None)
+        if adapter is not None:
+            adapter.device = target_device
+            for name in (
+                "ego_scale",
+                "agent_scale",
+                "map_scale",
+                "target_point_scale",
+                "trajectory_scale",
+            ):
+                value = getattr(adapter, name, None)
+                if torch.is_tensor(value):
+                    setattr(adapter, name, value.to(target_device))
+        return model
+
+    final_model = move_model_and_adapter(final_model, device)
+    initial_model = move_model_and_adapter(
+        copy.deepcopy(final_model),
+        device,
+    )
 
     payload = torch.load(initial_checkpoint, map_location="cpu")
     state_dict = _extract_checkpoint_state_dict(payload)
@@ -531,12 +562,12 @@ def plot_initial_vs_final_denoising(
         )
 
     features = {
-        key: value.to("cpu")
+        key: value.to(device)
         for key, value in sample.features_cpu.items()
     }
 
     def infer(model: torch.nn.Module) -> Mapping[str, torch.Tensor]:
-        generator = torch.Generator(device="cpu")
+        generator = torch.Generator(device=device)
         generator.manual_seed(int(seed))
         with torch.no_grad():
             return model.infer_multimodal(
@@ -627,4 +658,209 @@ def plot_initial_vs_final_denoising(
     plt.close(fig)
 
     del initial_model
+    return output_path
+
+
+# TRAINING_LOSS_CURVE_V1
+def _read_training_scalar_history(
+    log_dir: str | Path,
+) -> Dict[str, List[Tuple[int, float]]]:
+    """Read epoch scalar history from TensorBoard or fallback scalars.jsonl."""
+    import json
+
+    log_dir = Path(log_dir)
+    wanted = (
+        "train/loss",
+        "val/loss",
+        "train/base_loss",
+        "val/base_loss",
+        "lr",
+    )
+    history: Dict[str, List[Tuple[int, float]]] = {key: [] for key in wanted}
+
+    event_files = sorted(log_dir.glob("events.out.tfevents.*"))
+    if event_files:
+        try:
+            from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+            accumulator = EventAccumulator(
+                str(log_dir),
+                size_guidance={"scalars": 0},
+            )
+            accumulator.Reload()
+            available = set(accumulator.Tags().get("scalars", []))
+            for tag in wanted:
+                if tag not in available:
+                    continue
+                history[tag] = [
+                    (int(event.step), float(event.value))
+                    for event in accumulator.Scalars(tag)
+                ]
+        except Exception as exc:
+            print(
+                "[evaluation/visualization] TensorBoard scalar read failed; "
+                f"trying scalars.jsonl fallback: {exc}"
+            )
+
+    if any(history.values()):
+        return history
+
+    fallback = log_dir / "scalars.jsonl"
+    if fallback.is_file():
+        with fallback.open("r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                    tag = str(item.get("tag", ""))
+                    if tag not in history:
+                        continue
+                    history[tag].append(
+                        (int(item["step"]), float(item["value"]))
+                    )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+
+    return history
+
+
+def plot_training_loss_curve(
+    *,
+    log_dir: str | Path,
+    output_path: str | Path,
+    output_csv: Optional[str | Path] = None,
+) -> Optional[Path]:
+    """Plot epoch-wise pretraining losses from the run's scalar history."""
+    import matplotlib.pyplot as plt
+
+    log_dir = Path(log_dir)
+    if not log_dir.is_dir():
+        print(
+            "[evaluation/visualization] training log directory not found: "
+            f"{log_dir}"
+        )
+        return None
+
+    history = _read_training_scalar_history(log_dir)
+    train = history.get("train/loss", [])
+    val = history.get("val/loss", [])
+    base_val = history.get("val/base_loss", [])
+    lr = history.get("lr", [])
+
+    if not train and not val:
+        print(
+            "[evaluation/visualization] no train/loss or val/loss scalar "
+            f"history found under {log_dir}"
+        )
+        return None
+
+    def xy(series: List[Tuple[int, float]]):
+        return (
+            np.asarray([step + 1 for step, _ in series], dtype=np.int64),
+            np.asarray([value for _, value in series], dtype=np.float64),
+        )
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+
+    if train:
+        x, y = xy(train)
+        ax.plot(
+            x,
+            y,
+            linewidth=2.0,
+            marker="o",
+            markersize=3.2,
+            label="Train total loss",
+        )
+    if val:
+        x, y = xy(val)
+        ax.plot(
+            x,
+            y,
+            linewidth=2.0,
+            marker="s",
+            markersize=3.0,
+            label="Validation total loss",
+        )
+
+    draw_base = False
+    if base_val:
+        if not val:
+            draw_base = True
+        else:
+            val_map = {step: value for step, value in val}
+            diffs = [
+                abs(value - val_map[step])
+                for step, value in base_val
+                if step in val_map
+            ]
+            draw_base = bool(diffs) and max(diffs) > 1e-8
+
+    if draw_base:
+        x, y = xy(base_val)
+        ax.plot(
+            x,
+            y,
+            linewidth=1.8,
+            linestyle="--",
+            label="Validation base diffusion loss",
+        )
+
+    ax.set_title("Diffusion Pretraining Loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.grid(alpha=0.22)
+    ax.legend(loc="best")
+
+    max_epoch = max(
+        [step + 1 for step, _ in train]
+        + [step + 1 for step, _ in val]
+    )
+    ax.set_xlim(1, max_epoch)
+    fig.tight_layout()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+    if output_csv is not None:
+        output_csv = Path(output_csv)
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        maps = {
+            "train_loss": {step + 1: value for step, value in train},
+            "val_loss": {step + 1: value for step, value in val},
+            "train_base_loss": {
+                step + 1: value
+                for step, value in history.get("train/base_loss", [])
+            },
+            "val_base_loss": {step + 1: value for step, value in base_val},
+            "lr": {step + 1: value for step, value in lr},
+        }
+        epochs = sorted(
+            {epoch for values in maps.values() for epoch in values.keys()}
+        )
+        with output_csv.open("w", newline="", encoding="utf-8") as fp:
+            writer = csv.DictWriter(
+                fp,
+                fieldnames=[
+                    "epoch",
+                    "train_loss",
+                    "val_loss",
+                    "train_base_loss",
+                    "val_base_loss",
+                    "lr",
+                ],
+            )
+            writer.writeheader()
+            for epoch in epochs:
+                row = {"epoch": epoch}
+                for name, values in maps.items():
+                    row[name] = (
+                        f"{values[epoch]:.10g}" if epoch in values else ""
+                    )
+                writer.writerow(row)
+
     return output_path

@@ -20,6 +20,7 @@ from evaluation.open_loop_visualization import (
     plot_initial_vs_final_denoising,
     plot_metrics_table,
     plot_random_trajectory_gallery,
+    plot_training_loss_curve,
 )
 from highway_env.planner.diffusion.mode_assignment import (
     assign_expert_mode,
@@ -1099,6 +1100,30 @@ def evaluate_open_loop(
 
     if visualize:
         figure_dir.mkdir(parents=True, exist_ok=True)
+
+        # TRAINING_LOSS_CURVE_V1
+        # checkpoints/<name>.pt and runtime/<name>.pt both live one directory
+        # below the run root, whose TensorBoard history is stored in run/tb.
+        run_dir = checkpoint.parent.parent
+        training_log_dir = run_dir / "tb"
+        training_loss_path = plot_training_loss_curve(
+            log_dir=training_log_dir,
+            output_path=figure_dir / "05_training_loss_curve.png",
+            output_csv=figure_dir / "training_loss_curve.csv",
+        )
+        if training_loss_path is not None:
+            summary["training_loss_curve"] = str(
+                Path(training_loss_path).resolve()
+            )
+            summary["training_loss_curve_csv"] = str(
+                (figure_dir / "training_loss_curve.csv").resolve()
+            )
+        else:
+            summary["training_loss_curve"] = (
+                "not generated; no scalar history found under "
+                f"{training_log_dir}"
+            )
+
         plot_ade_fde_boxplot(
             rows,
             figure_dir / "01_ade_fde_boxplot.png",
