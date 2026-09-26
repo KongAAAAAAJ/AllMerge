@@ -19,6 +19,7 @@ from evaluation.open_loop_visualization import (
     plot_ade_fde_boxplot,
     plot_initial_vs_final_denoising,
     plot_metrics_table,
+    plot_sparse_dense_metrics_table,
     plot_random_trajectory_gallery,
     plot_training_loss_curve,
 )
@@ -104,6 +105,17 @@ CSV_FIELDS = [
     "minFDE_at_M_all",
     "minADE_at_valid",
     "minFDE_at_valid",
+    # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+    "minADE_at_M_execution_sparse_all",
+    "minFDE_at_M_execution_sparse_all",
+    "minADE_execution_sparse_at_valid",
+    "minFDE_execution_sparse_at_valid",
+    "minADE_at_M_dense_all",
+    "minFDE_at_M_dense_all",
+    "minADE_dense_at_valid",
+    "minFDE_dense_at_valid",
+    "minADE_mode_dense",
+    "minFDE_mode_dense",
     "raw_mode_entropy",
     "selected_mode_entropy",
     # OPEN_LOOP_DENSE_RESIDUAL_EVAL_V1
@@ -326,6 +338,124 @@ def _dense_execution_metrics(
         "residual_y_saturation_ratio": (
             abs_y >= (0.95 * y_bound)
         ).float().mean(dim=-1),
+    }
+
+
+# DENSE_ALL_MODE_EXECUTION_EVAL_V1
+def _dense_all_mode_execution_metrics(
+    *,
+    model,
+    output: Mapping[str, torch.Tensor],
+    features: Mapping[str, torch.Tensor],
+    expert_sparse: torch.Tensor,
+    expert_dense: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Best-of-M metrics on residual-corrected execution candidates.
+
+    Every diffusion candidate is corrected by the residual head and decoded by
+    the exact runtime ClampedCubicTrajectorySpline at 10 Hz before ADE/FDE are
+    computed against the stored 10 Hz Polynomial expert trajectory.
+    """
+    raw_candidates = output["trajectory_candidates"].float()
+    execution_candidates = output.get(
+        "trajectory_execution_candidates",
+        raw_candidates,
+    ).float()
+    expert_sparse = expert_sparse.float()
+    expert_dense = expert_dense.float()
+
+    if raw_candidates.ndim != 4 or raw_candidates.shape[-1] != 2:
+        raise ValueError(
+            "trajectory_candidates must be [B,M,H,2], got "
+            f"{tuple(raw_candidates.shape)}"
+        )
+    if execution_candidates.shape != raw_candidates.shape:
+        raise ValueError(
+            "execution candidate shape mismatch: "
+            f"execution={tuple(execution_candidates.shape)} "
+            f"raw={tuple(raw_candidates.shape)}"
+        )
+    if expert_dense.ndim != 3 or expert_dense.shape[-1] != 2:
+        raise ValueError(
+            f"trajectory_dense must be [B,T,2], got {tuple(expert_dense.shape)}"
+        )
+
+    batch, modes, horizon, _ = execution_candidates.shape
+    start_xy = torch.zeros_like(execution_candidates[:, 0, 0, :])
+    start_velocity_xy = features["ego_state"][:, 0:2].float()
+
+    flat_sparse = execution_candidates.reshape(batch * modes, horizon, 2)
+    flat_start_xy = (
+        start_xy[:, None, :]
+        .expand(batch, modes, 2)
+        .reshape(batch * modes, 2)
+    )
+    flat_start_velocity_xy = (
+        start_velocity_xy[:, None, :]
+        .expand(batch, modes, 2)
+        .reshape(batch * modes, 2)
+    )
+    dense_all = model.dense_trajectory_spline(
+        flat_sparse,
+        start_xy=flat_start_xy,
+        start_velocity_xy=flat_start_velocity_xy,
+    )
+    dense_candidates = dense_all[:, 1:, :].reshape(
+        batch,
+        modes,
+        -1,
+        2,
+    )
+    if dense_candidates.shape[2:] != expert_dense.shape[1:]:
+        raise ValueError(
+            "dense all-mode prediction/GT shape mismatch: "
+            f"pred={tuple(dense_candidates.shape)} "
+            f"gt={tuple(expert_dense.shape)}"
+        )
+
+    sparse_target = expert_sparse[:, None, :, :]
+    dense_target = expert_dense[:, None, :, :]
+    execution_sparse_dist = torch.linalg.vector_norm(
+        execution_candidates - sparse_target,
+        dim=-1,
+    )
+    dense_dist = torch.linalg.vector_norm(
+        dense_candidates - dense_target,
+        dim=-1,
+    )
+    sparse_ade = execution_sparse_dist.mean(dim=-1)
+    sparse_fde = execution_sparse_dist[..., -1]
+    dense_ade = dense_dist.mean(dim=-1)
+    dense_fde = dense_dist[..., -1]
+
+    valid = features["mode_valid_mask"].bool()
+    if valid.shape != dense_ade.shape:
+        raise ValueError(
+            "mode_valid_mask shape mismatch: "
+            f"mask={tuple(valid.shape)} metrics={tuple(dense_ade.shape)}"
+        )
+    if not valid.any(dim=1).all():
+        bad = torch.nonzero(~valid.any(dim=1), as_tuple=False).flatten().tolist()
+        raise RuntimeError(f"No valid inference mode for batch indices {bad}")
+
+    inf_sparse = torch.full_like(sparse_ade, float("inf"))
+    inf_dense = torch.full_like(dense_ade, float("inf"))
+    sparse_ade_valid = torch.where(valid, sparse_ade, inf_sparse)
+    sparse_fde_valid = torch.where(valid, sparse_fde, inf_sparse)
+    dense_ade_valid = torch.where(valid, dense_ade, inf_dense)
+    dense_fde_valid = torch.where(valid, dense_fde, inf_dense)
+
+    return {
+        "minADE_at_M_execution_sparse_all": sparse_ade.min(dim=1).values,
+        "minFDE_at_M_execution_sparse_all": sparse_fde.min(dim=1).values,
+        "minADE_execution_sparse_at_valid": sparse_ade_valid.min(dim=1).values,
+        "minFDE_execution_sparse_at_valid": sparse_fde_valid.min(dim=1).values,
+        "minADE_at_M_dense_all": dense_ade.min(dim=1).values,
+        "minFDE_at_M_dense_all": dense_fde.min(dim=1).values,
+        "minADE_dense_at_valid": dense_ade_valid.min(dim=1).values,
+        "minFDE_dense_at_valid": dense_fde_valid.min(dim=1).values,
+        "minADE_mode_dense": dense_ade.argmin(dim=1),
+        "minFDE_mode_dense": dense_fde.argmin(dim=1),
     }
 
 
@@ -574,6 +704,20 @@ def evaluate_open_loop(
                         f"Non-finite dense open-loop metric: {metric_name}"
                     )
 
+            # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+            dense_all_mode_metrics = _dense_all_mode_execution_metrics(
+                model=model,
+                output=output,
+                features=features,
+                expert_sparse=expert_trajectory,
+                expert_dense=expert_trajectory_dense,
+            )
+            for metric_name, metric_value in dense_all_mode_metrics.items():
+                if not torch.isfinite(metric_value).all():
+                    raise FloatingPointError(
+                        f"Non-finite dense all-mode metric: {metric_name}"
+                    )
+
             # DENSE_EXECUTION_SAFETY_PROXY_V1
             # Build the actual residual-corrected dense execution trajectory.
             # dense_trajectory_spline returns [B, 41, 2] including t=0;
@@ -719,11 +863,23 @@ def evaluate_open_loop(
                             expert_trajectory=(
                                 expert_trajectory[i].detach().cpu().numpy()
                             ),
+                            # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+                            # Visualize the control points actually decoded by
+                            # the runtime spline, not the legacy raw planner points.
                             predicted_trajectory=(
-                                output["trajectory"][i].detach().cpu().numpy()
+                                output.get(
+                                    "trajectory_execution_sparse",
+                                    output["trajectory"],
+                                )[i].detach().cpu().numpy()
                             ),
-                            selected_ade=_float(metrics.selected_ade, i),
-                            selected_fde=_float(metrics.selected_fde, i),
+                            selected_ade=_float(
+                                dense_metrics["execution_dense_ADE"],
+                                i,
+                            ),
+                            selected_fde=_float(
+                                dense_metrics["execution_dense_FDE"],
+                                i,
+                            ),
                             target_mode=eval_mode,
                             selected_mode=_int(
                                 metrics.selected_pred_mode,
@@ -861,6 +1017,15 @@ def evaluate_open_loop(
                             metrics.min_fde_valid,
                             i,
                         ),
+                        # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+                        **{
+                            name: (
+                                _int(value, i)
+                                if name.endswith("_mode_dense")
+                                else _float(value, i)
+                            )
+                            for name, value in dense_all_mode_metrics.items()
+                        },
                         "raw_mode_entropy": _float(
                             metrics.raw_mode_entropy,
                             i,
@@ -959,6 +1124,39 @@ def evaluate_open_loop(
             rows,
             "minFDE_at_valid",
         ),
+        # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+        f"mean_minADE_at_{num_modes}_execution_sparse_all": _mean(
+            rows,
+            "minADE_at_M_execution_sparse_all",
+        ),
+        f"mean_minFDE_at_{num_modes}_execution_sparse_all": _mean(
+            rows,
+            "minFDE_at_M_execution_sparse_all",
+        ),
+        f"mean_minADE_at_{num_modes}_dense_all": _mean(
+            rows,
+            "minADE_at_M_dense_all",
+        ),
+        f"mean_minFDE_at_{num_modes}_dense_all": _mean(
+            rows,
+            "minFDE_at_M_dense_all",
+        ),
+        "mean_minADE_execution_sparse_at_valid": _mean(
+            rows,
+            "minADE_execution_sparse_at_valid",
+        ),
+        "mean_minFDE_execution_sparse_at_valid": _mean(
+            rows,
+            "minFDE_execution_sparse_at_valid",
+        ),
+        "mean_minADE_dense_at_valid": _mean(
+            rows,
+            "minADE_dense_at_valid",
+        ),
+        "mean_minFDE_dense_at_valid": _mean(
+            rows,
+            "minFDE_dense_at_valid",
+        ),
         "raw_mode_accuracy": _rate(
             rows,
             "raw_mode_correct",
@@ -1008,11 +1206,20 @@ def evaluate_open_loop(
         ),
     }
     # EVAL_VIZ_V2_SUMMARY
-    miss_rate = float(
+    # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+    miss_rate_sparse = float(
         sum(
             1
             for row in rows
             if float(row["minFDE_at_M_all"]) > float(miss_threshold_m)
+        )
+        / len(rows)
+    )
+    miss_rate_dense = float(
+        sum(
+            1
+            for row in rows
+            if float(row["minFDE_at_M_dense_all"]) > float(miss_threshold_m)
         )
         / len(rows)
     )
@@ -1026,7 +1233,11 @@ def evaluate_open_loop(
         if offroad_flags
         else float("nan")
     )
-    summary["miss_rate"] = miss_rate
+    # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+    summary["miss_rate_sparse"] = miss_rate_sparse
+    summary["miss_rate_dense"] = miss_rate_dense
+    # Primary/legacy key now follows the final 10 Hz execution trajectory.
+    summary["miss_rate"] = miss_rate_dense
     summary["collision_rate_open_loop_proxy"] = collision_rate
     summary["offroad_rate_open_loop_proxy"] = offroad_rate
 
@@ -1132,18 +1343,26 @@ def evaluate_open_loop(
             gallery_samples,
             figure_dir / "02_random_trajectory_gallery_3x3.png",
         )
-        plot_metrics_table(
-            min_ade=_mean(rows, "minADE_at_M_all"),
-            min_fde=_mean(rows, "minFDE_at_M_all"),
-            miss_rate=miss_rate,
-            # DENSE_EXECUTION_SAFETY_PROXY_V1
-            # The rendered table reports final execution-trajectory proxies.
-            collision_rate=(
+        # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+        plot_sparse_dense_metrics_table(
+            sparse_min_ade=_mean(rows, "minADE_at_M_all"),
+            sparse_min_fde=_mean(rows, "minFDE_at_M_all"),
+            sparse_miss_rate=miss_rate_sparse,
+            dense_min_ade=_mean(rows, "minADE_at_M_dense_all"),
+            dense_min_fde=_mean(rows, "minFDE_at_M_dense_all"),
+            dense_miss_rate=miss_rate_dense,
+            sparse_collision_rate=(
+                collision_rate if math.isfinite(collision_rate) else None
+            ),
+            sparse_offroad_rate=(
+                offroad_rate if math.isfinite(offroad_rate) else None
+            ),
+            dense_collision_rate=(
                 execution_collision_rate
                 if math.isfinite(execution_collision_rate)
                 else None
             ),
-            offroad_rate=(
+            dense_offroad_rate=(
                 execution_offroad_rate
                 if math.isfinite(execution_offroad_rate)
                 else None

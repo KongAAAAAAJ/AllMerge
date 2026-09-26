@@ -215,24 +215,33 @@ def plot_ade_fde_boxplot(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ade = np.asarray(
+    # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+    sparse_ade = np.asarray(
         [float(row["selected_ADE"]) for row in rows],
         dtype=np.float64,
     )
-    fde = np.asarray(
+    sparse_fde = np.asarray(
         [float(row["selected_FDE"]) for row in rows],
         dtype=np.float64,
     )
+    dense_ade = np.asarray(
+        [float(row["execution_dense_ADE"]) for row in rows],
+        dtype=np.float64,
+    )
+    dense_fde = np.asarray(
+        [float(row["execution_dense_FDE"]) for row in rows],
+        dtype=np.float64,
+    )
 
-    fig, ax = plt.subplots(figsize=(7.2, 5.2))
+    fig, ax = plt.subplots(figsize=(9.2, 5.2))
     ax.boxplot(
-        [ade, fde],
-        tick_labels=["ADE", "FDE"],
+        [sparse_ade, sparse_fde, dense_ade, dense_fde],
+        tick_labels=["Sparse ADE", "Sparse FDE", "Dense ADE", "Dense FDE"],
         showmeans=True,
         showfliers=True,
     )
     ax.set_ylabel("Displacement error [m]")
-    ax.set_title("Selected trajectory accuracy")
+    ax.set_title("Selected trajectory: sparse planner vs dense execution")
     ax.grid(axis="y", alpha=0.25)
     ax.text(
         0.01,
@@ -468,6 +477,124 @@ def plot_metrics_table(
                     f"{float(miss_rate):.6f}",
                     "" if collision_rate is None else f"{float(collision_rate):.6f}",
                     "" if offroad_rate is None else f"{float(offroad_rate):.6f}",
+                ]
+            )
+
+    return output_path
+
+
+# DENSE_ALL_MODE_EXECUTION_EVAL_V1
+def plot_sparse_dense_metrics_table(
+    *,
+    sparse_min_ade: float,
+    sparse_min_fde: float,
+    sparse_miss_rate: float,
+    dense_min_ade: float,
+    dense_min_fde: float,
+    dense_miss_rate: float,
+    sparse_collision_rate: Optional[float],
+    sparse_offroad_rate: Optional[float],
+    dense_collision_rate: Optional[float],
+    dense_offroad_rate: Optional[float],
+    miss_threshold_m: float,
+    collision_distance_m: float,
+    offroad_distance_m: float,
+    output_path: str | Path,
+    output_csv: Optional[str | Path] = None,
+) -> Path:
+    """Render the legacy sparse planner and final 10 Hz execution side by side."""
+    import matplotlib.pyplot as plt
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    headers = [
+        "minADE [m] ↓",
+        "minFDE [m] ↓",
+        f"Miss Rate@{miss_threshold_m:g}m ↓",
+        "Collision Rate* ↓",
+        "Off-road Rate* ↓",
+    ]
+    sparse_values = [
+        _fmt_metric(sparse_min_ade),
+        _fmt_metric(sparse_min_fde),
+        _fmt_metric(sparse_miss_rate, percentage=True),
+        _fmt_metric(sparse_collision_rate, percentage=True),
+        _fmt_metric(sparse_offroad_rate, percentage=True),
+    ]
+    dense_values = [
+        _fmt_metric(dense_min_ade),
+        _fmt_metric(dense_min_fde),
+        _fmt_metric(dense_miss_rate, percentage=True),
+        _fmt_metric(dense_collision_rate, percentage=True),
+        _fmt_metric(dense_offroad_rate, percentage=True),
+    ]
+
+    fig, ax = plt.subplots(figsize=(12.8, 3.25))
+    ax.axis("off")
+    table = ax.table(
+        cellText=[sparse_values, dense_values],
+        colLabels=headers,
+        rowLabels=["Sparse planner", "Dense execution (10 Hz)"],
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(10.2)
+    table.scale(1.0, 1.65)
+    ax.set_title("Open-loop trajectory evaluation: sparse vs dense execution", pad=16)
+    ax.text(
+        0.0,
+        -0.05,
+        (
+            "Dense execution = residual-corrected control points + runtime "
+            "clamped cubic spline at 10 Hz. * Safety values are open-loop "
+            "geometry proxies: "
+            f"agent distance < {collision_distance_m:g} m; "
+            f"map-polyline distance > {offroad_distance_m:g} m."
+        ),
+        transform=ax.transAxes,
+        fontsize=8.3,
+        alpha=0.78,
+        va="top",
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+
+    if output_csv is not None:
+        output_csv = Path(output_csv)
+        output_csv.parent.mkdir(parents=True, exist_ok=True)
+        with output_csv.open("w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "trajectory",
+                    "minADE",
+                    "minFDE",
+                    "Miss Rate",
+                    "collision rate",
+                    "off-road rate",
+                ]
+            )
+            writer.writerow(
+                [
+                    "Sparse planner",
+                    f"{float(sparse_min_ade):.6f}",
+                    f"{float(sparse_min_fde):.6f}",
+                    f"{float(sparse_miss_rate):.6f}",
+                    "" if sparse_collision_rate is None else f"{float(sparse_collision_rate):.6f}",
+                    "" if sparse_offroad_rate is None else f"{float(sparse_offroad_rate):.6f}",
+                ]
+            )
+            writer.writerow(
+                [
+                    "Dense execution (10 Hz)",
+                    f"{float(dense_min_ade):.6f}",
+                    f"{float(dense_min_fde):.6f}",
+                    f"{float(dense_miss_rate):.6f}",
+                    "" if dense_collision_rate is None else f"{float(dense_collision_rate):.6f}",
+                    "" if dense_offroad_rate is None else f"{float(dense_offroad_rate):.6f}",
                 ]
             )
 

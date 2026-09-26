@@ -740,10 +740,40 @@ class StructuredDiffusionPlanner(nn.Module):
             base["selected_x0_norm"],
         )
         execution_sparse = base["trajectory"] + execution_residual_m
+        # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+        # Apply the same residual head to every diffusion mode. This is
+        # required for a mathematically correct best-of-M dense execution
+        # metric; evaluating only the selected mode cannot define minADE@M.
+        all_mode_count = int(candidates.shape[1])
+        all_mode_feature = final_mode_tokens.reshape(
+            batch * all_mode_count,
+            int(self.config.d_model),
+        )
+        all_mode_x0_norm = final_x0.reshape(
+            batch * all_mode_count,
+            self.config.horizon_steps,
+            2,
+        )
+        execution_residual_candidates = self.dense_residual_head(
+            all_mode_feature,
+            all_mode_x0_norm,
+        ).reshape(
+            batch,
+            all_mode_count,
+            self.config.horizon_steps,
+            2,
+        )
+        execution_candidates = candidates + execution_residual_candidates
+
         return {
             "trajectory": base["trajectory"],
             "trajectory_execution_sparse": execution_sparse,
             "trajectory_execution_residual": execution_residual_m,
+            # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+            "trajectory_execution_candidates": execution_candidates,
+            "trajectory_execution_residual_candidates": (
+                execution_residual_candidates
+            ),
             "trajectory_candidates": base["trajectory_candidates"],
             "trajectory_mode_logits": base["trajectory_mode_logits"],
             "trajectory_mode_logits_masked": base[
