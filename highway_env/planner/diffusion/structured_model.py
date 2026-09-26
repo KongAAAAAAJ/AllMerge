@@ -744,7 +744,7 @@ class StructuredDiffusionPlanner(nn.Module):
         # Apply the same residual head to every diffusion mode. This is
         # required for a mathematically correct best-of-M dense execution
         # metric; evaluating only the selected mode cannot define minADE@M.
-        all_mode_count = int(candidates.shape[1])
+        all_mode_count = int(final_x0.shape[1])
         all_mode_feature = final_mode_tokens.reshape(
             batch * all_mode_count,
             int(self.config.d_model),
@@ -763,7 +763,7 @@ class StructuredDiffusionPlanner(nn.Module):
             self.config.horizon_steps,
             2,
         )
-        execution_candidates = candidates + execution_residual_candidates
+        execution_candidates = (\n            self.adapter.denormalize_trajectory(final_x0)\n            + execution_residual_candidates\n        )
 
         return {
             "trajectory": base["trajectory"],
