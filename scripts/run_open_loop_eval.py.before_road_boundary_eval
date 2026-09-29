@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# ROAD_OUTER_BOUNDARY_OFFROAD_V1
-
 import argparse
 import sys
 from pathlib import Path
@@ -128,16 +126,10 @@ def parse_args() -> argparse.Namespace:
         help="Open-loop static-agent collision proxy distance.",
     )
     parser.add_argument(
-        "--offroad-margin-m",
         "--offroad-distance-m",
-        dest="offroad_distance_m",
         type=float,
-        default=0.0,
-        help=(
-            "Optional margin outside the represented road outer boundary. "
-            "Off-road uses the union of lane-width ribbons. Default: 0.0 m. "
-            "The old --offroad-distance-m spelling remains as an alias."
-        ),
+        default=2.5,
+        help="Open-loop map-polyline off-road proxy distance.",
     )
     return parser.parse_args()
 
