@@ -174,19 +174,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow guidance to move the final sparse waypoint.",
     )
-    # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-    parser.add_argument(
-        "--guidance-type",
-        choices=("sparse_curvature", "dense_curvature"),
-        default="sparse_curvature",
-        help="Curvature source for inference-time guidance.",
-    )
-    parser.add_argument(
-        "--guidance-dense-min-speed-mps",
-        type=float,
-        default=0.5,
-        help="Ignore dense spline curvature below this speed (m/s).",
-    )
     return parser.parse_args()
 
 
@@ -227,9 +214,6 @@ def main() -> int:
         guidance_grad_clip_norm=args.guidance_grad_clip_norm,
         guidance_timesteps=guidance_timesteps,
         guidance_preserve_endpoint=not args.guidance_allow_endpoint_move,
-        # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-        guidance_type=args.guidance_type,
-        guidance_dense_min_speed_mps=args.guidance_dense_min_speed_mps,
     )
     print_summary(summary)
     return 0

@@ -29,7 +29,6 @@ class TrajectoryVisualizationSample:
     # GUIDANCE_PRE_POST_VIZ_V1: optional paired visualization fields.
     predicted_trajectory_pre_guidance: Optional[np.ndarray] = None
     guidance_enabled: bool = False
-    guidance_type: str = "sparse_curvature"
     guidance_update_l2_m: Optional[float] = None
     max_abs_curvature_pre_guidance: Optional[float] = None
     max_abs_curvature_post_guidance: Optional[float] = None
@@ -41,7 +40,6 @@ def _clamped_cubic_spline_10hz(
     sparse_time_s: Optional[object],
     *,
     sample_dt_s: float = 0.1,
-    start_velocity_xy: Optional[object] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Interpolate sparse planner points with a clamped cubic spline.
 
@@ -84,16 +82,7 @@ def _clamped_cubic_spline_10hz(
 
     dt_start = float(time_s[1] - time_s[0])
     dt_end = float(time_s[-1] - time_s[-2])
-    # DENSE_CURVATURE_GUIDANCE_V1_REPAIR: match the runtime clamped boundary.
-    # match the runtime clamped boundary
-    if start_velocity_xy is None:
-        start_derivative = (xy[1] - xy[0]) / dt_start
-    else:
-        start_derivative = np.asarray(
-            start_velocity_xy, dtype=np.float64
-        ).reshape(-1)[:2]
-        if start_derivative.shape[0] != 2 or not np.isfinite(start_derivative).all():
-            raise ValueError("start_velocity_xy must contain finite [vx, vy]")
+    start_derivative = (xy[1] - xy[0]) / dt_start
     end_derivative = (xy[-1] - xy[-2]) / dt_end
 
     spline = CubicSpline(
@@ -346,12 +335,6 @@ def plot_random_trajectory_gallery(
                 dtype=np.float64,
             ).reshape(-1)[:points]
 
-        # DENSE_CURVATURE_GUIDANCE_V1_REPAIR: use same ego-velocity start boundary as runtime spline.
-        start_velocity_xy = None
-        if sample.features_cpu is not None and "ego_state" in sample.features_cpu:
-            ego_state_np = np.asarray(sample.features_cpu["ego_state"], dtype=np.float64).reshape(-1)
-            if ego_state_np.size >= 2:
-                start_velocity_xy = ego_state_np[:2]
         gt_dense = _optional_xy(sample.expert_trajectory_10hz)
         gt_dense_time = sample.expert_trajectory_10hz_time_s
         if gt_dense is not None:
@@ -390,13 +373,11 @@ def plot_random_trajectory_gallery(
                 pred_pre,
                 sparse_time_s,
                 sample_dt_s=0.1,
-                start_velocity_xy=start_velocity_xy,
             )
             _, post_spline = _clamped_cubic_spline_10hz(
                 pred_post,
                 sparse_time_s,
                 sample_dt_s=0.1,
-                start_velocity_xy=start_velocity_xy,
             )
             ax.plot(
                 pre_spline[:, 0],
@@ -417,7 +398,6 @@ def plot_random_trajectory_gallery(
                 pred_post,
                 sparse_time_s,
                 sample_dt_s=0.1,
-                start_velocity_xy=start_velocity_xy,
             )
             ax.plot(
                 post_spline[:, 0],

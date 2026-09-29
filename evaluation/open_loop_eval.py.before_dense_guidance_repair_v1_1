@@ -151,11 +151,6 @@ CSV_FIELDS = [
     "selected_sparse_curvature_violation_ratio_pre_guidance",
     "selected_sparse_max_abs_curvature",
     "selected_sparse_curvature_violation_ratio",
-    # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-    "selected_dense_max_abs_curvature_pre_guidance",
-    "selected_dense_curvature_violation_ratio_pre_guidance",
-    "selected_dense_max_abs_curvature",
-    "selected_dense_curvature_violation_ratio",
 ]
 
 
@@ -503,8 +498,6 @@ def evaluate_open_loop(
     guidance_grad_clip_norm: float = 1.0,
     guidance_timesteps: Optional[tuple[int, ...]] = None,
     guidance_preserve_endpoint: bool = True,
-    guidance_type: str = "sparse_curvature",
-    guidance_dense_min_speed_mps: float = 0.5,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -543,9 +536,6 @@ def evaluate_open_loop(
             "grad_clip_norm": float(guidance_grad_clip_norm),
             "apply_timesteps": guidance_timesteps,
             "preserve_endpoint": bool(guidance_preserve_endpoint),
-            # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-            "type": str(guidance_type),
-            "dense_min_speed_mps": float(guidance_dense_min_speed_mps),
         },
     }
     if checkpoint_model_config:
@@ -928,22 +918,12 @@ def evaluate_open_loop(
                             ),
                             max_abs_curvature_pre_guidance=_float(
                                 output[
-                                    (
-                                        "selected_dense_max_abs_curvature_pre_guidance"
-                                        if str(guidance_type) == "dense_curvature"
-                                        else "selected_sparse_max_abs_curvature_pre_guidance"
-                                    )
+                                    "selected_sparse_max_abs_curvature_pre_guidance"
                                 ],
                                 i,
                             ),
                             max_abs_curvature_post_guidance=_float(
-                                output[
-                                    (
-                                        "selected_dense_max_abs_curvature"
-                                        if str(guidance_type) == "dense_curvature"
-                                        else "selected_sparse_max_abs_curvature"
-                                    )
-                                ],
+                                output["selected_sparse_max_abs_curvature"],
                                 i,
                             ),
                             selected_ade=_float(
@@ -982,7 +962,6 @@ def evaluate_open_loop(
                                 for key, value in features.items()
                                 if hasattr(value, "detach")
                             },
-                            guidance_type=str(guidance_type),
                         )
                         if gallery_slot == len(gallery_samples):
                             gallery_samples.append(visual_sample)
@@ -1168,19 +1147,6 @@ def evaluate_open_loop(
                         "selected_sparse_curvature_violation_ratio": _float(
                             output["selected_sparse_curvature_violation_ratio"], i
                         ),
-                        # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-                        "selected_dense_max_abs_curvature_pre_guidance": _float(
-                            output["selected_dense_max_abs_curvature_pre_guidance"], i
-                        ),
-                        "selected_dense_curvature_violation_ratio_pre_guidance": _float(
-                            output["selected_dense_curvature_violation_ratio_pre_guidance"], i
-                        ),
-                        "selected_dense_max_abs_curvature": _float(
-                            output["selected_dense_max_abs_curvature"], i
-                        ),
-                        "selected_dense_curvature_violation_ratio": _float(
-                            output["selected_dense_curvature_violation_ratio"], i
-                        ),
                     }
                 )
 
@@ -1352,21 +1318,6 @@ def evaluate_open_loop(
         ),
         "mean_selected_sparse_curvature_violation_ratio": _mean(
             rows, "selected_sparse_curvature_violation_ratio"
-        ),
-        # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
-        "guidance_type": str(guidance_type),
-        "guidance_dense_min_speed_mps": float(guidance_dense_min_speed_mps),
-        "mean_selected_dense_max_abs_curvature_pre_guidance": _mean(
-            rows, "selected_dense_max_abs_curvature_pre_guidance"
-        ),
-        "mean_selected_dense_curvature_violation_ratio_pre_guidance": _mean(
-            rows, "selected_dense_curvature_violation_ratio_pre_guidance"
-        ),
-        "mean_selected_dense_max_abs_curvature": _mean(
-            rows, "selected_dense_max_abs_curvature"
-        ),
-        "mean_selected_dense_curvature_violation_ratio": _mean(
-            rows, "selected_dense_curvature_violation_ratio"
         ),
     }
     # EVAL_VIZ_V2_SUMMARY
