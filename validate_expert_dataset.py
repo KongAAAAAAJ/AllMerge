@@ -21,6 +21,13 @@ HORIZON_STEPS = 8
 TRAJECTORY_DIMS = 2
 NUM_SEMANTICS = 4
 
+# STAGE3_DENSE_EXPERT_V2
+DENSE_REQUIRED_KEYS = {
+    "future_trajectory_dense",
+    "dense_dt",
+    "trajectory_horizon_s",
+}
+
 REQUIRED_KEYS = set(FEATURE_KEYS) | {
     "expert_trajectory_xy",
     "target_mode",
@@ -52,6 +59,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-loader-samples", type=int, default=64)
     parser.add_argument("--report-path", type=Path, default=None)
+    parser.add_argument(
+        "--require-dense",
+        action="store_true",
+        help="Require Stage 3 native 10 Hz dense expert targets.",
+    )
     return parser.parse_args()
 
 
@@ -62,6 +74,8 @@ def _shape_without_batch(array: np.ndarray) -> Tuple[int, ...]:
 def _validate_shard(
     shard_path: Path,
     reference_schema: Dict | None,
+    *,
+    require_dense: bool = False,
 ) -> tuple[Dict, Dict]:
     with np.load(shard_path, allow_pickle=False) as shard:
         keys = set(shard.files)
@@ -70,6 +84,12 @@ def _validate_shard(
             raise KeyError(
                 f"{shard_path} missing keys: {missing}"
             )
+        if require_dense:
+            missing_dense = sorted(DENSE_REQUIRED_KEYS - keys)
+            if missing_dense:
+                raise KeyError(
+                    f"{shard_path} missing dense keys: {missing_dense}"
+                )
 
         sample_count = int(
             shard["expert_trajectory_xy"].shape[0]
@@ -89,6 +109,35 @@ def _validate_shard(
                 f"{shard_path}: expert_trajectory_xy shape "
                 f"{shard['expert_trajectory_xy'].shape}"
             )
+
+        if "future_trajectory_dense" in shard.files:
+            dense = np.asarray(shard["future_trajectory_dense"], dtype=np.float32)
+            if _shape_without_batch(dense) != (40, TRAJECTORY_DIMS):
+                raise ValueError(
+                    f"{shard_path}: future_trajectory_dense shape {dense.shape}"
+                )
+            if not np.isfinite(dense).all():
+                raise ValueError(
+                    f"{shard_path}: non-finite values in future_trajectory_dense"
+                )
+            dense_dt = np.asarray(shard["dense_dt"], dtype=np.float32).reshape(-1)
+            horizon = np.asarray(
+                shard["trajectory_horizon_s"], dtype=np.float32
+            ).reshape(-1)
+            if not np.allclose(dense_dt, 0.1, atol=1e-6, rtol=0.0):
+                raise ValueError(f"{shard_path}: dense_dt must equal 0.1")
+            if not np.allclose(horizon, 4.0, atol=1e-6, rtol=0.0):
+                raise ValueError(
+                    f"{shard_path}: trajectory_horizon_s must equal 4.0"
+                )
+            sparse_from_dense = dense[:, [4, 9, 14, 19, 24, 29, 34, 39], :]
+            sparse = np.asarray(shard["expert_trajectory_xy"], dtype=np.float32)
+            if not np.allclose(sparse, sparse_from_dense, atol=1e-5, rtol=0.0):
+                max_error = float(np.max(np.abs(sparse - sparse_from_dense)))
+                raise ValueError(
+                    f"{shard_path}: sparse/dense mismatch; "
+                    f"max_abs_error={max_error:.6g}"
+                )
 
         if tuple(
             shard["coarse_trajectories"].shape[-3:]
@@ -208,6 +257,7 @@ def main() -> None:
         schema, summary = _validate_shard(
             shard_path,
             reference_schema,
+            require_dense=args.require_dense,
         )
         if reference_schema is None:
             reference_schema = schema
@@ -230,6 +280,15 @@ def main() -> None:
     )
 
     features, targets, _metadata = next(iter(loader))
+
+    if args.require_dense:
+        if "trajectory_dense" not in targets:
+            raise KeyError("DataLoader did not expose trajectory_dense")
+        if tuple(targets["trajectory_dense"].shape[1:]) != (40, 2):
+            raise ValueError(
+                "DataLoader dense trajectory batch has wrong shape: "
+                f"{tuple(targets['trajectory_dense'].shape)}"
+            )
 
     if tuple(targets["trajectory"].shape[1:]) != (
         HORIZON_STEPS,

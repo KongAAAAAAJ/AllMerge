@@ -713,11 +713,6 @@ class StructuredDiffusionPlanner(nn.Module):
         return {
             "trajectory": best,
             "trajectory_candidates": candidates,
-            # DENSE_ALL_MODE_EXECUTION_EVAL_V2
-            # Runtime-only normalized trajectories/features used by
-            # infer_multimodal() to apply the residual head to every mode.
-            "_all_x0_norm": final_x0,
-            "_all_mode_feature": final_mode_tokens,
             "trajectory_mode_logits": final_logits,
             "trajectory_mode_logits_masked": masked_logits,
             "trajectory_mode_idx": mode_index,
@@ -745,69 +740,36 @@ class StructuredDiffusionPlanner(nn.Module):
             base["selected_x0_norm"],
         )
         execution_sparse = base["trajectory"] + execution_residual_m
-
-        # DENSE_ALL_MODE_EXECUTION_EVAL_V2
-        # _runtime_base_sample() owns the reverse-diffusion locals. Reuse the
-        # normalized all-mode x0 and mode features it explicitly returns rather
-        # than referencing final_x0/final_mode_tokens across function scopes.
-        all_mode_x0_norm = base["_all_x0_norm"]
-        all_mode_feature = base["_all_mode_feature"]
-
-        if all_mode_x0_norm.ndim != 4 or all_mode_x0_norm.shape[-1] != 2:
-            raise RuntimeError(
-                "_all_x0_norm must be [B,M,H,2], got "
-                f"{tuple(all_mode_x0_norm.shape)}"
-            )
-        if all_mode_feature.ndim != 3:
-            raise RuntimeError(
-                "_all_mode_feature must be [B,M,D], got "
-                f"{tuple(all_mode_feature.shape)}"
-            )
-
-        batch = int(all_mode_x0_norm.shape[0])
-        all_mode_count = int(all_mode_x0_norm.shape[1])
-        if tuple(all_mode_feature.shape[:2]) != (batch, all_mode_count):
-            raise RuntimeError(
-                "all-mode residual feature/x0 shape mismatch: "
-                f"feature={tuple(all_mode_feature.shape)} "
-                f"x0={tuple(all_mode_x0_norm.shape)}"
-            )
-
-        flat_mode_feature = all_mode_feature.reshape(
+        # DENSE_ALL_MODE_EXECUTION_EVAL_V1
+        # Apply the same residual head to every diffusion mode. This is
+        # required for a mathematically correct best-of-M dense execution
+        # metric; evaluating only the selected mode cannot define minADE@M.
+        all_mode_count = int(final_x0.shape[1])
+        all_mode_feature = final_mode_tokens.reshape(
             batch * all_mode_count,
             int(self.config.d_model),
         )
-        flat_x0_norm = all_mode_x0_norm.reshape(
+        all_mode_x0_norm = final_x0.reshape(
             batch * all_mode_count,
             self.config.horizon_steps,
             2,
         )
         execution_residual_candidates = self.dense_residual_head(
-            flat_mode_feature,
-            flat_x0_norm,
+            all_mode_feature,
+            all_mode_x0_norm,
         ).reshape(
             batch,
             all_mode_count,
             self.config.horizon_steps,
             2,
         )
-
-        base_candidates = base["trajectory_candidates"]
-        if execution_residual_candidates.shape != base_candidates.shape:
-            raise RuntimeError(
-                "all-mode residual/candidate shape mismatch: "
-                f"residual={tuple(execution_residual_candidates.shape)} "
-                f"candidate={tuple(base_candidates.shape)}"
-            )
-        execution_candidates = (
-            base_candidates + execution_residual_candidates
-        )
+        execution_candidates = (\n            self.adapter.denormalize_trajectory(final_x0)\n            + execution_residual_candidates\n        )
 
         return {
             "trajectory": base["trajectory"],
             "trajectory_execution_sparse": execution_sparse,
             "trajectory_execution_residual": execution_residual_m,
-            # DENSE_ALL_MODE_EXECUTION_EVAL_V2
+            # DENSE_ALL_MODE_EXECUTION_EVAL_V1
             "trajectory_execution_candidates": execution_candidates,
             "trajectory_execution_residual_candidates": (
                 execution_residual_candidates

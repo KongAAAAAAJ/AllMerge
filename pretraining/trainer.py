@@ -19,7 +19,11 @@ from highway_env.planner.diffusion.structured_model import StructuredDiffusionPl
 from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
 
 from .checkpoint_io import load_checkpoint_file
-from .contract import validate_model_schema, validate_training_batch
+from .contract import (
+    validate_dense_supervision_batch,
+    validate_model_schema,
+    validate_training_batch,
+)
 from .dataset_adapter import unpack_w1_batch
 from .warmup_cos_lr import WarmupCosLR
 
@@ -54,8 +58,29 @@ def _build_writer(log_dir: str | Path):
 
 METRIC_KEYS = (
     "loss",
+    "base_loss",
     "trajectory_regression_loss",
     "trajectory_classification_loss",
+    # STAGED_DENSE_SUPERVISION_V1
+    "dense_loss_raw",
+    "dense_loss_weighted",
+    "dense_ade_m",
+    "dense_base_ade_m",
+    "dense_ade_gain_m",
+    "dense_residual_mean_abs_m",
+    "dense_residual_max_abs_m",
+    "dense_residual_mean_l2_m",
+    # RESIDUAL_XY_DIAGNOSTICS_V1
+    "dense_residual_mean_abs_x_m",
+    "dense_residual_mean_abs_y_m",
+    "dense_residual_max_abs_x_m",
+    "dense_residual_max_abs_y_m",
+    "dense_residual_x_saturation_ratio",
+    "dense_residual_y_saturation_ratio",
+    # INFERENCE_CONSISTENT_RESIDUAL_V1
+    "dense_runtime_mode_match",
+    "dense_weight_t",
+    "dense_terminal_fraction",
     "target_mode_assignment_distance",
     "target_mode_geometry_valid_fraction",
     "target_mode_traffic_valid_fraction",
@@ -87,9 +112,16 @@ def _batch_limit(loader, value: float) -> int:
 
 
 def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
+    # STAGED_DENSE_SUPERVISION_V1
+    def optional_to_device(value):
+        return value.to(device, non_blocking=True) if torch.is_tensor(value) else value
+
     return {
         "features": {key: value.to(device, non_blocking=True) for key, value in batch["features"].items()},
         "expert_trajectory": batch["expert_trajectory"].to(device, non_blocking=True),
+        "expert_trajectory_dense": optional_to_device(batch.get("expert_trajectory_dense")),
+        "dense_dt": optional_to_device(batch.get("dense_dt")),
+        "trajectory_horizon_s": optional_to_device(batch.get("trajectory_horizon_s")),
         "expert_mode": batch["expert_mode"].to(device, non_blocking=True),
         "expert_semantic": batch["expert_semantic"].to(device, non_blocking=True),
         "metadata": batch.get("metadata"),
@@ -102,8 +134,29 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
     ).float().mean()
     values = {
         "loss": output["loss"],
+        "base_loss": output["base_loss"],
         "trajectory_regression_loss": output["trajectory_regression_loss"],
         "trajectory_classification_loss": output["trajectory_classification_loss"],
+        # STAGED_DENSE_SUPERVISION_V1
+        "dense_loss_raw": output["dense_loss_raw"],
+        "dense_loss_weighted": output["dense_loss_weighted"],
+        "dense_ade_m": output["dense_ade_m"],
+        "dense_base_ade_m": output["dense_base_ade_m"],
+        "dense_ade_gain_m": output["dense_ade_gain_m"],
+        "dense_residual_mean_abs_m": output["dense_residual_mean_abs_m"],
+        "dense_residual_max_abs_m": output["dense_residual_max_abs_m"],
+        "dense_residual_mean_l2_m": output["dense_residual_mean_l2_m"],
+        # RESIDUAL_XY_DIAGNOSTICS_V1
+        "dense_residual_mean_abs_x_m": output["dense_residual_mean_abs_x_m"],
+        "dense_residual_mean_abs_y_m": output["dense_residual_mean_abs_y_m"],
+        "dense_residual_max_abs_x_m": output["dense_residual_max_abs_x_m"],
+        "dense_residual_max_abs_y_m": output["dense_residual_max_abs_y_m"],
+        "dense_residual_x_saturation_ratio": output["dense_residual_x_saturation_ratio"],
+        "dense_residual_y_saturation_ratio": output["dense_residual_y_saturation_ratio"],
+        # INFERENCE_CONSISTENT_RESIDUAL_V1
+        "dense_runtime_mode_match": output["dense_runtime_mode_match"],
+        "dense_weight_t": output["dense_weight_t"],
+        "dense_terminal_fraction": output["dense_terminal_fraction"],
         "target_mode_assignment_distance": output["target_mode_assignment_distance"].mean(),
         "target_mode_geometry_valid_fraction": output["target_mode_geometry_valid"].float().mean(),
         "target_mode_traffic_valid_fraction": output["target_mode_traffic_valid"].float().mean(),
@@ -128,6 +181,17 @@ class DiffusionPretrainer:
         log_dir: str | Path,
         init_checkpoint: Optional[str] = None,
         strict_init_checkpoint: bool = True,
+        # STAGED_DENSE_SUPERVISION_V1
+        dense_loss_enabled: bool = False,
+        dense_loss_lambda_p: float = 0.0,
+        dense_loss_type: str = "smooth_l1",
+        dense_loss_terminal_only: bool = True,
+        dense_loss_weight_mode: str = "terminal_constant",
+        dense_loss_terminal_timestep: int = 0,
+        dense_loss_terminal_weight: float = 1.0,
+        dense_loss_dense_dt: float = 0.1,
+        # DENSE_RESIDUAL_SEPARATE_LR_V1
+        dense_residual_learning_rate: Optional[float] = None,
     ) -> None:
         self.model_config_dict = dict(model_config or {})
         self.model_config = build_structured_diffusion_config(**self.model_config_dict)
@@ -135,11 +199,56 @@ class DiffusionPretrainer:
         self.device = resolve_device(device)
         self.adapter = PlannerTensorAdapter(self.model_config, self.device)
         self.planner = StructuredDiffusionPlanner(self.model_config, self.adapter).to(self.device)
+
+        # DENSE_RESIDUAL_HEAD_V2
+        # Same optimizer/step, but keep base planner and residual-head params in
+        # distinct groups so the residual head can use an independent LR.
+        self._dense_residual_params = list(
+            self.planner.dense_residual_head.parameters()
+        )
+        residual_param_ids = {id(p) for p in self._dense_residual_params}
+        self._base_planner_params = [
+            p for p in self.planner.parameters()
+            if id(p) not in residual_param_ids
+        ]
+
+        # DENSE_RESIDUAL_SEPARATE_LR_V1
+        base_lr = float(learning_rate)
+        residual_lr = (
+            base_lr
+            if dense_residual_learning_rate is None
+            else float(dense_residual_learning_rate)
+        )
+        if base_lr <= 0.0:
+            raise ValueError("learning_rate must be positive")
+        if residual_lr <= 0.0:
+            raise ValueError("dense_residual_learning_rate must be positive")
+
+        self.dense_residual_learning_rate = residual_lr
+        residual_lr_scale = residual_lr / base_lr
+
         self.optimizer = torch.optim.AdamW(
-            self.planner.parameters(),
-            lr=float(learning_rate),
+            [
+                {
+                    "params": self._base_planner_params,
+                    "lr": base_lr,
+                    "lr_scale": 1.0,
+                    "group_name": "base_planner",
+                },
+                {
+                    "params": self._dense_residual_params,
+                    "lr": residual_lr,
+                    "lr_scale": residual_lr_scale,
+                    "group_name": "dense_residual",
+                },
+            ],
+            lr=base_lr,
             weight_decay=float(weight_decay),
         )
+
+        # Clip the two gradient-isolated parameter sets independently so a
+        # large residual gradient cannot rescale the Diffusion planner gradient
+        # through global norm clipping.
         self.scheduler = WarmupCosLR(
             optimizer=self.optimizer,
             lr=float(learning_rate),
@@ -160,6 +269,27 @@ class DiffusionPretrainer:
         self.global_step = 0
         self.start_epoch = 0
         self._contract_checked = False
+
+        # STAGED_DENSE_SUPERVISION_V1
+        self.dense_loss_enabled = bool(dense_loss_enabled)
+        self.dense_loss_lambda_p = float(dense_loss_lambda_p)
+        self.dense_loss_type = str(dense_loss_type).lower()
+        self.dense_loss_terminal_only = bool(dense_loss_terminal_only)
+        self.dense_loss_weight_mode = str(dense_loss_weight_mode).lower()
+        self.dense_loss_terminal_timestep = int(dense_loss_terminal_timestep)
+        self.dense_loss_terminal_weight = float(dense_loss_terminal_weight)
+        self.dense_loss_dense_dt = float(dense_loss_dense_dt)
+        self.dense_loss_active = (
+            self.dense_loss_enabled and self.dense_loss_lambda_p > 0.0
+        )
+        if self.dense_loss_lambda_p < 0.0:
+            raise ValueError("dense_loss_lambda_p must be >= 0")
+        if not self.dense_loss_terminal_only:
+            raise ValueError("Stage D only supports dense_loss_terminal_only=true")
+        if self.dense_loss_weight_mode != "terminal_constant":
+            raise ValueError("Stage D only supports dense_loss_weight_mode=terminal_constant")
+        if abs(self.dense_loss_dense_dt - 0.1) > 1e-9:
+            raise ValueError("Stage D v1 requires dense_loss_dense_dt=0.1")
 
         if init_checkpoint:
             state_dict, stored_config = load_checkpoint_file(init_checkpoint, map_location="cpu")
@@ -243,6 +373,13 @@ class DiffusionPretrainer:
                 break
             if not self._contract_checked:
                 validate_training_batch(raw_batch, self.model_config)
+                # STAGED_DENSE_SUPERVISION_V1
+                if self.dense_loss_active:
+                    validate_dense_supervision_batch(
+                        raw_batch,
+                        self.model_config,
+                        dense_dt=self.dense_loss_dense_dt,
+                    )
                 self._contract_checked = True
 
             batch = _move_batch_to_device(unpack_w1_batch(raw_batch), self.device)
@@ -261,6 +398,14 @@ class DiffusionPretrainer:
                         batch["features"],
                         batch["expert_trajectory"],
                         batch["expert_semantic"],
+                        # STAGED_DENSE_SUPERVISION_V1
+                        target_trajectory_dense=batch.get("expert_trajectory_dense"),
+                        dense_loss_enabled=self.dense_loss_enabled,
+                        dense_loss_lambda_p=self.dense_loss_lambda_p,
+                        dense_loss_type=self.dense_loss_type,
+                        dense_loss_terminal_timestep=self.dense_loss_terminal_timestep,
+                        dense_loss_weight_mode=self.dense_loss_weight_mode,
+                        dense_loss_terminal_weight=self.dense_loss_terminal_weight,
                     )
                     loss = output["loss"]
 
@@ -268,8 +413,13 @@ class DiffusionPretrainer:
                     self.scaler.scale(loss).backward()
                     if self.grad_clip > 0:
                         self.scaler.unscale_(self.optimizer)
+                        # DENSE_RESIDUAL_HEAD_V2: independent clipping keeps
+                        # L_dense from indirectly changing base-planner updates.
                         torch.nn.utils.clip_grad_norm_(
-                            self.planner.parameters(), self.grad_clip
+                            self._base_planner_params, self.grad_clip
+                        )
+                        torch.nn.utils.clip_grad_norm_(
+                            self._dense_residual_params, self.grad_clip
                         )
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
@@ -286,6 +436,9 @@ class DiffusionPretrainer:
             ):
                 self.writer.add_scalar("train_step/loss", values["loss"], self.global_step)
                 self.writer.add_scalar(
+                    "train_step/base_loss", values["base_loss"], self.global_step
+                )
+                self.writer.add_scalar(
                     "train_step/trajectory_regression_loss",
                     values["trajectory_regression_loss"],
                     self.global_step,
@@ -295,6 +448,56 @@ class DiffusionPretrainer:
                     values["trajectory_classification_loss"],
                     self.global_step,
                 )
+                # STAGED_DENSE_SUPERVISION_V1
+                self.writer.add_scalar(
+                    "train_step/dense_loss_raw",
+                    values["dense_loss_raw"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_loss_weighted",
+                    values["dense_loss_weighted"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_ade_m",
+                    values["dense_ade_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_base_ade_m",
+                    values["dense_base_ade_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_ade_gain_m",
+                    values["dense_ade_gain_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_residual_mean_abs_m",
+                    values["dense_residual_mean_abs_m"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/dense_residual_max_abs_m",
+                    values["dense_residual_max_abs_m"],
+                    self.global_step,
+                )
+                # RESIDUAL_XY_DIAGNOSTICS_V1
+                for metric_name in (
+                    "dense_residual_mean_abs_x_m",
+                    "dense_residual_mean_abs_y_m",
+                    "dense_residual_max_abs_x_m",
+                    "dense_residual_max_abs_y_m",
+                    "dense_residual_x_saturation_ratio",
+                    "dense_residual_y_saturation_ratio",
+                ):
+                    self.writer.add_scalar(
+                        f"train_step/{metric_name}",
+                        values[metric_name],
+                        self.global_step,
+                    )
 
         if samples == 0:
             raise RuntimeError(f"No {stage} samples were processed")
@@ -377,8 +580,21 @@ class DiffusionPretrainer:
             if "val/loss" in metrics:
                 summary += (
                     f" val_loss={metrics['val/loss']:.6f} "
+                    f"base_val={metrics['val/base_loss']:.6f} "
                     f"mode_match={metrics['val/w1_target_mode_match']:.4f}"
                 )
+                if self.dense_loss_active:
+                    summary += (
+                        f" dense_ADE={metrics['val/dense_ade_m']:.3f} "
+                        f"base_dense_ADE={metrics['val/dense_base_ade_m']:.3f} "
+                        f"dense_gain={metrics['val/dense_ade_gain_m']:.3f} "
+                        f"res_abs={metrics['val/dense_residual_mean_abs_m']:.3f} "
+                        f"res_x={metrics['val/dense_residual_mean_abs_x_m']:.3f} "
+                        f"res_y={metrics['val/dense_residual_mean_abs_y_m']:.3f} "
+                        f"sat_x={metrics['val/dense_residual_x_saturation_ratio']:.3f} "
+                        f"sat_y={metrics['val/dense_residual_y_saturation_ratio']:.3f} "
+                        f"runtime_mode_match={metrics['val/dense_runtime_mode_match']:.3f}"
+                    )
             summary += f" lr={lr:.3e} step={self.global_step}"
             print(summary)
 

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# ROAD_OUTER_BOUNDARY_OFFROAD_V1
-
 import csv
 import math
 import random
@@ -481,7 +479,7 @@ def evaluate_open_loop(
     initial_checkpoint: Optional[str | Path] = None,
     miss_threshold_m: float = 2.0,
     collision_distance_m: float = 2.5,
-    offroad_distance_m: float = 0.0,
+    offroad_distance_m: float = 2.5,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()

@@ -591,11 +591,7 @@ class MultiAgentAction(ActionType):
         features,
         planner_flag,
     ):
-        """
-        Stage-1 integration:
-        Diffusion inference runs in parallel, but Polynomial still controls
-        the vehicle. No random-weight trajectory is sent to the controller.
-        """
+        """Run the existing Diffusion selector and optional spline runtime."""
         if features is None:
             return
 
@@ -603,12 +599,22 @@ class MultiAgentAction(ActionType):
             "Diffusion",
             {},
         )
+        shadow_enabled = bool(
+            diffusion_config.get("shadow_enabled", False)
+        )
+        execution_enabled = bool(
+            diffusion_config.get("diffusion_execution_enabled", False)
+        )
+        if not (shadow_enabled or execution_enabled):
+            return
 
-        if not diffusion_config.get(
-            "shadow_enabled",
+        if execution_enabled and not diffusion_config.get(
+            "diffusion_spline_enabled",
             False,
         ):
-            return
+            raise RuntimeError(
+                "Diffusion execution requires diffusion_spline_enabled=True"
+            )
 
         from highway_env.planner.diffusion.runtime import (
             DiffusionPlannerRuntime,
@@ -624,17 +630,125 @@ class MultiAgentAction(ActionType):
             runtime = DiffusionPlannerRuntime(
                 diffusion_config
             )
-            self.env.diffusion_planner_runtime = (
-                runtime
+            self.env.diffusion_planner_runtime = runtime
+
+        output = runtime.infer(features)
+        self.env.latest_diffusion_output = output
+        self._publish_diffusion_runtime_trajectories(
+            output,
+            diffusion_config,
+        )
+
+    def _publish_diffusion_runtime_trajectories(
+        self,
+        output,
+        diffusion_config,
+    ):
+        """Publish selected sparse/dense paths without changing mode selection."""
+        # STAGE_A_SPLINE_RUNTIME_V1
+        selected_sparse = np.asarray(
+            output["trajectory"],
+            dtype=np.float32,
+        )
+        self.env.latest_diffusion_sparse_trajectory = selected_sparse.copy()
+
+        vehicles = list(self.env.controlled_vehicles)
+        if selected_sparse.shape[0] != len(vehicles):
+            raise RuntimeError(
+                "Diffusion batch/controlled-vehicle mismatch: "
+                f"batch={selected_sparse.shape[0]}, vehicles={len(vehicles)}"
             )
 
-        output = runtime.infer(
-            features
+        dense_local_raw = output.get("trajectory_dense")
+        if dense_local_raw is None:
+            self.env.latest_diffusion_dense_trajectory = None
+            self.env.latest_diffusion_dense_trajectory_world = None
+            for ego_idx, vehicle in enumerate(vehicles):
+                vehicle.latest_diffusion_sparse_trajectory = (
+                    selected_sparse[ego_idx].copy()
+                )
+                vehicle.latest_diffusion_dense_trajectory = None
+                vehicle.latest_diffusion_dense_trajectory_world = None
+            return
+
+        from highway_env.planner.geometry import (
+            ego_to_world_point,
+            ego_to_world_vector,
         )
 
-        self.env.latest_diffusion_output = (
-            output
+        dense_local = np.asarray(dense_local_raw, dtype=np.float32)
+        dense_velocity_local = np.asarray(
+            output["trajectory_dense_velocity"],
+            dtype=np.float32,
         )
+        dense_time = np.asarray(
+            output["trajectory_dense_time_s"],
+            dtype=np.float32,
+        )
+
+        if dense_local.shape[:2] != (len(vehicles), dense_time.shape[0]):
+            raise RuntimeError(
+                "Unexpected dense Diffusion trajectory shape: "
+                f"{dense_local.shape}, time={dense_time.shape}"
+            )
+
+        world_batch = []
+        for ego_idx, vehicle in enumerate(vehicles):
+            origin_position = np.asarray(vehicle.position, dtype=np.float32).copy()
+            origin_heading = float(vehicle.heading)
+            world_xy = ego_to_world_point(
+                dense_local[ego_idx],
+                origin_position,
+                origin_heading,
+            )
+            world_velocity = ego_to_world_vector(
+                dense_velocity_local[ego_idx],
+                origin_heading,
+            )
+            speed = np.linalg.norm(world_velocity, axis=-1)
+            heading = np.arctan2(
+                world_velocity[:, 1],
+                world_velocity[:, 0],
+            ).astype(np.float32)
+            heading[speed < 1e-4] = np.float32(origin_heading)
+
+            vehicle.latest_diffusion_sparse_trajectory = (
+                selected_sparse[ego_idx].copy()
+            )
+            vehicle.latest_diffusion_dense_trajectory = (
+                dense_local[ego_idx].copy()
+            )
+            vehicle.latest_diffusion_dense_trajectory_world = world_xy.copy()
+            vehicle.latest_diffusion_dense_velocity_world = world_velocity.copy()
+            vehicle.latest_diffusion_dense_heading_world = heading.copy()
+            vehicle.latest_diffusion_dense_time_s = dense_time.copy()
+            vehicle.latest_diffusion_planning_origin_position = origin_position
+            vehicle.latest_diffusion_planning_origin_heading = origin_heading
+            world_batch.append(world_xy)
+
+        self.env.latest_diffusion_dense_trajectory = dense_local.copy()
+        self.env.latest_diffusion_dense_trajectory_world = np.stack(
+            world_batch,
+            axis=0,
+        )
+
+        diagnostic_keys = (
+            "spline_decode_ms",
+            "spline_sparse_point_count",
+            "spline_dense_point_count",
+            "spline_dense_dt",
+            "spline_max_abs_waypoint_interpolation_error",
+            "spline_max_curvature",
+            "spline_mean_abs_curvature",
+            "spline_max_abs_delta_curvature",
+        )
+        diagnostics = {}
+        for key in diagnostic_keys:
+            if key in output:
+                array = np.asarray(output[key]).reshape(-1)
+                if array.size:
+                    diagnostics[key] = float(array[0])
+        self.env.latest_diffusion_spline_diagnostics = diagnostics
 
     def _build_expert_alignment(
         self,
@@ -651,6 +765,14 @@ class MultiAgentAction(ActionType):
             return None
 
         if features is None:
+            return None
+
+        # STAGE_A_SPLINE_RUNTIME_V1
+        # Never label an executing Diffusion path as Polynomial expert data.
+        if planner_flag.get("Diffusion", {}).get(
+            "diffusion_execution_enabled",
+            False,
+        ):
             return None
 
         if planner_flag.get("type") != "Polynomial":
@@ -727,6 +849,61 @@ class MultiAgentAction(ActionType):
 
         expert_xy = np.stack(expert_xy, axis=0)
 
+        # STAGE3_DENSE_EXPERT_V2
+        reference_dense_time_s = np.asarray(
+            trajectories[0]["dense_time_s"],
+            dtype=np.float32,
+        )
+        dense_dt = float(trajectories[0]["dense_dt"])
+        trajectory_horizon_s = float(
+            trajectories[0]["trajectory_horizon_s"]
+        )
+        future_trajectory_dense = []
+
+        for ego_idx, trajectory in enumerate(trajectories):
+            dense_time_s = np.asarray(
+                trajectory.get("dense_time_s"),
+                dtype=np.float32,
+            )
+            dense_xy = np.asarray(
+                trajectory.get("future_trajectory_dense"),
+                dtype=np.float32,
+            )
+            if dense_xy.shape != (40, 2):
+                raise RuntimeError(
+                    f"Dense expert shape mismatch for ego {ego_idx}: "
+                    f"{dense_xy.shape}, expected (40, 2)"
+                )
+            if not np.allclose(
+                dense_time_s, reference_dense_time_s, atol=1e-6, rtol=0.0
+            ):
+                raise RuntimeError(
+                    f"Dense expert time-grid mismatch for ego {ego_idx}"
+                )
+            if not np.isclose(float(trajectory["dense_dt"]), dense_dt):
+                raise RuntimeError("Dense expert dt mismatch across egos")
+            if not np.isclose(
+                float(trajectory["trajectory_horizon_s"]),
+                trajectory_horizon_s,
+            ):
+                raise RuntimeError("Dense expert horizon mismatch across egos")
+
+            expected_sparse = dense_xy[[4, 9, 14, 19, 24, 29, 34, 39]]
+            sparse_xy = np.asarray(trajectory["xy"], dtype=np.float32)
+            if not np.allclose(
+                sparse_xy, expected_sparse, atol=1e-5, rtol=0.0
+            ):
+                max_error = float(np.max(np.abs(sparse_xy - expected_sparse)))
+                raise RuntimeError(
+                    "Sparse/dense expert target inconsistency for ego "
+                    f"{ego_idx}: max_abs_error={max_error:.6g}"
+                )
+            future_trajectory_dense.append(dense_xy)
+
+        future_trajectory_dense = np.stack(
+            future_trajectory_dense, axis=0
+        ).astype(np.float32, copy=False)
+
         from highway_env.planner.expert_alignment import (
             ExpertTrajectoryAligner,
         )
@@ -759,6 +936,9 @@ class MultiAgentAction(ActionType):
             "mode",
             "legacy",
         )
+        result["future_trajectory_dense"] = future_trajectory_dense.copy()
+        result["dense_dt"] = np.float32(dense_dt)
+        result["trajectory_horizon_s"] = np.float32(trajectory_horizon_s)
 
         self.env.latest_expert_alignment = result
 

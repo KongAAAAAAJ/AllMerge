@@ -113,6 +113,15 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
+    # DENSE_RESIDUAL_HEAD_V2
+    # A small execution-correction head is trained only by L_dense.
+    # Its inputs are stop-gradient diffusion mode features plus the selected
+    # sparse trajectory. The physical residual is bounded so this module
+    # remains a local execution correction rather than a second planner.
+    dense_residual_hidden_dim: int = 128
+    dense_residual_max_x_m: float = 2.0
+    dense_residual_max_y_m: float = 0.75
+
     feature_scales: FeatureScaleConfig = field(
         default_factory=FeatureScaleConfig
     )
@@ -140,6 +149,14 @@ class StructuredDiffusionConfig:
             raise ValueError(
                 "max_residual_y_m must be positive"
             )
+
+        # DENSE_RESIDUAL_HEAD_V2
+        if self.dense_residual_hidden_dim <= 0:
+            raise ValueError("dense_residual_hidden_dim must be positive")
+        if self.dense_residual_max_x_m <= 0.0:
+            raise ValueError("dense_residual_max_x_m must be positive")
+        if self.dense_residual_max_y_m <= 0.0:
+            raise ValueError("dense_residual_max_y_m must be positive")
 
         if len(self.feature_scales.trajectory_xy) != 2:
             raise ValueError(

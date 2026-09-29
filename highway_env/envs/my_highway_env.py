@@ -127,6 +127,16 @@ class MyHighwayEnv(AbstractEnv):
                         # Stage 1 核心开关
                         "shadow_enabled": True,
 
+                        # STAGE_A_SPLINE_RUNTIME_V1
+                        # Selected [8,2] -> clamped cubic [41,2] @ 10 Hz.
+                        "diffusion_spline_enabled": True,
+
+                        # Keep OFF by default: Stage A must not silently
+                        # replace the existing Polynomial controller path.
+                        "diffusion_execution_enabled": False,
+                        "spline_dense_dt": 0.1,
+                        "spline_tracking_index": 10,
+
                         # GPU
                         "device": "cuda:0",
 

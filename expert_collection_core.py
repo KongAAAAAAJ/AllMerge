@@ -460,6 +460,29 @@ def build_frame_record(
         dtype=np.float32,
     )
 
+    # STAGE3_DENSE_EXPERT_V2
+    future_trajectory_dense = np.asarray(
+        alignment["future_trajectory_dense"],
+        dtype=np.float32,
+    )
+    dense_dt = np.float32(alignment["dense_dt"])
+    trajectory_horizon_s = np.float32(
+        alignment["trajectory_horizon_s"]
+    )
+
+    if future_trajectory_dense.shape != (expert_xy.shape[0], 40, 2):
+        raise ValueError(
+            "future_trajectory_dense must be [B,40,2], got "
+            f"{future_trajectory_dense.shape}"
+        )
+    expected_sparse = future_trajectory_dense[:, [4, 9, 14, 19, 24, 29, 34, 39]]
+    if not np.allclose(expert_xy, expected_sparse, atol=1e-5, rtol=0.0):
+        max_error = float(np.max(np.abs(expert_xy - expected_sparse)))
+        raise ValueError(
+            "expert_trajectory_xy is not an exact 0.5 s downsample of the "
+            f"native dense target; max_abs_error={max_error:.6g}"
+        )
+
     anchors = np.asarray(
         features[
             "coarse_trajectories"
@@ -600,6 +623,15 @@ def build_frame_record(
 
         "trajectory_time_s":
             time_s.copy(),
+
+        "future_trajectory_dense":
+            future_trajectory_dense.copy(),
+
+        "dense_dt":
+            dense_dt,
+
+        "trajectory_horizon_s":
+            trajectory_horizon_s,
 
         "target_mode":
             target_mode,

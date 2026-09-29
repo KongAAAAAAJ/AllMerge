@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# ROAD_OUTER_BOUNDARY_OFFROAD_V1
-
 import copy
 import csv
 import math
@@ -122,22 +120,25 @@ def compute_open_loop_safety_proxies(
     batch_index: int,
     *,
     collision_distance_m: float = 2.5,
-    offroad_distance_m: float = 0.0,
+    offroad_distance_m: float = 2.5,
 ) -> Tuple[Optional[bool], Optional[bool]]:
-    '''Open-loop geometry diagnostics.
+    """
+    Lightweight open-loop geometry proxies.
 
-    Collision is kept only as a backward-compatible diagnostic. Off-road is
-    defined by the road OUTER boundary: map polylines are lane centerlines and
-    feature index 4 stores lane width. A trajectory point is on-road when it
-    lies inside ANY valid lane-width ribbon. Internal lane boundaries therefore
-    never trigger off-road during a lane change.
+    Collision proxy:
+        any selected trajectory point is closer than collision_distance_m to
+        the CURRENT position of any valid background agent.
 
-    ``offroad_distance_m`` is retained as a backward-compatible argument name,
-    but now means an optional margin outside the outer boundary. Default 0.0.
-    '''
+    Off-road proxy:
+        any selected trajectory point is farther than offroad_distance_m from
+        every valid map-polyline point.
+
+    These are deliberately named/used as proxies because W1 open-loop samples
+    do not provide future background trajectories or an exact drivable-area
+    polygon. Closed-loop collision/off-road metrics should remain authoritative.
+    """
     trajectory = selected_trajectory.detach().float()[..., :2]
 
-    # Collision diagnostic only. Future agent motion is unavailable here.
     collision: Optional[bool] = None
     agent_states = features.get("agent_states")
     agent_valid_mask = features.get("agent_valid_mask")
@@ -156,7 +157,8 @@ def compute_open_loop_safety_proxies(
         positions = positions[torch.isfinite(positions).all(dim=-1)]
         if positions.numel() > 0:
             distances = torch.cdist(
-                trajectory.to(device=positions.device), positions
+                trajectory.to(device=positions.device),
+                positions,
             )
             collision = bool(
                 (distances.min(dim=1).values < float(collision_distance_m))
@@ -166,7 +168,6 @@ def compute_open_loop_safety_proxies(
         else:
             collision = False
 
-    # Off-road = outside the union of all valid lane-width ribbons.
     offroad: Optional[bool] = None
     map_polylines = features.get("map_polylines")
     map_valid_mask = features.get("map_valid_mask")
@@ -174,65 +175,36 @@ def compute_open_loop_safety_proxies(
         isinstance(map_polylines, torch.Tensor)
         and isinstance(map_valid_mask, torch.Tensor)
         and map_polylines.ndim >= 4
-        and map_polylines.shape[-1] >= 5
+        and map_polylines.shape[-1] >= 2
     ):
-        lanes = map_polylines[batch_index].detach().float()
-        lane_valid = map_valid_mask[batch_index].bool().reshape(-1)
-        if lane_valid.numel() == lanes.shape[0]:
-            lanes = lanes[lane_valid]
+        points = map_polylines[batch_index, ..., :2]
+        valid_map = map_valid_mask[batch_index].bool()
 
-        if lanes.numel() > 0 and lanes.shape[-2] >= 2:
-            centers = lanes[..., :2]
-            widths = lanes[..., 4].abs()
-
-            p0 = centers[:, :-1, :]
-            p1 = centers[:, 1:, :]
-            w0 = widths[:, :-1]
-            w1 = widths[:, 1:]
-            seg = p1 - p0
-            seg_len_sq = (seg * seg).sum(dim=-1)
-
-            segment_valid = (
-                torch.isfinite(p0).all(dim=-1)
-                & torch.isfinite(p1).all(dim=-1)
-                & torch.isfinite(w0)
-                & torch.isfinite(w1)
-                & (w0 > 1e-4)
-                & (w1 > 1e-4)
-                & (seg_len_sq > 1e-8)
-            )
-
-            if bool(segment_valid.any().item()):
-                traj = trajectory.to(device=p0.device)
-                rel = traj[:, None, None, :] - p0[None, :, :, :]
-                seg_b = seg[None, :, :, :]
-                alpha = (
-                    (rel * seg_b).sum(dim=-1)
-                    / seg_len_sq.clamp_min(1e-8)[None, :, :]
-                ).clamp(0.0, 1.0)
-
-                closest = p0[None, :, :, :] + alpha[..., None] * seg_b
-                distance = torch.linalg.vector_norm(
-                    traj[:, None, None, :] - closest,
-                    dim=-1,
-                )
-                interp_width = (
-                    w0[None, :, :]
-                    + alpha * (w1 - w0)[None, :, :]
-                )
-                half_width = (
-                    0.5 * interp_width + float(offroad_distance_m)
-                )
-                inside_lane_ribbon = (
-                    (distance <= half_width)
-                    & segment_valid[None, :, :]
-                )
-                on_road = inside_lane_ribbon.any(dim=(1, 2))
-                offroad = bool((~on_road).any().item())
+        if valid_map.ndim == 1 and points.ndim == 3:
+            if valid_map.numel() == points.shape[0]:
+                points = points[valid_map].reshape(-1, 2)
             else:
-                offroad = None
+                points = points.reshape(-1, 2)
+        elif valid_map.shape == points.shape[:-1]:
+            points = points[valid_map]
+        else:
+            points = points.reshape(-1, 2)
+
+        points = points[torch.isfinite(points).all(dim=-1)]
+        if points.numel() > 0:
+            distances = torch.cdist(
+                trajectory.to(device=points.device),
+                points,
+            )
+            min_distance = distances.min(dim=1).values
+            offroad = bool(
+                (min_distance > float(offroad_distance_m)).any().item()
+            )
+        else:
+            offroad = None
 
     return collision, offroad
+
 
 def plot_ade_fde_boxplot(
     rows: Sequence[Mapping[str, object]],
@@ -530,12 +502,7 @@ def plot_sparse_dense_metrics_table(
     output_path: str | Path,
     output_csv: Optional[str | Path] = None,
 ) -> Path:
-    '''Render primary accuracy + road-boundary metrics.
-
-    Collision remains in detailed CSV/summary diagnostics, but is intentionally
-    omitted from the primary table because the open-loop collision check uses
-    current background-agent positions rather than future trajectories.
-    '''
+    """Render the legacy sparse planner and final 10 Hz execution side by side."""
     import matplotlib.pyplot as plt
 
     output_path = Path(output_path)
@@ -545,22 +512,25 @@ def plot_sparse_dense_metrics_table(
         "minADE [m] ↓",
         "minFDE [m] ↓",
         f"Miss Rate@{miss_threshold_m:g}m ↓",
-        "Off-road Rate ↓",
+        "Collision Rate* ↓",
+        "Off-road Rate* ↓",
     ]
     sparse_values = [
         _fmt_metric(sparse_min_ade),
         _fmt_metric(sparse_min_fde),
         _fmt_metric(sparse_miss_rate, percentage=True),
+        _fmt_metric(sparse_collision_rate, percentage=True),
         _fmt_metric(sparse_offroad_rate, percentage=True),
     ]
     dense_values = [
         _fmt_metric(dense_min_ade),
         _fmt_metric(dense_min_fde),
         _fmt_metric(dense_miss_rate, percentage=True),
+        _fmt_metric(dense_collision_rate, percentage=True),
         _fmt_metric(dense_offroad_rate, percentage=True),
     ]
 
-    fig, ax = plt.subplots(figsize=(10.6, 3.25))
+    fig, ax = plt.subplots(figsize=(12.8, 3.25))
     ax.axis("off")
     table = ax.table(
         cellText=[sparse_values, dense_values],
@@ -572,18 +542,16 @@ def plot_sparse_dense_metrics_table(
     table.auto_set_font_size(False)
     table.set_fontsize(10.2)
     table.scale(1.0, 1.65)
-    ax.set_title(
-        "Open-loop trajectory evaluation: sparse vs dense execution",
-        pad=16,
-    )
+    ax.set_title("Open-loop trajectory evaluation: sparse vs dense execution", pad=16)
     ax.text(
         0.0,
         -0.05,
         (
-            "Off-road = trajectory center outside the union of valid "
-            "lane-width ribbons (road outer boundary). "
-            f"Boundary margin = {offroad_distance_m:g} m. "
-            "Collision is diagnostic only and is omitted here."
+            "Dense execution = residual-corrected control points + runtime "
+            "clamped cubic spline at 10 Hz. * Safety values are open-loop "
+            "geometry proxies: "
+            f"agent distance < {collision_distance_m:g} m; "
+            f"map-polyline distance > {offroad_distance_m:g} m."
         ),
         transform=ax.transAxes,
         fontsize=8.3,
@@ -597,9 +565,7 @@ def plot_sparse_dense_metrics_table(
     if output_csv is not None:
         output_csv = Path(output_csv)
         output_csv.parent.mkdir(parents=True, exist_ok=True)
-        with output_csv.open(
-            "w", newline="", encoding="utf-8-sig"
-        ) as handle:
+        with output_csv.open("w", newline="", encoding="utf-8-sig") as handle:
             writer = csv.writer(handle)
             writer.writerow(
                 [
@@ -607,6 +573,7 @@ def plot_sparse_dense_metrics_table(
                     "minADE",
                     "minFDE",
                     "Miss Rate",
+                    "collision rate",
                     "off-road rate",
                 ]
             )
@@ -616,8 +583,8 @@ def plot_sparse_dense_metrics_table(
                     f"{float(sparse_min_ade):.6f}",
                     f"{float(sparse_min_fde):.6f}",
                     f"{float(sparse_miss_rate):.6f}",
-                    "" if sparse_offroad_rate is None
-                    else f"{float(sparse_offroad_rate):.6f}",
+                    "" if sparse_collision_rate is None else f"{float(sparse_collision_rate):.6f}",
+                    "" if sparse_offroad_rate is None else f"{float(sparse_offroad_rate):.6f}",
                 ]
             )
             writer.writerow(
@@ -626,8 +593,8 @@ def plot_sparse_dense_metrics_table(
                     f"{float(dense_min_ade):.6f}",
                     f"{float(dense_min_fde):.6f}",
                     f"{float(dense_miss_rate):.6f}",
-                    "" if dense_offroad_rate is None
-                    else f"{float(dense_offroad_rate):.6f}",
+                    "" if dense_collision_rate is None else f"{float(dense_collision_rate):.6f}",
+                    "" if dense_offroad_rate is None else f"{float(dense_offroad_rate):.6f}",
                 ]
             )
 

@@ -1707,7 +1707,68 @@ class FOLLOWVehicle(ControlledVehicle):
             self.target_lane_index = target_lane_index
 
         if planner is not None and planner["state"] is True:
-            if planner["type"] == "Polynomial":
+            diffusion_config = planner.get("Diffusion", {})
+
+            # STAGE_A_SPLINE_RUNTIME_V1
+            if diffusion_config.get("diffusion_execution_enabled", False):
+                dense_world = getattr(
+                    self,
+                    "latest_diffusion_dense_trajectory_world",
+                    None,
+                )
+                dense_heading = getattr(
+                    self,
+                    "latest_diffusion_dense_heading_world",
+                    None,
+                )
+                dense_time = getattr(
+                    self,
+                    "latest_diffusion_dense_time_s",
+                    None,
+                )
+                if dense_world is None or dense_heading is None or dense_time is None:
+                    raise RuntimeError(
+                        "Diffusion execution requested but no dense spline path "
+                        "was published for FOLLOWVehicle"
+                    )
+
+                dense_world = np.asarray(dense_world, dtype=np.float32)
+                dense_heading = np.asarray(dense_heading, dtype=np.float32)
+                dense_time = np.asarray(dense_time, dtype=np.float32)
+                if dense_world.ndim != 2 or dense_world.shape[1] != 2:
+                    raise RuntimeError(
+                        f"Invalid dense Diffusion world path shape: {dense_world.shape}"
+                    )
+
+                tracking_index = int(
+                    diffusion_config.get("spline_tracking_index", 10)
+                )
+                tracking_index = min(
+                    max(tracking_index, 0),
+                    dense_world.shape[0] - 1,
+                )
+                reference_position = dense_world[tracking_index]
+                ref_heading = float(dense_heading[tracking_index])
+
+                action = {
+                    "steering": self.trajectory_steering_control(
+                        reference_position,
+                        ref_heading,
+                    ),
+                    # Stage A intentionally keeps the existing longitudinal
+                    # command. Only the trajectory-to-steering bridge changes.
+                    "acceleration": acceleration,
+                }
+                path = {
+                    "x": dense_world[:, 0].tolist(),
+                    "y": dense_world[:, 1].tolist(),
+                    "heading": dense_heading.tolist(),
+                    "time_s": dense_time.tolist(),
+                    "source": "Diffusion-clamped-cubic-spline",
+                }
+                self.latest_planner_trajectory = None
+
+            elif planner["type"] == "Polynomial":
                 planning_origin_position = np.asarray(
                     self.position,
                     dtype=np.float32,
@@ -1816,23 +1877,40 @@ class FOLLOWVehicle(ControlledVehicle):
                         axis=-1,
                     )
 
-                    planner_trajectory = PlannerTrajectory.from_world_path(
+                    # STAGE3_DENSE_EXPERT_V2
+                    from highway_env.planner.expert_dense_trajectory import (
+                        build_native_dense_expert_targets,
+                    )
+
+                    horizon_steps = int(anchor_config.get("horizon_steps", 8))
+                    sparse_dt = float(anchor_config.get("trajectory_dt", 0.5))
+                    dense_contract = build_native_dense_expert_targets(
                         source_time_s=source_time_s,
                         world_xy=world_xy,
                         ego_position_world=planning_origin_position,
                         ego_heading_world=planning_origin_heading,
-                        horizon_steps=int(
-                            anchor_config.get("horizon_steps", 8)
-                        ),
-                        trajectory_dt=float(
-                            anchor_config.get("trajectory_dt", 0.5)
-                        ),
-                        source="Polynomial-aligned",
+                        horizon_steps=horizon_steps,
+                        sparse_dt=sparse_dt,
+                        dense_dt=0.1,
                     )
 
-                    self.latest_planner_trajectory = (
-                        planner_trajectory.as_dict()
+                    planner_trajectory = PlannerTrajectory(
+                        xy=dense_contract["sparse_xy"],
+                        time_s=dense_contract["sparse_time_s"],
+                        source="Polynomial-aligned-native10hz",
+                        ego_position_world=planning_origin_position,
+                        ego_heading_world=planning_origin_heading,
                     )
+                    trajectory_payload = planner_trajectory.as_dict()
+                    trajectory_payload.update(
+                        {
+                            "future_trajectory_dense": dense_contract["future_trajectory_dense"].copy(),
+                            "dense_time_s": dense_contract["dense_time_s"].copy(),
+                            "dense_dt": np.float32(dense_contract["dense_dt"]),
+                            "trajectory_horizon_s": np.float32(dense_contract["trajectory_horizon_s"]),
+                        }
+                    )
+                    self.latest_planner_trajectory = trajectory_payload
 
             else:
                 path = None

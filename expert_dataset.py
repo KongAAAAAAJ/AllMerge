@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import io
+import os
+import time
+import zipfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -36,8 +40,12 @@ BOOL_FEATURE_KEYS = {
     "mode_valid_mask",
 }
 
+# STAGE3_DENSE_EXPERT_V2
 TARGET_KEYS: Tuple[str, ...] = (
     "expert_trajectory_xy",
+    "future_trajectory_dense",
+    "dense_dt",
+    "trajectory_horizon_s",
     "target_mode",
     "target_semantic",
 )
@@ -67,6 +75,45 @@ class AllMergeExpertDatasetConfig:
     max_samples: Optional[int] = None
     shard_paths: Optional[Tuple[Path, ...]] = None
 
+
+
+# ALLMERGE_CONCURRENT_NPZ_READ_V1
+def _read_npz_fully_resilient(
+    shard_path: Path,
+) -> Dict[str, np.ndarray]:
+    """Read one NPZ shard into process-local memory and close file/ZIP handles."""
+    max_retries = max(
+        1,
+        int(os.environ.get("ALLMERGE_NPZ_READ_RETRIES", "5")),
+    )
+    retry_delay_s = max(
+        0.0,
+        float(os.environ.get("ALLMERGE_NPZ_RETRY_DELAY_MS", "50")) / 1000.0,
+    )
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            # One sequential filesystem read. ZIP parsing/decompression happens
+            # after the filesystem handle is already closed.
+            payload = shard_path.read_bytes()
+            with np.load(io.BytesIO(payload), allow_pickle=False) as raw_shard:
+                shard = {
+                    key: np.array(raw_shard[key], copy=True)
+                    for key in raw_shard.files
+                }
+            return shard
+        except (zipfile.BadZipFile, EOFError, OSError) as exc:
+            last_error = exc
+            if attempt >= max_retries:
+                break
+            time.sleep(retry_delay_s * attempt)
+
+    raise RuntimeError(
+        "Failed to read NPZ shard after "
+        f"{max_retries} attempts: {shard_path}. "
+        f"Last error: {type(last_error).__name__}: {last_error}"
+    ) from last_error
 
 class AllMergeExpertShardDataset(Dataset):
     """
@@ -209,6 +256,31 @@ class AllMergeExpertShardDataset(Dataset):
             ),
         }
 
+        # STAGE3_DENSE_EXPERT_V2: optional for backward compatibility with v1 shards.
+        if "future_trajectory_dense" in shard:
+            required_dense_keys = (
+                "dense_dt",
+                "trajectory_horizon_s",
+            )
+            missing_dense = [
+                key for key in required_dense_keys if key not in shard
+            ]
+            if missing_dense:
+                raise KeyError(
+                    f"{self.shard_paths[shard_idx]} dense target missing "
+                    f"{missing_dense}"
+                )
+            targets["trajectory_dense"] = torch.from_numpy(
+                np.asarray(shard["future_trajectory_dense"][sample_idx])
+            ).float()
+            targets["dense_dt"] = torch.as_tensor(
+                shard["dense_dt"][sample_idx], dtype=torch.float32
+            )
+            targets["trajectory_horizon_s"] = torch.as_tensor(
+                shard["trajectory_horizon_s"][sample_idx],
+                dtype=torch.float32,
+            )
+
         if self.config.include_diagnostics:
             diagnostics = {}
             for key in DIAGNOSTIC_TARGET_KEYS:
@@ -276,14 +348,11 @@ class AllMergeExpertShardDataset(Dataset):
             return self._cached_shard
 
         shard_path = self.shard_paths[shard_idx]
-        with np.load(
-            shard_path,
-            allow_pickle=False,
-        ) as raw_shard:
-            shard = {
-                key: raw_shard[key]
-                for key in raw_shard.files
-            }
+
+        # ALLMERGE_CONCURRENT_NPZ_READ_V1
+        # Decode from process-local bytes instead of holding a ZipFile against
+        # the shared on-disk archive during decompression.
+        shard = _read_npz_fully_resilient(shard_path)
 
         self._cached_shard_idx = shard_idx
         self._cached_shard = shard
