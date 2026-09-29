@@ -17,8 +17,7 @@ from .dense_supervision import (
 from .trajectory_spline import ClampedCubicTrajectorySpline
 from .guidance import (  # SPARSE_CURVATURE_GUIDANCE_V1
     SparseCurvatureGuidanceConfig,
-    apply_curvature_guidance,  # DENSE_CURVATURE_GUIDANCE_V1
-    dense_spline_curvature_statistics,  # DENSE_CURVATURE_GUIDANCE_V1
+    apply_sparse_curvature_guidance,
     sparse_curvature_statistics,
 )
 from .encoders import (
@@ -689,17 +688,13 @@ class StructuredDiffusionPlanner(nn.Module):
             # returns a new tensor and does not modify this snapshot in-place.
             predicted_x0_pre_guidance = predicted_x0
 
-            # DENSE_CURVATURE_GUIDANCE_V1: runtime-selectable sparse or 10 Hz spline guidance.
-            predicted_x0, guidance_step = apply_curvature_guidance(
+            # SPARSE_CURVATURE_GUIDANCE_V1: guide clean sparse x0 in physical coordinates.
+            predicted_x0, guidance_step = apply_sparse_curvature_guidance(
                 predicted_x0,
                 trajectory_scale=self.adapter.trajectory_scale,
                 mode_valid_mask=features["mode_valid_mask"],
                 config=self.sparse_curvature_guidance,
                 timestep=int(timestep),
-                trajectory_spline=self.dense_trajectory_spline,
-                start_velocity_xy=features["ego_state"][:, 0:2].float(),
-                mode_features=mode_tokens,
-                execution_residual_head=self.dense_residual_head,
             )
             if guidance_step is not None:
                 guidance_last = guidance_step
@@ -888,29 +883,6 @@ class StructuredDiffusionPlanner(nn.Module):
             + execution_residual_pre_guidance_m
         )
 
-        # DENSE_CURVATURE_GUIDANCE_V1: curvature of the actual 10 Hz execution spline.
-        selected_start_velocity_xy = features["ego_state"][:, 0:2].float()
-        selected_dense_curvature_stats_pre_guidance = (
-            dense_spline_curvature_statistics(
-                execution_sparse_pre_guidance,
-                trajectory_spline=self.dense_trajectory_spline,
-                start_velocity_xy=selected_start_velocity_xy,
-                curvature_limit=self.sparse_curvature_guidance.curvature_limit,
-                min_speed_mps=(
-                    self.sparse_curvature_guidance.dense_min_speed_mps
-                ),
-                eps=self.sparse_curvature_guidance.eps,
-            )
-        )
-        selected_dense_curvature_stats = dense_spline_curvature_statistics(
-            execution_sparse,
-            trajectory_spline=self.dense_trajectory_spline,
-            start_velocity_xy=selected_start_velocity_xy,
-            curvature_limit=self.sparse_curvature_guidance.curvature_limit,
-            min_speed_mps=self.sparse_curvature_guidance.dense_min_speed_mps,
-            eps=self.sparse_curvature_guidance.eps,
-        )
-
         # DENSE_ALL_MODE_EXECUTION_EVAL_V2
         # _runtime_base_sample() owns the reverse-diffusion locals. Reuse the
         # normalized all-mode x0 and mode features it explicitly returns rather
@@ -1014,23 +986,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "selected_sparse_curvature_violation_ratio": base[
                 "selected_sparse_curvature_violation_ratio"
             ],
-            # DENSE_CURVATURE_GUIDANCE_V1
-            "selected_dense_max_abs_curvature_pre_guidance": (
-                selected_dense_curvature_stats_pre_guidance[
-                    "max_abs_curvature"
-                ]
-            ),
-            "selected_dense_curvature_violation_ratio_pre_guidance": (
-                selected_dense_curvature_stats_pre_guidance[
-                    "violation_ratio"
-                ]
-            ),
-            "selected_dense_max_abs_curvature": (
-                selected_dense_curvature_stats["max_abs_curvature"]
-            ),
-            "selected_dense_curvature_violation_ratio": (
-                selected_dense_curvature_stats["violation_ratio"]
-            ),
         }
 
     # INFERENCE_CONSISTENT_RESIDUAL_V1

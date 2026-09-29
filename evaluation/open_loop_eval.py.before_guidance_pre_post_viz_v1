@@ -146,9 +146,6 @@ CSV_FIELDS = [
     "guidance_curvature_loss_before",
     "guidance_curvature_loss_after",
     "guidance_update_l2_m",
-    # GUIDANCE_PRE_POST_VIZ_V1
-    "selected_sparse_max_abs_curvature_pre_guidance",
-    "selected_sparse_curvature_violation_ratio_pre_guidance",
     "selected_sparse_max_abs_curvature",
     "selected_sparse_curvature_violation_ratio",
 ]
@@ -899,33 +896,6 @@ def evaluate_open_loop(
                                     output["trajectory"],
                                 )[i].detach().cpu().numpy()
                             ),
-                            # GUIDANCE_PRE_POST_VIZ_V1: when guidance is ON,
-                            # overlay the execution control points decoded from
-                            # the final-step pre-guidance x0 snapshot.
-                            predicted_trajectory_pre_guidance=(
-                                output.get(
-                                    "trajectory_execution_sparse_pre_guidance",
-                                    output.get(
-                                        "trajectory_pre_guidance",
-                                        output["trajectory"],
-                                    ),
-                                )[i].detach().cpu().numpy()
-                            ),
-                            guidance_enabled=bool(guidance_enabled),
-                            guidance_update_l2_m=_float(
-                                output["guidance_update_l2_m"],
-                                i,
-                            ),
-                            max_abs_curvature_pre_guidance=_float(
-                                output[
-                                    "selected_sparse_max_abs_curvature_pre_guidance"
-                                ],
-                                i,
-                            ),
-                            max_abs_curvature_post_guidance=_float(
-                                output["selected_sparse_max_abs_curvature"],
-                                i,
-                            ),
                             selected_ade=_float(
                                 dense_metrics["execution_dense_ADE"],
                                 i,
@@ -1128,19 +1098,6 @@ def evaluate_open_loop(
                         "guidance_update_l2_m": _float(
                             output["guidance_update_l2_m"], i
                         ),
-                        # GUIDANCE_PRE_POST_VIZ_V1
-                        "selected_sparse_max_abs_curvature_pre_guidance": _float(
-                            output[
-                                "selected_sparse_max_abs_curvature_pre_guidance"
-                            ],
-                            i,
-                        ),
-                        "selected_sparse_curvature_violation_ratio_pre_guidance": _float(
-                            output[
-                                "selected_sparse_curvature_violation_ratio_pre_guidance"
-                            ],
-                            i,
-                        ),
                         "selected_sparse_max_abs_curvature": _float(
                             output["selected_sparse_max_abs_curvature"], i
                         ),
@@ -1305,13 +1262,6 @@ def evaluate_open_loop(
         ),
         "mean_guidance_update_l2_m": _mean(
             rows, "guidance_update_l2_m"
-        ),
-        # GUIDANCE_PRE_POST_VIZ_V1
-        "mean_selected_sparse_max_abs_curvature_pre_guidance": _mean(
-            rows, "selected_sparse_max_abs_curvature_pre_guidance"
-        ),
-        "mean_selected_sparse_curvature_violation_ratio_pre_guidance": _mean(
-            rows, "selected_sparse_curvature_violation_ratio_pre_guidance"
         ),
         "mean_selected_sparse_max_abs_curvature": _mean(
             rows, "selected_sparse_max_abs_curvature"

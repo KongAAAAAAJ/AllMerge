@@ -26,12 +26,6 @@ class TrajectoryVisualizationSample:
     expert_trajectory_10hz: Optional[object] = None
     expert_trajectory_10hz_time_s: Optional[object] = None
     features_cpu: Optional[Dict[str, torch.Tensor]] = None
-    # GUIDANCE_PRE_POST_VIZ_V1: optional paired visualization fields.
-    predicted_trajectory_pre_guidance: Optional[np.ndarray] = None
-    guidance_enabled: bool = False
-    guidance_update_l2_m: Optional[float] = None
-    max_abs_curvature_pre_guidance: Optional[float] = None
-    max_abs_curvature_post_guidance: Optional[float] = None
 
 
 # OPEN_LOOP_DENSE_VIZ_V1: visualization
@@ -302,7 +296,6 @@ def plot_random_trajectory_gallery(
 
     fig, axes = plt.subplots(3, 3, figsize=(13.2, 11.0))
     flat_axes = axes.reshape(-1)
-    any_guidance_pair = False
 
     for axis_index, ax in enumerate(flat_axes):
         if axis_index >= len(samples):
@@ -311,22 +304,11 @@ def plot_random_trajectory_gallery(
 
         sample = samples[axis_index]
         gt_sparse = np.asarray(sample.expert_trajectory, dtype=np.float64)[:, :2]
-        pred_post = np.asarray(sample.predicted_trajectory, dtype=np.float64)[:, :2]
-        pred_pre = _optional_xy(sample.predicted_trajectory_pre_guidance)
+        pred_sparse = np.asarray(sample.predicted_trajectory, dtype=np.float64)[:, :2]
 
-        show_guidance_pair = bool(
-            sample.guidance_enabled
-            and pred_pre is not None
-        )
-        any_guidance_pair = any_guidance_pair or show_guidance_pair
-
-        points = min(len(gt_sparse), len(pred_post))
-        if show_guidance_pair:
-            points = min(points, len(pred_pre))
+        points = min(len(gt_sparse), len(pred_sparse))
         gt_sparse = gt_sparse[:points]
-        pred_post = pred_post[:points]
-        if show_guidance_pair:
-            pred_pre = pred_pre[:points]
+        pred_sparse = pred_sparse[:points]
 
         sparse_time_s = sample.trajectory_time_s
         if sparse_time_s is not None:
@@ -335,6 +317,8 @@ def plot_random_trajectory_gallery(
                 dtype=np.float64,
             ).reshape(-1)[:points]
 
+        # True Polynomial GT line. This exists only in datasets recollected
+        # after OPEN_LOOP_DENSE_VIZ_V1; old shards are intentionally not faked.
         gt_dense = _optional_xy(sample.expert_trajectory_10hz)
         gt_dense_time = sample.expert_trajectory_10hz_time_s
         if gt_dense is not None:
@@ -364,48 +348,21 @@ def plot_random_trajectory_gallery(
                 va="bottom",
             )
 
-        if show_guidance_pair:
-            # GUIDANCE_PRE_POST_VIZ_V1: both curves use exactly the same
-            # clamped-cubic interpolation and 10 Hz sampling.  Therefore the
-            # visible difference comes from the guidance-modified sparse
-            # control points, not from a different smoothing method.
-            _, pre_spline = _clamped_cubic_spline_10hz(
-                pred_pre,
-                sparse_time_s,
-                sample_dt_s=0.1,
-            )
-            _, post_spline = _clamped_cubic_spline_10hz(
-                pred_post,
-                sparse_time_s,
-                sample_dt_s=0.1,
-            )
-            ax.plot(
-                pre_spline[:, 0],
-                pre_spline[:, 1],
-                linewidth=1.5,
-                linestyle="--",
-                alpha=0.78,
-                label="Pre-guidance spline (10 Hz)",
-            )
-            ax.plot(
-                post_spline[:, 0],
-                post_spline[:, 1],
-                linewidth=2.0,
-                label="Post-guidance spline (10 Hz)",
-            )
-        else:
-            _, post_spline = _clamped_cubic_spline_10hz(
-                pred_post,
-                sparse_time_s,
-                sample_dt_s=0.1,
-            )
-            ax.plot(
-                post_spline[:, 0],
-                post_spline[:, 1],
-                linewidth=1.9,
-                label="Clamped cubic spline (10 Hz)",
-            )
+        # Predicted execution curve: clamped cubic interpolation through all
+        # sparse diffusion outputs, sampled at the same 10 Hz visualization rate.
+        _, pred_spline = _clamped_cubic_spline_10hz(
+            pred_sparse,
+            sparse_time_s,
+            sample_dt_s=0.1,
+        )
+        ax.plot(
+            pred_spline[:, 0],
+            pred_spline[:, 1],
+            linewidth=1.9,
+            label="Clamped cubic spline (10 Hz)",
+        )
 
+        # Sparse points are MARKERS ONLY: never connect them directly.
         ax.scatter(
             gt_sparse[:, 0],
             gt_sparse[:, 1],
@@ -414,75 +371,39 @@ def plot_random_trajectory_gallery(
             label="GT sparse (0.5 s)",
             zorder=3,
         )
-
-        if show_guidance_pair:
-            ax.scatter(
-                pred_pre[:, 0],
-                pred_pre[:, 1],
-                s=23,
-                marker="x",
-                alpha=0.78,
-                label="Pre-guidance sparse (0.5 s)",
-                zorder=4,
-            )
-            ax.scatter(
-                pred_post[:, 0],
-                pred_post[:, 1],
-                s=22,
-                marker="+",
-                label="Post-guidance sparse (0.5 s)",
-                zorder=5,
-            )
-        else:
-            ax.scatter(
-                pred_post[:, 0],
-                pred_post[:, 1],
-                s=23,
-                marker="x",
-                label="Prediction sparse (0.5 s)",
-                zorder=4,
-            )
-
+        ax.scatter(
+            pred_sparse[:, 0],
+            pred_sparse[:, 1],
+            s=23,
+            marker="x",
+            label="Prediction sparse (0.5 s)",
+            zorder=4,
+        )
         ax.scatter(
             [0.0],
             [0.0],
             s=20,
             marker="s",
             label="Ego",
-            zorder=6,
+            zorder=5,
         )
 
-        title = (
+        ax.set_title(
             f"sample={sample.sample_index}  "
             f"ADE={sample.selected_ade:.2f} m  "
-            f"FDE={sample.selected_fde:.2f} m"
+            f"FDE={sample.selected_fde:.2f} m",
+            fontsize=9.5,
         )
-        if show_guidance_pair:
-            pre_kappa = sample.max_abs_curvature_pre_guidance
-            post_kappa = sample.max_abs_curvature_post_guidance
-            update = sample.guidance_update_l2_m
-            if pre_kappa is not None and post_kappa is not None:
-                title += (
-                    f"\nmax|k| {pre_kappa:.4f}->{post_kappa:.4f} 1/m"
-                )
-            if update is not None:
-                title += f"  update={update:.4f} m"
-
-        ax.set_title(title, fontsize=9.1)
         ax.set_xlabel("x [m]")
         ax.set_ylabel("y [m]")
         ax.margins(y=0.06)
         ax.set_aspect("auto")
         ax.grid(alpha=0.22)
         if axis_index == 0:
-            ax.legend(fontsize=7.1, loc="best")
+            ax.legend(fontsize=7.5, loc="best")
 
     fig.suptitle(
-        (
-            "Random 9-sample: pre/post-guidance sparse and 10 Hz trajectories"
-            if any_guidance_pair
-            else "Random 9-sample: sparse predictions and 10 Hz trajectories"
-        ),
+        "Random 9-sample: sparse predictions and 10 Hz trajectories",
         fontsize=14,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.97))
