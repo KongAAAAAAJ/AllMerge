@@ -70,14 +70,6 @@ class DiffusionPlannerRuntime:
             .to(self.device)
         )
 
-        # SPARSE_CURVATURE_GUIDANCE_V1: inference-only guidance, excluded from checkpoint config.
-        self.guidance_config = dict(
-            runtime_config.get("guidance", {})
-        )
-        self.model.configure_sparse_curvature_guidance(
-            self.guidance_config
-        )
-
         self.checkpoint = (
             runtime_config.get(
                 "checkpoint"

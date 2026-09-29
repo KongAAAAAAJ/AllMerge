@@ -141,13 +141,6 @@ CSV_FIELDS = [
     # DENSE_EXECUTION_SAFETY_PROXY_V1
     "execution_collision_proxy",
     "execution_offroad_proxy",
-    # SPARSE_CURVATURE_GUIDANCE_V1
-    "guidance_applied_steps",
-    "guidance_curvature_loss_before",
-    "guidance_curvature_loss_after",
-    "guidance_update_l2_m",
-    "selected_sparse_max_abs_curvature",
-    "selected_sparse_curvature_violation_ratio",
 ]
 
 
@@ -489,12 +482,6 @@ def evaluate_open_loop(
     miss_threshold_m: float = 2.0,
     collision_distance_m: float = 2.5,
     offroad_distance_m: float = 0.0,
-    guidance_enabled: bool = False,
-    guidance_scale: float = 0.05,
-    guidance_curvature_limit: float = 0.02,
-    guidance_grad_clip_norm: float = 1.0,
-    guidance_timesteps: Optional[tuple[int, ...]] = None,
-    guidance_preserve_endpoint: bool = True,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -525,15 +512,6 @@ def evaluate_open_loop(
         "allow_random_weights": False,
         "strict_checkpoint": bool(strict_checkpoint),
         "deterministic_seed": inference_seed,
-        # SPARSE_CURVATURE_GUIDANCE_V1
-        "guidance": {
-            "enabled": bool(guidance_enabled),
-            "scale": float(guidance_scale),
-            "curvature_limit": float(guidance_curvature_limit),
-            "grad_clip_norm": float(guidance_grad_clip_norm),
-            "apply_timesteps": guidance_timesteps,
-            "preserve_endpoint": bool(guidance_preserve_endpoint),
-        },
     }
     if checkpoint_model_config:
         runtime_config["model"] = checkpoint_model_config
@@ -1085,25 +1063,6 @@ def evaluate_open_loop(
                             if execution_offroad_flag is None
                             else bool(execution_offroad_flag)
                         ),
-                        # SPARSE_CURVATURE_GUIDANCE_V1
-                        "guidance_applied_steps": _float(
-                            output["guidance_applied_steps"], i
-                        ),
-                        "guidance_curvature_loss_before": _float(
-                            output["guidance_curvature_loss_before"], i
-                        ),
-                        "guidance_curvature_loss_after": _float(
-                            output["guidance_curvature_loss_after"], i
-                        ),
-                        "guidance_update_l2_m": _float(
-                            output["guidance_update_l2_m"], i
-                        ),
-                        "selected_sparse_max_abs_curvature": _float(
-                            output["selected_sparse_max_abs_curvature"], i
-                        ),
-                        "selected_sparse_curvature_violation_ratio": _float(
-                            output["selected_sparse_curvature_violation_ratio"], i
-                        ),
                     }
                 )
 
@@ -1246,28 +1205,6 @@ def evaluate_open_loop(
         "split": split,
         "output_csv": str(
             output_csv.resolve()
-        ),
-        # SPARSE_CURVATURE_GUIDANCE_V1
-        "guidance_enabled": bool(guidance_enabled),
-        "guidance_scale": float(guidance_scale),
-        "guidance_curvature_limit": float(guidance_curvature_limit),
-        "guidance_grad_clip_norm": float(guidance_grad_clip_norm),
-        "guidance_timesteps": (
-            "all" if guidance_timesteps is None
-            else tuple(guidance_timesteps)
-        ),
-        "guidance_preserve_endpoint": bool(guidance_preserve_endpoint),
-        "mean_guidance_applied_steps": _mean(
-            rows, "guidance_applied_steps"
-        ),
-        "mean_guidance_update_l2_m": _mean(
-            rows, "guidance_update_l2_m"
-        ),
-        "mean_selected_sparse_max_abs_curvature": _mean(
-            rows, "selected_sparse_max_abs_curvature"
-        ),
-        "mean_selected_sparse_curvature_violation_ratio": _mean(
-            rows, "selected_sparse_curvature_violation_ratio"
         ),
     }
     # EVAL_VIZ_V2_SUMMARY

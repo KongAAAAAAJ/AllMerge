@@ -15,11 +15,6 @@ from .dense_supervision import (
     dense_timestep_weight,
 )
 from .trajectory_spline import ClampedCubicTrajectorySpline
-from .guidance import (  # SPARSE_CURVATURE_GUIDANCE_V1
-    SparseCurvatureGuidanceConfig,
-    apply_sparse_curvature_guidance,
-    sparse_curvature_statistics,
-)
 from .encoders import (
     SceneEncoding,
     StructuredSceneEncoder,
@@ -561,18 +556,6 @@ class StructuredDiffusionPlanner(nn.Module):
             max_residual_y_m=float(config.dense_residual_max_y_m),
         )
 
-        # SPARSE_CURVATURE_GUIDANCE_V1
-        # Runtime-only: no parameters/buffers are added to the checkpoint.
-        self.sparse_curvature_guidance = SparseCurvatureGuidanceConfig()
-
-    def configure_sparse_curvature_guidance(
-        self,
-        guidance_config: Optional[Dict[str, object]] = None,
-    ) -> None:
-        self.sparse_curvature_guidance = (
-            SparseCurvatureGuidanceConfig.from_mapping(guidance_config)
-        )
-
     @staticmethod
     def _masked_logits(
         logits: torch.Tensor,
@@ -655,8 +638,6 @@ class StructuredDiffusionPlanner(nn.Module):
         final_logits = None
         final_x0 = None
         final_mode_tokens = None
-        guidance_last = None
-        guidance_applied_steps = 0
 
         timesteps = list(self.config.inference_timesteps)
         if not timesteps:
@@ -677,19 +658,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 scene,
                 return_mode_tokens=True,
             )
-
-            # SPARSE_CURVATURE_GUIDANCE_V1: guide clean sparse x0 in physical coordinates.
-            predicted_x0, guidance_step = apply_sparse_curvature_guidance(
-                predicted_x0,
-                trajectory_scale=self.adapter.trajectory_scale,
-                mode_valid_mask=features["mode_valid_mask"],
-                config=self.sparse_curvature_guidance,
-                timestep=int(timestep),
-            )
-            if guidance_step is not None:
-                guidance_last = guidance_step
-                guidance_applied_steps += 1
-
             final_x0 = predicted_x0
             final_logits = logits
             final_mode_tokens = mode_tokens
@@ -742,21 +710,6 @@ class StructuredDiffusionPlanner(nn.Module):
             index=feature_index,
         ).squeeze(1)
 
-        # SPARSE_CURVATURE_GUIDANCE_V1: selected sparse-trajectory shape diagnostics.
-        selected_curvature_stats = sparse_curvature_statistics(
-            best,
-            curvature_limit=self.sparse_curvature_guidance.curvature_limit,
-            min_segment_length_m=(
-                self.sparse_curvature_guidance.min_segment_length_m
-            ),
-            eps=self.sparse_curvature_guidance.eps,
-        )
-        zero_diag = torch.zeros(
-            (batch,),
-            dtype=best.dtype,
-            device=best.device,
-        )
-
         return {
             "trajectory": best,
             "trajectory_candidates": candidates,
@@ -772,34 +725,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "selected_mode_feature": selected_mode_feature,
             "trajectory_noisy_initial": self.adapter.denormalize_trajectory(
                 initial_noisy
-            ),
-            # SPARSE_CURVATURE_GUIDANCE_V1
-            "guidance_applied_steps": torch.full(
-                (batch,),
-                float(guidance_applied_steps),
-                dtype=best.dtype,
-                device=best.device,
-            ),
-            "guidance_curvature_loss_before": (
-                guidance_last["loss_before"]
-                if guidance_last is not None
-                else zero_diag
-            ),
-            "guidance_curvature_loss_after": (
-                guidance_last["loss_after"]
-                if guidance_last is not None
-                else zero_diag
-            ),
-            "guidance_update_l2_m": (
-                guidance_last["update_l2_m"]
-                if guidance_last is not None
-                else zero_diag
-            ),
-            "selected_sparse_max_abs_curvature": (
-                selected_curvature_stats["max_abs_curvature"]
-            ),
-            "selected_sparse_curvature_violation_ratio": (
-                selected_curvature_stats["violation_ratio"]
             ),
         }
 
@@ -894,21 +819,6 @@ class StructuredDiffusionPlanner(nn.Module):
             ],
             "trajectory_mode_idx": base["trajectory_mode_idx"],
             "trajectory_noisy_initial": base["trajectory_noisy_initial"],
-            # SPARSE_CURVATURE_GUIDANCE_V1
-            "guidance_applied_steps": base["guidance_applied_steps"],
-            "guidance_curvature_loss_before": base[
-                "guidance_curvature_loss_before"
-            ],
-            "guidance_curvature_loss_after": base[
-                "guidance_curvature_loss_after"
-            ],
-            "guidance_update_l2_m": base["guidance_update_l2_m"],
-            "selected_sparse_max_abs_curvature": base[
-                "selected_sparse_max_abs_curvature"
-            ],
-            "selected_sparse_curvature_violation_ratio": base[
-                "selected_sparse_curvature_violation_ratio"
-            ],
         }
 
     # INFERENCE_CONSISTENT_RESIDUAL_V1

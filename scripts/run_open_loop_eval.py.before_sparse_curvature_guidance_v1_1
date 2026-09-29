@@ -139,56 +139,11 @@ def parse_args() -> argparse.Namespace:
             "The old --offroad-distance-m spelling remains as an alias."
         ),
     )
-    # SPARSE_CURVATURE_GUIDANCE_V1
-    parser.add_argument(
-        "--guidance-enabled",
-        action="store_true",
-        help="Enable inference-time sparse curvature guidance.",
-    )
-    parser.add_argument(
-        "--guidance-scale",
-        type=float,
-        default=0.05,
-        help="Guidance gradient step scale.",
-    )
-    parser.add_argument(
-        "--guidance-curvature-limit",
-        type=float,
-        default=0.02,
-        help="Sparse trajectory curvature limit in 1/m.",
-    )
-    parser.add_argument(
-        "--guidance-grad-clip-norm",
-        type=float,
-        default=1.0,
-        help="Guidance gradient norm clip.",
-    )
-    parser.add_argument(
-        "--guidance-timesteps",
-        type=str,
-        default="all",
-        help='Comma-separated reverse steps, e.g. "8,0"; default all.',
-    )
-    parser.add_argument(
-        "--guidance-allow-endpoint-move",
-        action="store_true",
-        help="Allow guidance to move the final sparse waypoint.",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    guidance_text = str(args.guidance_timesteps).strip().lower()
-    guidance_timesteps = (
-        None
-        if guidance_text in {"", "all", "none"}
-        else tuple(
-            int(item.strip())
-            for item in guidance_text.split(",")
-            if item.strip()
-        )
-    )
     summary = evaluate_open_loop(
         checkpoint=args.checkpoint,
         dataset_root=args.dataset_root,
@@ -207,13 +162,6 @@ def main() -> int:
         miss_threshold_m=args.miss_threshold_m,
         collision_distance_m=args.collision_distance_m,
         offroad_distance_m=args.offroad_distance_m,
-        # SPARSE_CURVATURE_GUIDANCE_V1
-        guidance_enabled=args.guidance_enabled,
-        guidance_scale=args.guidance_scale,
-        guidance_curvature_limit=args.guidance_curvature_limit,
-        guidance_grad_clip_norm=args.guidance_grad_clip_norm,
-        guidance_timesteps=guidance_timesteps,
-        guidance_preserve_endpoint=not args.guidance_allow_endpoint_move,
     )
     print_summary(summary)
     return 0
