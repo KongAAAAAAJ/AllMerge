@@ -12,15 +12,15 @@ from highway_env.envs.scenarios.curved_lane_change_env import CurvedLaneChangeEn
 from highway_env.envs.scenarios.merge_in_env import MergeInEnv
 from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
 from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChangeEnv
-from highway_env.planner.diffusion.config import StructuredDiffusionConfig
+from highway_env.planner.diffusion.config import build_structured_diffusion_config
 from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
+from pretraining.checkpoint_io import load_checkpoint_file
 from highway_env.planner.diffusion.tensor_adapter import BOOL_KEYS, FLOAT_KEYS, PlannerTensorAdapter
 from highway_env.planner.diffusion.grpo import (
     CandidateRewardAdapter,
     GRPOConfig,
     GRPOTrainer,
     fake_progress_reward,
-    load_pretrained,
     resolve_reward_evaluator,
     save_grpo_checkpoint,
 )
@@ -395,10 +395,18 @@ def parse_args() -> argparse.Namespace:
 
 def _build_trainer(args: argparse.Namespace):
     device = torch.device(args.device)
-    model_config = StructuredDiffusionConfig()
+    state_dict, stored_model_config = load_checkpoint_file(
+        args.checkpoint, map_location="cpu"
+    )
+    model_config = build_structured_diffusion_config(**stored_model_config)
     adapter = PlannerTensorAdapter(model_config, device)
     model = StructuredDiffusionPlanner(model_config, adapter).to(device)
-    load_info = load_pretrained(model, args.checkpoint, strict=True)
+    load_result = model.load_state_dict(state_dict, strict=True)
+    load_info = {
+        "missing_keys": list(load_result.missing_keys),
+        "unexpected_keys": list(load_result.unexpected_keys),
+        "reg_head_type": model_config.reg_head_type,
+    }
     print(f"[checkpoint] loaded={args.checkpoint} {load_info}")
 
     evaluator = fake_progress_reward if args.fake_reward else resolve_reward_evaluator(args.reward_fn)

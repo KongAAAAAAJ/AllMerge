@@ -78,6 +78,13 @@ def parse_args():
     # DENSE_RESIDUAL_BOUND_CLI_V1
     parser.add_argument("--dense-residual-max-x-m", type=float, default=None)
     parser.add_argument("--dense-residual-max-y-m", type=float, default=None)
+    # GRU_REG_HEAD_COARSE_V2
+    parser.add_argument(
+        "--reg-head-type",
+        choices=("mlp", "gru"),
+        default=None,
+        help="Trajectory head ablation: original MLP or full-coarse-conditioned GRU.",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +93,10 @@ def main() -> int:
     cfg = load_config(args.config)
     model_cfg = dict(cfg.get("model") or {})
     train_cfg = dict(cfg.get("training") or {})
+
+    # GRU_REG_HEAD_COARSE_V2
+    if args.reg_head_type is not None:
+        model_cfg["reg_head_type"] = str(args.reg_head_type).lower()
 
     # DENSE_RESIDUAL_BOUND_CLI_V1
     if args.dense_residual_max_x_m is not None:
@@ -198,6 +209,7 @@ def main() -> int:
         f"[pretrain] backend=pure_torch torch={torch.__version__} "
         f"cuda={torch.cuda.is_available()}"
     )
+    print(f"[pretrain] reg_head_type={model_cfg.get('reg_head_type', 'mlp')}")
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "

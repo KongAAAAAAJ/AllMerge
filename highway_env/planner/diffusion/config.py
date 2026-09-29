@@ -113,6 +113,12 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
+    # GRU_REG_HEAD_COARSE_V2
+    # ``mlp`` preserves the original regression head. ``gru`` replaces only
+    # the final regression head and directly consumes the complete time-aligned
+    # coarse decision trajectory. Train/runtime/GRPO use identical conditioning.
+    reg_head_type: str = "mlp"
+
     # DENSE_RESIDUAL_HEAD_V2
     # A small execution-correction head is trained only by L_dense.
     # Its inputs are stop-gradient diffusion mode features plus the selected
@@ -148,6 +154,13 @@ class StructuredDiffusionConfig:
         if self.max_residual_y_m <= 0.0:
             raise ValueError(
                 "max_residual_y_m must be positive"
+            )
+
+        self.reg_head_type = str(self.reg_head_type).lower()
+        if self.reg_head_type not in {"mlp", "gru"}:
+            raise ValueError(
+                "reg_head_type must be one of {'mlp', 'gru'}, "
+                f"got {self.reg_head_type!r}"
             )
 
         # DENSE_RESIDUAL_HEAD_V2
@@ -189,6 +202,8 @@ def build_structured_diffusion_config(
             raise KeyError(
                 f"Unknown StructuredDiffusionConfig field: {key}"
             )
+        if key == "feature_scales" and isinstance(value, dict):
+            value = FeatureScaleConfig(**value)
         setattr(cfg, key, value)
 
     cfg.validate()

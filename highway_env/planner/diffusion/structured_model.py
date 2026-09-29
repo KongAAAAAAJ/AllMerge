@@ -368,20 +368,38 @@ class StructuredTrajectoryDenoiser(nn.Module):
             ]
         )
 
-        self.reg_head = nn.Sequential(
-            nn.LayerNorm(
-                config.d_model
-            ),
-            nn.Linear(
-                config.d_model,
-                config.d_ffn,
-            ),
-            nn.GELU(),
-            nn.Linear(
-                config.d_ffn,
-                trajectory_dim,
-            ),
-        )
+        # GRU_REG_HEAD_COARSE_V2
+        # MLP path is the original baseline. GRU consumes the complete coarse
+        # trajectory point-by-point: input_t = [mode_token, coarse_x_t, coarse_y_t].
+        self.reg_head_type = str(config.reg_head_type).lower()
+        if self.reg_head_type == "mlp":
+            self.reg_head = nn.Sequential(
+                nn.LayerNorm(
+                    config.d_model
+                ),
+                nn.Linear(
+                    config.d_model,
+                    config.d_ffn,
+                ),
+                nn.GELU(),
+                nn.Linear(
+                    config.d_ffn,
+                    trajectory_dim,
+                ),
+            )
+            self.reg_gru_norm = None
+            self.reg_out = None
+        elif self.reg_head_type == "gru":
+            self.reg_gru_norm = nn.LayerNorm(config.d_model)
+            self.reg_head = nn.GRU(
+                input_size=config.d_model + 2,
+                hidden_size=config.d_model,
+                num_layers=1,
+                batch_first=True,
+            )
+            self.reg_out = nn.Linear(config.d_model, 2)
+        else:
+            raise ValueError(f"Unsupported reg_head_type={self.reg_head_type!r}")
 
         self.cls_head = nn.Sequential(
             nn.LayerNorm(
@@ -404,6 +422,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
         timestep: torch.Tensor,
         scene: SceneEncoding,
         *,
+        coarse_trajectory_norm: Optional[torch.Tensor] = None,
         return_mode_tokens: bool = False,
     ):
         batch, modes, steps, dims = (
@@ -442,14 +461,42 @@ class StructuredTrajectoryDenoiser(nn.Module):
                 time_embed,
             )
 
-        residual = self.reg_head(
-            mode_tokens
-        ).reshape(
-            batch,
-            modes,
-            steps,
-            dims,
-        )
+        if self.reg_head_type == "mlp":
+            residual = self.reg_head(
+                mode_tokens
+            ).reshape(
+                batch,
+                modes,
+                steps,
+                dims,
+            )
+        else:
+            if coarse_trajectory_norm is None:
+                raise ValueError(
+                    "coarse_trajectory_norm is required when reg_head_type='gru'"
+                )
+            coarse = coarse_trajectory_norm.to(
+                device=mode_tokens.device,
+                dtype=mode_tokens.dtype,
+            )
+            expected = (batch, modes, steps, 2)
+            if tuple(coarse.shape) != expected:
+                raise ValueError(
+                    "coarse_trajectory_norm must be [B,M,T,2]: "
+                    f"got {tuple(coarse.shape)}, expected {expected}"
+                )
+
+            token = self.reg_gru_norm(mode_tokens)
+            token_seq = token[:, :, None, :].expand(-1, -1, steps, -1)
+            gru_input = torch.cat((token_seq, coarse), dim=-1).reshape(
+                batch * modes,
+                steps,
+                self.config.d_model + 2,
+            )
+            gru_output, _ = self.reg_head(gru_input)
+            residual = self.reg_out(gru_output).reshape(
+                batch, modes, steps, dims
+            )
 
         # Residual semantics remain unchanged:
         #
@@ -656,6 +703,7 @@ class StructuredDiffusionPlanner(nn.Module):
                 sample,
                 t_batch,
                 scene,
+                coarse_trajectory_norm=clean_anchor_norm,
                 return_mode_tokens=True,
             )
             final_x0 = predicted_x0
@@ -1075,11 +1123,14 @@ class StructuredDiffusionPlanner(nn.Module):
             timesteps,
         )
 
+        # GRU_REG_HEAD_COARSE_V2: no GT-navigation shortcut.
+        # Training and inference both condition on the complete coarse trajectory.
         predicted_x0_norm, logits = (
             self.denoiser(
                 noisy,
                 timesteps,
                 scene,
+                coarse_trajectory_norm=clean_anchor_norm,
             )
         )
 
