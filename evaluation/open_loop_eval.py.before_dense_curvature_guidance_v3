@@ -23,7 +23,6 @@ from evaluation.open_loop_visualization import (
     plot_metrics_table,
     plot_sparse_dense_metrics_table,
     plot_random_trajectory_gallery,
-    plot_random_curvature_profile,  # DENSE_CURVATURE_GUIDANCE_V3
     plot_training_loss_curve,
 )
 from highway_env.planner.diffusion.mode_assignment import (
@@ -147,14 +146,6 @@ CSV_FIELDS = [
     "guidance_curvature_loss_before",
     "guidance_curvature_loss_after",
     "guidance_update_l2_m",
-    "guidance_inner_iterations_used",
-    "guidance_backtracking_reductions",
-    "guidance_bound_loss_before",
-    "guidance_bound_loss_after",
-    "guidance_peak_loss_before",
-    "guidance_peak_loss_after",
-    "guidance_dkappa_loss_before",
-    "guidance_dkappa_loss_after",
     # GUIDANCE_PRE_POST_VIZ_V1
     "selected_sparse_max_abs_curvature_pre_guidance",
     "selected_sparse_curvature_violation_ratio_pre_guidance",
@@ -524,19 +515,6 @@ def evaluate_open_loop(
     guidance_dense_step_m: float = 0.20,
     guidance_dense_topk_fraction: float = 0.20,
     guidance_dense_min_segment_m: float = 0.25,
-    # DENSE_CURVATURE_GUIDANCE_V3
-    guidance_dense_inner_iters: int = 5,
-    guidance_dense_backtracking_enabled: bool = True,
-    guidance_dense_backtracking_factor: float = 0.5,
-    guidance_dense_backtracking_max_trials: int = 4,
-    guidance_dense_min_step_m: float = 0.025,
-    guidance_dense_max_total_move_m: float = 0.50,
-    guidance_dense_bound_weight: float = 1.0,
-    guidance_dense_peak_weight: float = 0.5,
-    guidance_dense_dkappa_weight: float = 0.1,
-    guidance_dense_peak_alpha: float = 10.0,
-    guidance_dense_residual_gradient_enabled: bool = True,
-    guidance_dense_normal_projection_enabled: bool = True,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -582,19 +560,6 @@ def evaluate_open_loop(
             "dense_step_m": float(guidance_dense_step_m),
             "dense_topk_fraction": float(guidance_dense_topk_fraction),
             "dense_min_segment_m": float(guidance_dense_min_segment_m),
-            # DENSE_CURVATURE_GUIDANCE_V3
-            "dense_inner_iters": int(guidance_dense_inner_iters),
-            "dense_backtracking_enabled": bool(guidance_dense_backtracking_enabled),
-            "dense_backtracking_factor": float(guidance_dense_backtracking_factor),
-            "dense_backtracking_max_trials": int(guidance_dense_backtracking_max_trials),
-            "dense_min_step_m": float(guidance_dense_min_step_m),
-            "dense_max_total_move_m": float(guidance_dense_max_total_move_m),
-            "dense_bound_weight": float(guidance_dense_bound_weight),
-            "dense_peak_weight": float(guidance_dense_peak_weight),
-            "dense_dkappa_weight": float(guidance_dense_dkappa_weight),
-            "dense_peak_alpha": float(guidance_dense_peak_alpha),
-            "dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
-            "dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
         },
     }
     if checkpoint_model_config:
@@ -1207,14 +1172,6 @@ def evaluate_open_loop(
                         "guidance_update_l2_m": _float(
                             output["guidance_update_l2_m"], i
                         ),
-                        "guidance_inner_iterations_used": _float(output["guidance_inner_iterations_used"], i),
-                        "guidance_backtracking_reductions": _float(output["guidance_backtracking_reductions"], i),
-                        "guidance_bound_loss_before": _float(output["guidance_bound_loss_before"], i),
-                        "guidance_bound_loss_after": _float(output["guidance_bound_loss_after"], i),
-                        "guidance_peak_loss_before": _float(output["guidance_peak_loss_before"], i),
-                        "guidance_peak_loss_after": _float(output["guidance_peak_loss_after"], i),
-                        "guidance_dkappa_loss_before": _float(output["guidance_dkappa_loss_before"], i),
-                        "guidance_dkappa_loss_after": _float(output["guidance_dkappa_loss_after"], i),
                         # GUIDANCE_PRE_POST_VIZ_V1
                         "selected_sparse_max_abs_curvature_pre_guidance": _float(
                             output[
@@ -1445,21 +1402,6 @@ def evaluate_open_loop(
         "guidance_dense_step_m": float(guidance_dense_step_m),
         "guidance_dense_topk_fraction": float(guidance_dense_topk_fraction),
         "guidance_dense_min_segment_m": float(guidance_dense_min_segment_m),
-        # DENSE_CURVATURE_GUIDANCE_V3
-        "guidance_dense_inner_iters": int(guidance_dense_inner_iters),
-        "guidance_dense_backtracking_enabled": bool(guidance_dense_backtracking_enabled),
-        "guidance_dense_backtracking_factor": float(guidance_dense_backtracking_factor),
-        "guidance_dense_backtracking_max_trials": int(guidance_dense_backtracking_max_trials),
-        "guidance_dense_min_step_m": float(guidance_dense_min_step_m),
-        "guidance_dense_max_total_move_m": float(guidance_dense_max_total_move_m),
-        "guidance_dense_bound_weight": float(guidance_dense_bound_weight),
-        "guidance_dense_peak_weight": float(guidance_dense_peak_weight),
-        "guidance_dense_dkappa_weight": float(guidance_dense_dkappa_weight),
-        "guidance_dense_peak_alpha": float(guidance_dense_peak_alpha),
-        "guidance_dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
-        "guidance_dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
-        "mean_guidance_inner_iterations_used": _mean(rows, "guidance_inner_iterations_used"),
-        "mean_guidance_backtracking_reductions": _mean(rows, "guidance_backtracking_reductions"),
     }
     # EVAL_VIZ_V2_SUMMARY
     # DENSE_ALL_MODE_EXECUTION_EVAL_V1
@@ -1599,16 +1541,6 @@ def evaluate_open_loop(
             gallery_samples,
             figure_dir / "02_random_trajectory_gallery_3x3.png",
         )
-        if guidance_enabled and str(guidance_type) == "dense_curvature":
-            plot_random_curvature_profile(
-                gallery_samples,
-                figure_dir / "06_random_curvature_profile_3x3.png",
-                curvature_limit=float(guidance_curvature_limit),
-                min_segment_m=float(guidance_dense_min_segment_m),
-            )
-            summary["curvature_profile_gallery"] = str(
-                (figure_dir / "06_random_curvature_profile_3x3.png").resolve()
-            )
         # DENSE_ALL_MODE_EXECUTION_EVAL_V1
         plot_sparse_dense_metrics_table(
             sparse_min_ade=_mean(rows, "minADE_at_M_all"),

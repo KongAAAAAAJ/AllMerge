@@ -28,19 +28,6 @@ class SparseCurvatureGuidanceConfig:
     dense_step_m: float = 0.20
     dense_topk_fraction: float = 0.20
     dense_min_segment_m: float = 0.25
-    # DENSE_CURVATURE_GUIDANCE_V3
-    dense_inner_iters: int = 5
-    dense_backtracking_enabled: bool = True
-    dense_backtracking_factor: float = 0.5
-    dense_backtracking_max_trials: int = 4
-    dense_min_step_m: float = 0.025
-    dense_max_total_move_m: float = 0.50
-    dense_bound_weight: float = 1.0
-    dense_peak_weight: float = 0.5
-    dense_dkappa_weight: float = 0.1
-    dense_peak_alpha: float = 10.0
-    dense_residual_gradient_enabled: bool = True
-    dense_normal_projection_enabled: bool = True
     eps: float = 1.0e-6
 
     @classmethod
@@ -105,20 +92,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("guidance dense_topk_fraction must be in (0, 1]")
         if self.dense_min_segment_m <= 0.0:
             raise ValueError("guidance dense_min_segment_m must be positive")
-        if self.dense_inner_iters < 1:
-            raise ValueError("guidance dense_inner_iters must be >= 1")
-        if not (0.0 < self.dense_backtracking_factor < 1.0):
-            raise ValueError("guidance dense_backtracking_factor must be in (0,1)")
-        if self.dense_backtracking_max_trials < 1:
-            raise ValueError("guidance dense_backtracking_max_trials must be >= 1")
-        if self.dense_min_step_m <= 0.0:
-            raise ValueError("guidance dense_min_step_m must be positive")
-        if self.dense_max_total_move_m <= 0.0:
-            raise ValueError("guidance dense_max_total_move_m must be positive")
-        if min(self.dense_bound_weight, self.dense_peak_weight, self.dense_dkappa_weight) < 0.0:
-            raise ValueError("dense V3 loss weights must be >= 0")
-        if self.dense_peak_alpha <= 0.0:
-            raise ValueError("guidance dense_peak_alpha must be positive")
         if self.eps <= 0.0:
             raise ValueError("guidance eps must be positive")
         if self.apply_timesteps is not None:
@@ -478,26 +451,10 @@ def _dense_loss_per_mode(
     trajectory_spline,
     start_velocity_xy: torch.Tensor,
     curvature_limit: float,
-    topk_fraction: float = 0.20,
+    topk_fraction: float,
     min_segment_m: float,
     eps: float,
-    bound_weight: float = 1.0,
-    peak_weight: float = 0.5,
-    dkappa_weight: float = 0.1,
-    peak_alpha: float = 10.0,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    dict[str, torch.Tensor],
-]:
-    """Dense V3 composite curvature objective.
-
-    ``topk_fraction`` remains in the signature only for V2 checkpoint/runtime
-    compatibility; V3 deliberately uses every curvature violation plus a
-    smooth peak term and a signed curvature-variation term.
-    """
-    del topk_fraction
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     curvature, valid, _, _ = dense_spline_geometric_curvature(
         trajectory_xy_m,
         trajectory_spline=trajectory_spline,
@@ -505,55 +462,27 @@ def _dense_loss_per_mode(
         min_segment_m=min_segment_m,
         eps=eps,
     )
-    dtype = trajectory_xy_m.dtype
-    valid_f = valid.to(dtype=dtype)
-    valid_count = valid_f.sum(dim=-1).clamp_min(1.0)
+    violation = F.relu(
+        curvature.abs() / float(curvature_limit) - 1.0
+    ).square()
+    violation = violation * valid.to(dtype=trajectory_xy_m.dtype)
 
-    excess = F.relu(curvature.abs() / float(curvature_limit) - 1.0)
-    excess_sq = excess.square() * valid_f
-    bound_loss = excess_sq.sum(dim=-1) / valid_count
-
-    # Smooth maximum of squared violation. Subtract log(N)/alpha so a fully
-    # feasible trajectory has exactly zero peak loss.
-    alpha = float(peak_alpha)
-    neg_inf = torch.full_like(excess_sq, -torch.inf)
-    peak_scores = torch.where(valid, alpha * excess_sq, neg_inf)
-    peak_lse = torch.logsumexp(peak_scores, dim=-1)
-    peak_loss = (
-        peak_lse - torch.log(valid_count.clamp_min(1.0))
-    ) / alpha
-    has_valid = valid.any(dim=-1)
-    peak_loss = torch.where(
-        has_valid,
-        peak_loss.clamp_min(0.0),
-        torch.zeros_like(peak_loss),
+    # Only the worst geometric part of the curve drives the update.
+    sorted_violation, _ = torch.sort(violation, dim=-1, descending=True)
+    valid_count = valid.sum(dim=-1)
+    k = torch.ceil(
+        valid_count.to(dtype=trajectory_xy_m.dtype) * float(topk_fraction)
+    ).to(dtype=torch.long).clamp_min(1)
+    rank = torch.arange(
+        sorted_violation.shape[-1],
+        device=trajectory_xy_m.device,
     )
+    rank = rank.view(*([1] * (sorted_violation.ndim - 1)), -1)
+    topk_mask = rank < k.unsqueeze(-1)
+    selected = sorted_violation * topk_mask.to(dtype=trajectory_xy_m.dtype)
+    loss = selected.sum(dim=-1) / k.to(dtype=trajectory_xy_m.dtype)
+    return torch.where(valid_count > 0, loss, torch.zeros_like(loss)), curvature, valid
 
-    pair_valid = valid[..., 1:] & valid[..., :-1]
-    pair_f = pair_valid.to(dtype=dtype)
-    pair_count = pair_f.sum(dim=-1).clamp_min(1.0)
-    delta_kappa = (
-        curvature[..., 1:] - curvature[..., :-1]
-    ) / float(curvature_limit)
-    dkappa_loss = (delta_kappa.square() * pair_f).sum(dim=-1) / pair_count
-
-    # Do not reshape already-feasible modes solely for smoothness.
-    has_violation = (excess > 0.0).any(dim=-1)
-    dkappa_loss = dkappa_loss * has_violation.to(dtype=dtype)
-
-    total = (
-        float(bound_weight) * bound_loss
-        + float(peak_weight) * peak_loss
-        + float(dkappa_weight) * dkappa_loss
-    )
-    total = torch.where(has_valid, total, torch.zeros_like(total))
-    components = {
-        "bound_loss": bound_loss,
-        "peak_loss": peak_loss,
-        "dkappa_loss": dkappa_loss,
-        "has_violation": has_violation,
-    }
-    return total, curvature, valid, components
 
 def dense_spline_curvature_statistics(
     trajectory_xy_m: torch.Tensor,
@@ -608,37 +537,6 @@ def dense_spline_curvature_statistics(
     }
 
 
-def _project_gradient_to_sparse_normals(
-    gradient: torch.Tensor,
-    trajectory_xy_m: torch.Tensor,
-    *,
-    eps: float,
-) -> torch.Tensor:
-    """Project waypoint gradient onto the local path normal direction."""
-    horizon = int(trajectory_xy_m.shape[-2])
-    if horizon <= 1:
-        return gradient
-    tangent = torch.zeros_like(trajectory_xy_m)
-    origin = torch.zeros_like(trajectory_xy_m[..., 0, :])
-    tangent[..., 0, :] = trajectory_xy_m[..., 1, :] - origin
-    if horizon > 2:
-        tangent[..., 1:-1, :] = (
-            trajectory_xy_m[..., 2:, :] - trajectory_xy_m[..., :-2, :]
-        )
-    tangent[..., -1, :] = (
-        trajectory_xy_m[..., -1, :] - trajectory_xy_m[..., -2, :]
-    )
-    tangent_norm = torch.linalg.vector_norm(tangent, dim=-1, keepdim=True)
-    tangent_unit = tangent / tangent_norm.clamp_min(float(eps))
-    normal = torch.stack(
-        (-tangent_unit[..., 1], tangent_unit[..., 0]),
-        dim=-1,
-    )
-    projected = (gradient * normal).sum(dim=-1, keepdim=True) * normal
-    usable = tangent_norm > float(eps)
-    return torch.where(usable, projected, gradient)
-
-
 def apply_dense_curvature_guidance(
     predicted_x0_norm: torch.Tensor,
     *,
@@ -651,14 +549,7 @@ def apply_dense_curvature_guidance(
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
-    """Dense V3: iterative trust-region projection on execution curvature.
-
-    V3 adds five pieces over V2: repeated inner optimization, backtracking
-    acceptance, a composite all-violation/peak/dkappa loss, full input
-    Jacobian through the frozen residual head, and local-normal projection.
-    Network parameters are never updated; autograd is requested only w.r.t.
-    the temporary trajectory variable.
-    """
+    """Dense V2: geometric curvature + top-k loss + normalized metric step."""
     if (
         not config.applies_to(int(timestep))
         or config.guidance_type != "dense_curvature"
@@ -677,14 +568,8 @@ def apply_dense_curvature_guidance(
         dtype=predicted_x0_norm.dtype,
     )
     batch, modes, horizon, _ = predicted_x0_norm.shape
-    mode_valid = mode_valid_mask.bool()
-    mode_valid_f = mode_valid.to(dtype=predicted_x0_norm.dtype)
 
-    def execution_points(
-        physical_xy: torch.Tensor,
-        *,
-        allow_input_gradient: bool,
-    ) -> torch.Tensor:
+    def execution_points(physical_xy: torch.Tensor) -> torch.Tensor:
         if execution_residual_head is None:
             return physical_xy
         if mode_features is None:
@@ -692,31 +577,25 @@ def apply_dense_curvature_guidance(
                 "mode_features are required when execution_residual_head is used"
             )
         flat_feature = mode_features.detach().reshape(batch * modes, -1)
-        flat_norm_source = physical_xy / scale_xy
-        if not allow_input_gradient:
-            flat_norm_source = flat_norm_source.detach()
-        flat_norm = flat_norm_source.reshape(batch * modes, horizon, 2)
+        flat_norm = (
+            physical_xy.detach() / scale_xy
+        ).reshape(batch * modes, horizon, 2)
         residual = execution_residual_head(
             flat_feature,
             flat_norm,
         ).reshape(batch, modes, horizon, 2)
-        if not allow_input_gradient:
-            residual = residual.detach()
-        return physical_xy + residual.to(
+        # Residual geometry is included, but its response to x0 is stop-gradient.
+        return physical_xy + residual.detach().to(
             device=physical_xy.device,
             dtype=physical_xy.dtype,
         )
 
-    def evaluate(
-        physical_xy: torch.Tensor,
-        *,
-        allow_input_gradient: bool,
-    ):
-        execution_xy = execution_points(
-            physical_xy,
-            allow_input_gradient=allow_input_gradient,
-        )
-        return _dense_loss_per_mode(
+    with torch.enable_grad():
+        physical_xy = (
+            predicted_x0_norm.detach() * scale_xy
+        ).requires_grad_(True)
+        execution_xy = execution_points(physical_xy)
+        loss_per_mode, curvature_before, valid_dense = _dense_loss_per_mode(
             execution_xy,
             trajectory_spline=trajectory_spline,
             start_velocity_xy=start_velocity_xy,
@@ -724,182 +603,57 @@ def apply_dense_curvature_guidance(
             topk_fraction=config.dense_topk_fraction,
             min_segment_m=config.dense_min_segment_m,
             eps=config.eps,
-            bound_weight=config.dense_bound_weight,
-            peak_weight=config.dense_peak_weight,
-            dkappa_weight=config.dense_dkappa_weight,
-            peak_alpha=config.dense_peak_alpha,
         )
+        valid_mode_f = mode_valid_mask.to(dtype=physical_xy.dtype)
+        objective = (loss_per_mode * valid_mode_f).sum()
+        gradient = torch.autograd.grad(objective, physical_xy)[0]
+        gradient = gradient * valid_mode_f[..., None, None]
 
-    initial_xy = (predicted_x0_norm.detach() * scale_xy).detach()
-    current_xy = initial_xy.clone()
+        if config.preserve_endpoint:
+            endpoint_mask = torch.ones_like(gradient)
+            endpoint_mask[..., -1, :] = 0.0
+            gradient = gradient * endpoint_mask
+
+        flat = gradient.flatten(start_dim=-2)
+        grad_norm = torch.linalg.vector_norm(flat, dim=-1)
+        has_gradient = grad_norm > float(config.eps)
+        direction = gradient / grad_norm.clamp_min(float(config.eps))[..., None, None]
+        direction = direction * has_gradient[..., None, None].to(direction.dtype)
+        guided_xy = (
+            physical_xy - float(config.dense_step_m) * direction
+        ).detach()
 
     with torch.no_grad():
-        loss_before, curvature_before, valid_before, components_before = evaluate(
-            current_xy,
-            allow_input_gradient=False,
+        guided_execution_xy = execution_points(guided_xy)
+        loss_after, curvature_after, valid_after = _dense_loss_per_mode(
+            guided_execution_xy,
+            trajectory_spline=trajectory_spline,
+            start_velocity_xy=start_velocity_xy,
+            curvature_limit=config.curvature_limit,
+            topk_fraction=config.dense_topk_fraction,
+            min_segment_m=config.dense_min_segment_m,
+            eps=config.eps,
         )
-
-    accepted_inner = torch.zeros(
-        (batch, modes), device=current_xy.device, dtype=current_xy.dtype
-    )
-    backtracking_reductions = torch.zeros_like(accepted_inner)
-
-    for _ in range(int(config.dense_inner_iters)):
-        with torch.enable_grad():
-            x_var = current_xy.detach().requires_grad_(True)
-            loss_mode, curvature_now, valid_now, components_now = evaluate(
-                x_var,
-                allow_input_gradient=bool(
-                    config.dense_residual_gradient_enabled
-                ),
-            )
-            objective = (loss_mode * mode_valid_f).sum()
-            if not objective.requires_grad:
-                break
-            gradient = torch.autograd.grad(
-                objective,
-                x_var,
-                create_graph=False,
-                retain_graph=False,
-                allow_unused=False,
-            )[0]
-            gradient = gradient * mode_valid_f[..., None, None]
-
-            if config.dense_normal_projection_enabled:
-                gradient = _project_gradient_to_sparse_normals(
-                    gradient,
-                    x_var,
-                    eps=config.eps,
-                )
-
-            if config.preserve_endpoint:
-                gradient = gradient.clone()
-                gradient[..., -1, :] = 0.0
-
-            grad_norm = torch.linalg.vector_norm(
-                gradient.flatten(start_dim=-2), dim=-1
-            )
-            direction = gradient / grad_norm.clamp_min(
-                float(config.eps)
-            )[..., None, None]
-            active = (
-                mode_valid
-                & (grad_norm > float(config.eps))
-                & components_now["has_violation"]
-            )
-
-        if not bool(active.any().item()):
-            break
-
-        old_loss = loss_mode.detach()
-        old_max = torch.where(
-            valid_now,
-            curvature_now.detach().abs(),
-            torch.zeros_like(curvature_now),
-        ).amax(dim=-1)
-
-        accepted_this = torch.zeros_like(active)
-        step = torch.full_like(
-            old_loss,
-            float(config.dense_step_m),
-        )
-        max_trials = (
-            int(config.dense_backtracking_max_trials)
-            if config.dense_backtracking_enabled
-            else 1
-        )
-
-        for trial in range(max_trials):
-            trial_active = active & ~accepted_this
-            if not bool(trial_active.any().item()):
-                break
-
-            candidate = current_xy - step[..., None, None] * direction.detach()
-            delta = candidate - initial_xy
-            total_move = torch.linalg.vector_norm(
-                delta.flatten(start_dim=-2), dim=-1
-            )
-            trust_scale = (
-                float(config.dense_max_total_move_m)
-                / total_move.clamp_min(float(config.eps))
-            ).clamp(max=1.0)
-            candidate = initial_xy + delta * trust_scale[..., None, None]
-            if config.preserve_endpoint:
-                candidate = candidate.clone()
-                candidate[..., -1, :] = initial_xy[..., -1, :]
-
-            with torch.no_grad():
-                cand_loss, cand_curvature, cand_valid, _ = evaluate(
-                    candidate,
-                    allow_input_gradient=False,
-                )
-                cand_max = torch.where(
-                    cand_valid,
-                    cand_curvature.abs(),
-                    torch.zeros_like(cand_curvature),
-                ).amax(dim=-1)
-
-            if config.dense_backtracking_enabled:
-                improved_loss = cand_loss < (old_loss - 1.0e-8)
-                nonincreasing_peak = cand_max <= (old_max + 1.0e-8)
-                accept = trial_active & improved_loss & nonincreasing_peak
-            else:
-                accept = trial_active
-
-            current_xy = torch.where(
-                accept[..., None, None],
-                candidate,
-                current_xy,
-            )
-            accepted_this |= accept
-
-            rejected = trial_active & ~accept
-            if trial + 1 < max_trials:
-                backtracking_reductions = (
-                    backtracking_reductions + rejected.to(current_xy.dtype)
-                )
-                step = torch.where(
-                    rejected,
-                    step * float(config.dense_backtracking_factor),
-                    step,
-                )
-                step = step.clamp_min(float(config.dense_min_step_m))
-
-        accepted_inner = accepted_inner + accepted_this.to(current_xy.dtype)
-        if not bool(accepted_this.any().item()):
-            break
-
-    guided_xy = current_xy.detach()
-    with torch.no_grad():
-        loss_after, curvature_after, valid_after, components_after = evaluate(
-            guided_xy,
-            allow_input_gradient=False,
-        )
-        mode_count = mode_valid_f.sum(dim=-1).clamp_min(1.0)
+        valid_mode_f = mode_valid_mask.to(dtype=guided_xy.dtype)
+        mode_count = valid_mode_f.sum(dim=-1).clamp_min(1.0)
         update_per_mode = torch.linalg.vector_norm(
-            (guided_xy - initial_xy).flatten(start_dim=-2), dim=-1
+            (guided_xy - physical_xy.detach()).flatten(start_dim=-2), dim=-1
         )
         loss_before_sample = (
-            loss_before * mode_valid_f
+            loss_per_mode.detach() * valid_mode_f
         ).sum(dim=-1) / mode_count
         loss_after_sample = (
-            loss_after * mode_valid_f
+            loss_after * valid_mode_f
         ).sum(dim=-1) / mode_count
         update_l2_sample = (
-            update_per_mode * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        accepted_inner_sample = (
-            accepted_inner * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        backtracking_sample = (
-            backtracking_reductions * mode_valid_f
+            update_per_mode * valid_mode_f
         ).sum(dim=-1) / mode_count
 
-        valid_before_all = valid_before & mode_valid[..., None]
-        valid_after_all = valid_after & mode_valid[..., None]
+        valid_before_all = valid_dense & mode_valid_mask[..., None]
+        valid_after_all = valid_after & mode_valid_mask[..., None]
         max_before = torch.where(
             valid_before_all,
-            curvature_before.abs(),
+            curvature_before.detach().abs(),
             torch.zeros_like(curvature_before),
         ).flatten(start_dim=1).amax(dim=-1)
         max_after = torch.where(
@@ -908,26 +662,16 @@ def apply_dense_curvature_guidance(
             torch.zeros_like(curvature_after),
         ).flatten(start_dim=1).amax(dim=-1)
 
-        def sample_component(name: str, source: dict[str, torch.Tensor]):
-            return (source[name] * mode_valid_f).sum(dim=-1) / mode_count
-
         diagnostics = {
             "loss_before": loss_before_sample,
             "loss_after": loss_after_sample,
             "max_abs_curvature_before": max_before,
             "max_abs_curvature_after": max_after,
             "update_l2_m": update_l2_sample,
-            "inner_iterations_used": accepted_inner_sample,
-            "backtracking_reductions": backtracking_sample,
-            "bound_loss_before": sample_component("bound_loss", components_before),
-            "bound_loss_after": sample_component("bound_loss", components_after),
-            "peak_loss_before": sample_component("peak_loss", components_before),
-            "peak_loss_after": sample_component("peak_loss", components_after),
-            "dkappa_loss_before": sample_component("dkappa_loss", components_before),
-            "dkappa_loss_after": sample_component("dkappa_loss", components_after),
         }
         guided_norm = guided_xy / scale_xy
     return guided_norm, diagnostics
+
 
 def apply_curvature_guidance(
     predicted_x0_norm: torch.Tensor,

@@ -206,19 +206,6 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="Minimum adjacent/chord length for geometric dense curvature.",
     )
-    # DENSE_CURVATURE_GUIDANCE_V3
-    parser.add_argument("--guidance-dense-inner-iters", type=int, default=5)
-    parser.add_argument("--guidance-dense-no-backtracking", action="store_true")
-    parser.add_argument("--guidance-dense-backtracking-factor", type=float, default=0.5)
-    parser.add_argument("--guidance-dense-backtracking-max-trials", type=int, default=4)
-    parser.add_argument("--guidance-dense-min-step-m", type=float, default=0.025)
-    parser.add_argument("--guidance-dense-max-total-move-m", type=float, default=0.50)
-    parser.add_argument("--guidance-dense-bound-weight", type=float, default=1.0)
-    parser.add_argument("--guidance-dense-peak-weight", type=float, default=0.5)
-    parser.add_argument("--guidance-dense-dkappa-weight", type=float, default=0.1)
-    parser.add_argument("--guidance-dense-peak-alpha", type=float, default=10.0)
-    parser.add_argument("--guidance-dense-stop-residual-gradient", action="store_true")
-    parser.add_argument("--guidance-dense-no-normal-projection", action="store_true")
     return parser.parse_args()
 
 
@@ -266,18 +253,6 @@ def main() -> int:
         guidance_dense_step_m=args.guidance_dense_step_m,
         guidance_dense_topk_fraction=args.guidance_dense_topk_fraction,
         guidance_dense_min_segment_m=args.guidance_dense_min_segment_m,
-        guidance_dense_inner_iters=args.guidance_dense_inner_iters,
-        guidance_dense_backtracking_enabled=not args.guidance_dense_no_backtracking,
-        guidance_dense_backtracking_factor=args.guidance_dense_backtracking_factor,
-        guidance_dense_backtracking_max_trials=args.guidance_dense_backtracking_max_trials,
-        guidance_dense_min_step_m=args.guidance_dense_min_step_m,
-        guidance_dense_max_total_move_m=args.guidance_dense_max_total_move_m,
-        guidance_dense_bound_weight=args.guidance_dense_bound_weight,
-        guidance_dense_peak_weight=args.guidance_dense_peak_weight,
-        guidance_dense_dkappa_weight=args.guidance_dense_dkappa_weight,
-        guidance_dense_peak_alpha=args.guidance_dense_peak_alpha,
-        guidance_dense_residual_gradient_enabled=not args.guidance_dense_stop_residual_gradient,
-        guidance_dense_normal_projection_enabled=not args.guidance_dense_no_normal_projection,
     )
     print_summary(summary)
     return 0

@@ -843,41 +843,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 if guidance_last is not None
                 else zero_diag
             ),
-            # DENSE_CURVATURE_GUIDANCE_V3 diagnostics
-            "guidance_inner_iterations_used": (
-                guidance_last.get("inner_iterations_used", zero_diag)
-                if guidance_last is not None
-                else zero_diag
-            ),
-            "guidance_backtracking_reductions": (
-                guidance_last.get("backtracking_reductions", zero_diag)
-                if guidance_last is not None
-                else zero_diag
-            ),
-            "guidance_bound_loss_before": (
-                guidance_last.get("bound_loss_before", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_bound_loss_after": (
-                guidance_last.get("bound_loss_after", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_loss_before": (
-                guidance_last.get("peak_loss_before", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_loss_after": (
-                guidance_last.get("peak_loss_after", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_dkappa_loss_before": (
-                guidance_last.get("dkappa_loss_before", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_dkappa_loss_after": (
-                guidance_last.get("dkappa_loss_after", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
             # GUIDANCE_PRE_POST_VIZ_V1
             "selected_sparse_max_abs_curvature_pre_guidance": (
                 selected_curvature_stats_pre_guidance["max_abs_curvature"]
@@ -1036,14 +1001,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 "guidance_curvature_loss_after"
             ],
             "guidance_update_l2_m": base["guidance_update_l2_m"],
-            "guidance_inner_iterations_used": base["guidance_inner_iterations_used"],
-            "guidance_backtracking_reductions": base["guidance_backtracking_reductions"],
-            "guidance_bound_loss_before": base["guidance_bound_loss_before"],
-            "guidance_bound_loss_after": base["guidance_bound_loss_after"],
-            "guidance_peak_loss_before": base["guidance_peak_loss_before"],
-            "guidance_peak_loss_after": base["guidance_peak_loss_after"],
-            "guidance_dkappa_loss_before": base["guidance_dkappa_loss_before"],
-            "guidance_dkappa_loss_after": base["guidance_dkappa_loss_after"],
             # GUIDANCE_PRE_POST_VIZ_V1
             "selected_sparse_max_abs_curvature_pre_guidance": base[
                 "selected_sparse_max_abs_curvature_pre_guidance"
