@@ -113,11 +113,16 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
-    # GRU_REG_HEAD_COARSE_V2
-    # ``mlp`` preserves the original regression head. ``gru`` replaces only
-    # the final regression head and directly consumes the complete time-aligned
-    # coarse decision trajectory. Train/runtime/GRPO use identical conditioning.
+    # GRU_REFINEMENT_GOAL_V3
+    # ``mlp``: original MLP diffusion denoising head only.
+    # ``gru``: keep the same MLP denoiser, then add a goal-conditioned GRU
+    # sparse-trajectory refinement stage. During supervised training the goal
+    # is the expert trajectory endpoint; inference/GRPO use each coarse mode's
+    # endpoint. GRU therefore refines x0 instead of directly predicting the
+    # diffusion residual.
     reg_head_type: str = "mlp"
+    gru_refine_max_x_m: float = 3.0
+    gru_refine_max_y_m: float = 0.75
 
     # DENSE_RESIDUAL_HEAD_V2
     # A small execution-correction head is trained only by L_dense.
@@ -162,6 +167,10 @@ class StructuredDiffusionConfig:
                 "reg_head_type must be one of {'mlp', 'gru'}, "
                 f"got {self.reg_head_type!r}"
             )
+        if self.gru_refine_max_x_m <= 0.0:
+            raise ValueError("gru_refine_max_x_m must be positive")
+        if self.gru_refine_max_y_m <= 0.0:
+            raise ValueError("gru_refine_max_y_m must be positive")
 
         # DENSE_RESIDUAL_HEAD_V2
         if self.dense_residual_hidden_dim <= 0:

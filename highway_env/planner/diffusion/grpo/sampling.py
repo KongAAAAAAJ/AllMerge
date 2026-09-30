@@ -101,7 +101,7 @@ class GroupDiffusionSampler:
                 sample,
                 current_t,
                 scene,
-                coarse_trajectory_norm=anchor,
+                navigation_point_norm=anchor[:, :, -1, :],
             )
             final_x0, final_logits = predicted_x0, logits
             if index + 1 >= len(timesteps):
@@ -172,7 +172,7 @@ class GroupDiffusionSampler:
                 flat_state,
                 t_batch,
                 scene,
-                coarse_trajectory_norm=replay_anchor,
+                navigation_point_norm=replay_anchor[:, :, -1, :],
             )
             replayed = transition.step(
                 flat_state,
