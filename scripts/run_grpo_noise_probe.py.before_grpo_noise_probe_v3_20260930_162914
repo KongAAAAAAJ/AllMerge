@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +39,6 @@ from highway_env.planner.diffusion.grpo.reward_adapter import (
     w4_to_grpo_rewards,
 )
 from highway_env.planner.diffusion.grpo.sampling import GroupDiffusionSampler
-from evaluation.grpo_probe_sampling import MultiplicativeProbeGroupDiffusionSampler
 from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
 from highway_env.planner.diffusion.tensor_adapter import BOOL_KEYS, FLOAT_KEYS, PlannerTensorAdapter
 
@@ -73,33 +71,6 @@ class GalleryState:
     rewards: np.ndarray       # [G]
 
 
-@dataclass(frozen=True)
-class SelectedModeSummary:
-    checkpoint: str
-    scenario: str
-    sample_index: int
-    env_seed: int
-    noise_seed: int
-    noise_type: str
-    multiplicative_std: float
-    vehicle_role: int
-    mode: int
-    group_size: int
-    group0_reward: float
-    best_reward: float
-    best_group_id: int
-    best_gain: float
-    reward_mean: float
-    reward_range: float
-    reward_std: float
-    best_minus_mean: float
-    sparse_pairwise_ade_mean: float
-    sparse_pairwise_abs_dx_mean: float
-    sparse_pairwise_abs_dy_mean: float
-    sparse_endpoint_dx_std: float
-    sparse_endpoint_dy_std: float
-
-
 def _parse_checkpoint(value: str) -> CheckpointSpec:
     name, sep, raw_path = value.partition("=")
     if not sep:
@@ -119,9 +90,8 @@ def parse_args() -> argparse.Namespace:
             "Probe current GRPO group sampling without training. For each fixed "
             "environment state, generate G trajectories from different diffusion "
             "noise, score them with the production W4 reward, and compare every "
-            "group against group 0. V3 supports paired additive vs multiplicative "
-            "reverse-transition exploration, selected-mode diversity diagnostics, "
-            "and the existing random 3x3 trajectory gallery."
+            "group against group 0. V2 also measures trajectory diversity and "
+            "creates a random 3x3 trajectory gallery."
         )
     )
     parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint, required=True)
@@ -129,26 +99,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples-per-scenario", type=int, default=25)
     parser.add_argument("--group-size", type=int, default=48)
     parser.add_argument("--eta", type=float, default=0.02)
-    parser.add_argument(
-        "--noise-type",
-        choices=("additive", "multiplicative"),
-        default="additive",
-        help=(
-            "reverse-transition exploration type. additive uses the existing GRPO "
-            "sampler; multiplicative uses a DiffusionDriveV2-style shared x/y scale "
-            "factor per vehicle-group-mode, while keeping the anchor and initial "
-            "forward noising unchanged"
-        ),
-    )
-    parser.add_argument(
-        "--multiplicative-std",
-        type=float,
-        default=0.04,
-        help=(
-            "std of epsilon in prev_sample = prev_sample_mean * (1 + epsilon_xy) "
-            "for multiplicative probe sampling; ignored for additive"
-        ),
-    )
     parser.add_argument("--group-action", type=int, default=3)
     parser.add_argument("--seed", type=int, default=7, help="base environment seed")
     parser.add_argument(
@@ -162,7 +112,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reward-fn", default="auto")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v3"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v2"))
     parser.add_argument(
         "--visualization-seed", type=int, default=0,
         help="deterministic seed used to choose random gallery states",
@@ -261,113 +211,6 @@ def _gallery_state(
     )
 
 
-
-def _selected_mode_stats(
-    *,
-    checkpoint: str,
-    scenario: str,
-    sample_index: int,
-    env_seed: int,
-    noise_seed: int,
-    noise_type: str,
-    multiplicative_std: float,
-    selected_mode_idx: torch.Tensor,
-    candidates: torch.Tensor,
-    rewards: torch.Tensor,
-) -> list[SelectedModeSummary]:
-    """Measure the actual model-selected mode instead of averaging all valid modes."""
-    rows: list[SelectedModeSummary] = []
-    candidate_np = candidates.detach().cpu().numpy().astype(np.float64)
-    reward_np = rewards.detach().cpu().numpy().astype(np.float64)
-    selected_np = selected_mode_idx.detach().cpu().numpy().reshape(-1)
-
-    for role in range(candidate_np.shape[0]):
-        mode = int(selected_np[role])
-        traj = candidate_np[role, :, mode]  # [G,H,2]
-        r = reward_np[role, :, mode]        # [G]
-        group_size = int(traj.shape[0])
-
-        delta = traj[:, None, :, :] - traj[None, :, :, :]
-        iu = np.triu_indices(group_size, k=1)
-        pairwise_ade = np.linalg.norm(delta, axis=-1).mean(axis=-1)[iu]
-        pairwise_abs_dx = np.abs(delta[..., 0]).mean(axis=-1)[iu]
-        pairwise_abs_dy = np.abs(delta[..., 1]).mean(axis=-1)[iu]
-
-        endpoint = traj[:, -1, :]
-        best_group = int(np.argmax(r))
-        best_reward = float(r[best_group])
-        reward_mean = float(np.mean(r))
-
-        rows.append(
-            SelectedModeSummary(
-                checkpoint=checkpoint,
-                scenario=scenario,
-                sample_index=int(sample_index),
-                env_seed=int(env_seed),
-                noise_seed=int(noise_seed),
-                noise_type=str(noise_type),
-                multiplicative_std=float(multiplicative_std),
-                vehicle_role=int(role),
-                mode=mode,
-                group_size=group_size,
-                group0_reward=float(r[0]),
-                best_reward=best_reward,
-                best_group_id=best_group,
-                best_gain=float(best_reward - r[0]),
-                reward_mean=reward_mean,
-                reward_range=float(np.max(r) - np.min(r)),
-                reward_std=float(np.std(r)),
-                best_minus_mean=float(best_reward - reward_mean),
-                sparse_pairwise_ade_mean=float(np.mean(pairwise_ade)),
-                sparse_pairwise_abs_dx_mean=float(np.mean(pairwise_abs_dx)),
-                sparse_pairwise_abs_dy_mean=float(np.mean(pairwise_abs_dy)),
-                sparse_endpoint_dx_std=float(np.std(endpoint[:, 0])),
-                sparse_endpoint_dy_std=float(np.std(endpoint[:, 1])),
-            )
-        )
-    return rows
-
-
-def _aggregate_selected_mode(
-    rows: list[SelectedModeSummary],
-    *,
-    checkpoint: str,
-    scenario: str,
-) -> dict[str, object]:
-    subset = [
-        row for row in rows
-        if row.checkpoint == checkpoint and (scenario == "all" or row.scenario == scenario)
-    ]
-    if not subset:
-        raise ValueError(
-            f"no selected-mode rows for checkpoint={checkpoint} scenario={scenario}"
-        )
-
-    def mean(field: str) -> float:
-        return float(np.mean([float(getattr(row, field)) for row in subset]))
-
-    return {
-        "checkpoint": checkpoint,
-        "scenario": scenario,
-        "noise_type": subset[0].noise_type,
-        "multiplicative_std": float(subset[0].multiplicative_std),
-        "selected_vehicle_mode_count": len(subset),
-        "group_size": int(subset[0].group_size),
-        "mean_selected_pairwise_ADE": mean("sparse_pairwise_ade_mean"),
-        "mean_selected_pairwise_abs_dx": mean("sparse_pairwise_abs_dx_mean"),
-        "mean_selected_pairwise_abs_dy": mean("sparse_pairwise_abs_dy_mean"),
-        "mean_selected_endpoint_dx_std": mean("sparse_endpoint_dx_std"),
-        "mean_selected_endpoint_dy_std": mean("sparse_endpoint_dy_std"),
-        "mean_selected_reward_std": mean("reward_std"),
-        "mean_selected_reward_range": mean("reward_range"),
-        "mean_selected_best_gain": mean("best_gain"),
-        "mean_selected_best_minus_mean": mean("best_minus_mean"),
-        "mean_selected_group0_reward": mean("group0_reward"),
-        "mean_selected_best_reward": mean("best_reward"),
-    }
-
-
-
 def _run_checkpoint(
     args: argparse.Namespace,
     checkpoint: CheckpointSpec,
@@ -377,29 +220,15 @@ def _run_checkpoint(
     list[ProbeSampleSummary],
     list[ProbeGroupSummary],
     list[ProbeVehicleModeSummary],
-    list[SelectedModeSummary],
     list[GalleryState],
 ]:
     adapter, model = _build_model(checkpoint, device)
-    if args.noise_type == "additive":
-        sampler = GroupDiffusionSampler(
-            model,
-            group_size=int(args.group_size),
-            eta=float(args.eta),
-        )
-    else:
-        sampler = MultiplicativeProbeGroupDiffusionSampler(
-            model,
-            group_size=int(args.group_size),
-            eta=float(args.eta),
-            multiplicative_std=float(args.multiplicative_std),
-        )
+    sampler = GroupDiffusionSampler(model, group_size=int(args.group_size), eta=float(args.eta))
     reward_adapter = CandidateRewardAdapter(resolve_reward_evaluator(args.reward_fn))
 
     sample_rows: list[ProbeSampleSummary] = []
     group_rows: list[ProbeGroupSummary] = []
     vm_rows: list[ProbeVehicleModeSummary] = []
-    selected_rows: list[SelectedModeSummary] = []
     gallery_rows: list[GalleryState] = []
 
     scenarios = _scenario_order(args)
@@ -460,23 +289,6 @@ def _run_checkpoint(
                 sample_rows.append(sample_summary)
                 group_rows.extend(one_group_rows)
                 vm_rows.extend(one_vm_rows)
-                one_selected_rows = _selected_mode_stats(
-                    checkpoint=checkpoint.name,
-                    scenario=scenario_name,
-                    sample_index=collected,
-                    env_seed=env_seed,
-                    noise_seed=noise_seed,
-                    noise_type=str(args.noise_type),
-                    multiplicative_std=(
-                        float(args.multiplicative_std)
-                        if args.noise_type == "multiplicative"
-                        else 0.0
-                    ),
-                    selected_mode_idx=selected_mode_idx,
-                    candidates=trace.candidates,
-                    rewards=rewards,
-                )
-                selected_rows.extend(one_selected_rows)
                 gallery_rows.append(
                     _gallery_state(
                         checkpoint=checkpoint.name,
@@ -502,9 +314,6 @@ def _run_checkpoint(
                     f"pair_better={sample_summary.pair_better_fraction:.3f} "
                     f"traj_ADE={sample_summary.element_sparse_pairwise_ade_mean:.3f}m "
                     f"vm_Rstd={sample_summary.element_reward_std_mean:.3f} "
-                    f"sel_ADE={np.mean([r.sparse_pairwise_ade_mean for r in one_selected_rows]):.3f}m "
-                    f"sel_dy={np.mean([r.sparse_pairwise_abs_dy_mean for r in one_selected_rows]):.3f}m "
-                    f"sel_Rstd={np.mean([r.reward_std for r in one_selected_rows]):.3f} "
                     f"rank0={sample_summary.group0_rank}/{args.group_size}"
                 )
                 collected += 1
@@ -515,7 +324,7 @@ def _run_checkpoint(
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    return sample_rows, group_rows, vm_rows, selected_rows, gallery_rows
+    return sample_rows, group_rows, vm_rows, gallery_rows
 
 
 def _write_gallery_manifest(path: Path, rows: list[dict[str, object]]) -> None:
@@ -534,7 +343,6 @@ def _plot_random_state_galleries(
     *,
     visualization_seed: int,
     gallery_count: int,
-    noise_label: str,
 ) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -599,7 +407,6 @@ def _plot_random_state_galleries(
             manifest_rows.append(
                 {
                     "checkpoint": checkpoint,
-                    "noise_label": noise_label,
                     "gallery_slot": slot,
                     "scenario": row.scenario,
                     "sample_index": row.sample_index,
@@ -615,7 +422,7 @@ def _plot_random_state_galleries(
             )
 
         fig.suptitle(
-            f"Random states: 48 diffusion-noise trajectory groups | {checkpoint} | {noise_label}",
+            f"Random states: 48 diffusion-noise trajectory groups | {checkpoint}",
             fontsize=14,
         )
         fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -632,7 +439,6 @@ def _write_outputs(
     sample_rows: list[ProbeSampleSummary],
     group_rows: list[ProbeGroupSummary],
     vm_rows: list[ProbeVehicleModeSummary],
-    selected_rows: list[SelectedModeSummary],
     gallery_rows: list[GalleryState],
 ) -> None:
     output_dir = args.output_dir
@@ -641,7 +447,6 @@ def _write_outputs(
     write_dataclass_csv(output_dir / "sample_summary.csv", sample_rows)
     write_dataclass_csv(output_dir / "group_summary.csv", group_rows)
     write_dataclass_csv(output_dir / "vehicle_mode_summary.csv", vm_rows)
-    write_dataclass_csv(output_dir / "selected_mode_summary.csv", selected_rows)
 
     checkpoints = [spec.name for spec in args.checkpoint]
     summary_rows = []
@@ -654,51 +459,8 @@ def _write_outputs(
                 aggregate_sample_summaries(sample_rows, checkpoint=checkpoint, scenario=scenario)
             )
 
-    for row in summary_rows:
-        row["noise_type"] = str(args.noise_type)
-        row["multiplicative_std"] = (
-            float(args.multiplicative_std)
-            if args.noise_type == "multiplicative"
-            else 0.0
-        )
-
-    selected_summary_rows = []
-    for checkpoint in checkpoints:
-        selected_summary_rows.append(
-            _aggregate_selected_mode(
-                selected_rows, checkpoint=checkpoint, scenario="all"
-            )
-        )
-        for scenario in _scenario_order(args):
-            selected_summary_rows.append(
-                _aggregate_selected_mode(
-                    selected_rows, checkpoint=checkpoint, scenario=scenario
-                )
-            )
-
     write_dict_csv(output_dir / "overall_summary.csv", summary_rows)
     write_summary_json(output_dir / "overall_summary.json", summary_rows)
-    write_dict_csv(
-        output_dir / "selected_overall_summary.csv",
-        selected_summary_rows,
-    )
-
-    config_payload = {
-        "noise_type": str(args.noise_type),
-        "multiplicative_std": (
-            float(args.multiplicative_std)
-            if args.noise_type == "multiplicative"
-            else 0.0
-        ),
-        "eta": float(args.eta),
-        "group_size": int(args.group_size),
-        "seed": int(args.seed),
-        "noise_seed": int(args.noise_seed),
-        "samples_per_scenario": int(args.samples_per_scenario),
-        "scenario": str(args.scenario),
-    }
-    with (output_dir / "probe_config.json").open("w", encoding="utf-8") as file:
-        json.dump(config_payload, file, indent=2)
     if not args.no_plots:
         maybe_plot_summary(output_dir / "plots", sample_rows)
         _plot_random_state_galleries(
@@ -706,22 +468,14 @@ def _write_outputs(
             gallery_rows,
             visualization_seed=int(args.visualization_seed),
             gallery_count=int(args.gallery_count),
-            noise_label=(
-                "additive"
-                if args.noise_type == "additive"
-                else f"multiplicative sigma={args.multiplicative_std:g}"
-            ),
         )
 
     print(f"[OK] sample CSV       : {output_dir / 'sample_summary.csv'}")
     print(f"[OK] group CSV        : {output_dir / 'group_summary.csv'}")
     print(f"[OK] vehicle-mode CSV : {output_dir / 'vehicle_mode_summary.csv'}")
-    print(f"[OK] selected-mode CSV: {output_dir / 'selected_mode_summary.csv'}")
     print(f"[OK] overall summary  : {output_dir / 'overall_summary.csv'}")
-    print(f"[OK] selected summary : {output_dir / 'selected_overall_summary.csv'}")
-    print(f"[OK] probe config     : {output_dir / 'probe_config.json'}")
 
-    print("\n=== OVERALL V3 ===")
+    print("\n=== OVERALL V2 ===")
     for row in summary_rows:
         if row["scenario"] != "all":
             continue
@@ -736,22 +490,6 @@ def _write_outputs(
             f"ADE/Rstd corr={row['mean_element_ADE_reward_std_corr']:.3f}"
         )
 
-    print("\n=== SELECTED-MODE V3 ===")
-    for row in selected_summary_rows:
-        if row["scenario"] != "all":
-            continue
-        print(
-            f"{row['checkpoint']}: "
-            f"sel_ADE={row['mean_selected_pairwise_ADE']:.3f}m | "
-            f"sel_dx={row['mean_selected_pairwise_abs_dx']:.3f}m | "
-            f"sel_dy={row['mean_selected_pairwise_abs_dy']:.3f}m | "
-            f"end_dx_std={row['mean_selected_endpoint_dx_std']:.3f}m | "
-            f"end_dy_std={row['mean_selected_endpoint_dy_std']:.3f}m | "
-            f"sel_Rstd={row['mean_selected_reward_std']:.3f} | "
-            f"sel_Rrange={row['mean_selected_reward_range']:.3f} | "
-            f"best-mean={row['mean_selected_best_minus_mean']:+.3f}"
-        )
-
 
 def main() -> int:
     args = parse_args()
@@ -761,8 +499,6 @@ def main() -> int:
         raise SystemExit("--group-size must be >= 2")
     if args.improvement_eps < 0:
         raise SystemExit("--improvement-eps must be >= 0")
-    if args.noise_type == "multiplicative" and args.multiplicative_std <= 0:
-        raise SystemExit("--multiplicative-std must be > 0 for multiplicative sampling")
     if args.max_seed_attempts < args.samples_per_scenario:
         raise SystemExit("--max-seed-attempts must be >= --samples-per-scenario")
     if args.gallery_count < 1:
@@ -782,7 +518,6 @@ def main() -> int:
     device = torch.device(args.device)
     print(
         f"[config] device={device} group_size={args.group_size} eta={args.eta} "
-        f"noise_type={args.noise_type} mul_std={args.multiplicative_std:g} "
         f"scenario={args.scenario} samples_per_scenario={args.samples_per_scenario} "
         f"improvement_eps={args.improvement_eps:g} gallery={args.gallery_count}"
     )
@@ -790,17 +525,15 @@ def main() -> int:
     all_sample_rows: list[ProbeSampleSummary] = []
     all_group_rows: list[ProbeGroupSummary] = []
     all_vm_rows: list[ProbeVehicleModeSummary] = []
-    all_selected_rows: list[SelectedModeSummary] = []
     all_gallery_rows: list[GalleryState] = []
 
     for checkpoint in args.checkpoint:
-        sample_rows, group_rows, vm_rows, selected_rows, gallery_rows = _run_checkpoint(
+        sample_rows, group_rows, vm_rows, gallery_rows = _run_checkpoint(
             args, checkpoint, device=device
         )
         all_sample_rows.extend(sample_rows)
         all_group_rows.extend(group_rows)
         all_vm_rows.extend(vm_rows)
-        all_selected_rows.extend(selected_rows)
         all_gallery_rows.extend(gallery_rows)
 
     _write_outputs(
@@ -808,7 +541,6 @@ def main() -> int:
         all_sample_rows,
         all_group_rows,
         all_vm_rows,
-        all_selected_rows,
         all_gallery_rows,
     )
     return 0
