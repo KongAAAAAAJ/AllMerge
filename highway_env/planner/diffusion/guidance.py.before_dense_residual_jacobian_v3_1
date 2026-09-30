@@ -691,32 +691,15 @@ def apply_dense_curvature_guidance(
             raise ValueError(
                 "mode_features are required when execution_residual_head is used"
             )
-
-        # DENSE_RESIDUAL_JACOBIAN_FIX_V3_1
         flat_feature = mode_features.detach().reshape(batch * modes, -1)
         flat_norm_source = physical_xy / scale_xy
         if not allow_input_gradient:
             flat_norm_source = flat_norm_source.detach()
         flat_norm = flat_norm_source.reshape(batch * modes, horizon, 2)
-
-        if allow_input_gradient:
-            guidance_forward = getattr(
-                execution_residual_head,
-                "forward_guidance",
-                None,
-            )
-            if guidance_forward is None:
-                raise RuntimeError(
-                    "dense_residual_gradient_enabled=True requires "
-                    "DenseSparseResidualHead.forward_guidance()"
-                )
-            residual = guidance_forward(flat_feature, flat_norm)
-        else:
-            # Historical training/runtime semantics: the residual head internally
-            # detaches sparse_norm, preserving the old hard stop-gradient.
-            residual = execution_residual_head(flat_feature, flat_norm)
-
-        residual = residual.reshape(batch, modes, horizon, 2)
+        residual = execution_residual_head(
+            flat_feature,
+            flat_norm,
+        ).reshape(batch, modes, horizon, 2)
         if not allow_input_gradient:
             residual = residual.detach()
         return physical_xy + residual.to(
