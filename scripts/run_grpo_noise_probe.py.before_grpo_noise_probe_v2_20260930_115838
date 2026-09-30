@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable
 
 import numpy as np
 import torch
@@ -58,19 +57,6 @@ class CheckpointSpec:
     path: Path
 
 
-@dataclass
-class GalleryState:
-    checkpoint: str
-    scenario: str
-    sample_index: int
-    env_seed: int
-    noise_seed: int
-    vehicle_role: int
-    mode: int
-    trajectories: np.ndarray  # [G,H,2]
-    rewards: np.ndarray       # [G]
-
-
 def _parse_checkpoint(value: str) -> CheckpointSpec:
     name, sep, raw_path = value.partition("=")
     if not sep:
@@ -90,42 +76,55 @@ def parse_args() -> argparse.Namespace:
             "Probe current GRPO group sampling without training. For each fixed "
             "environment state, generate G trajectories from different diffusion "
             "noise, score them with the production W4 reward, and compare every "
-            "group against group 0. V2 also measures trajectory diversity and "
-            "creates a random 3x3 trajectory gallery."
+            "group against group 0."
         )
     )
-    parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint, required=True)
-    parser.add_argument("--scenario", choices=("all", *SCENARIOS.keys()), default="all")
+    parser.add_argument(
+        "--checkpoint",
+        action="append",
+        type=_parse_checkpoint,
+        required=True,
+        help="repeatable NAME=PATH; checkpoints are loaded one at a time",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=("all", *SCENARIOS.keys()),
+        default="all",
+    )
     parser.add_argument("--samples-per-scenario", type=int, default=25)
     parser.add_argument("--group-size", type=int, default=48)
     parser.add_argument("--eta", type=float, default=0.02)
     parser.add_argument("--group-action", type=int, default=3)
     parser.add_argument("--seed", type=int, default=7, help="base environment seed")
     parser.add_argument(
-        "--noise-seed", type=int, default=700000,
+        "--noise-seed",
+        type=int,
+        default=700000,
         help="base seed for diffusion group sampling; shared across checkpoints",
     )
-    parser.add_argument("--improvement-eps", type=float, default=DEFAULT_IMPROVEMENT_EPS)
     parser.add_argument(
-        "--max-seed-attempts", type=int, default=1000,
+        "--improvement-eps",
+        type=float,
+        default=DEFAULT_IMPROVEMENT_EPS,
+    )
+    parser.add_argument(
+        "--max-seed-attempts",
+        type=int,
+        default=1000,
         help="maximum deterministic seed attempts per scenario to collect valid states",
     )
     parser.add_argument("--reward-fn", default="auto")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v2"))
     parser.add_argument(
-        "--visualization-seed", type=int, default=0,
-        help="deterministic seed used to choose random gallery states",
+        "--output-dir",
+        type=Path,
+        default=Path("outputs/grpo_noise_probe_100ep"),
     )
     parser.add_argument(
-        "--gallery-count", type=int, default=9,
-        help="number of random states per checkpoint in the trajectory gallery; default 9",
+        "--no-plots",
+        action="store_true",
+        help="skip matplotlib summary plots",
     )
-    parser.add_argument(
-        "--gallery-vehicle-role", type=int, default=0, choices=(0, 1, 2),
-        help="controlled vehicle role visualized in the 3x3 gallery",
-    )
-    parser.add_argument("--no-plots", action="store_true", help="skip all matplotlib plots")
     return parser.parse_args()
 
 
@@ -145,22 +144,22 @@ def _frozen_reward_context(
     model: StructuredDiffusionPlanner,
     features: Dict[str, torch.Tensor],
     env: object,
-) -> tuple[GRPORewardContext, torch.Tensor]:
+) -> GRPORewardContext:
     model.eval()
     with torch.no_grad():
         frozen = model.infer_multimodal(features)
-    context = GRPORewardContext(
+    return GRPORewardContext(
         env=env,
         frozen_all_mode_trajectories=frozen["trajectory_candidates"],
         frozen_argmax_joint_trajectories=frozen["trajectory"],
         valid_mode_mask=features["mode_valid_mask"],
     )
-    selected_mode_idx = frozen["trajectory_mode_idx"].detach()
-    return context, selected_mode_idx
 
 
 def _scenario_order(args: argparse.Namespace) -> list[str]:
-    return list(SCENARIOS.keys()) if args.scenario == "all" else [str(args.scenario)]
+    if args.scenario == "all":
+        return list(SCENARIOS.keys())
+    return [str(args.scenario)]
 
 
 def _state_seed(base_seed: int, scenario_index: int, attempt_index: int) -> int:
@@ -183,53 +182,23 @@ def _build_model(checkpoint: CheckpointSpec, device: torch.device):
     return adapter, model
 
 
-def _gallery_state(
-    *,
-    checkpoint: str,
-    scenario: str,
-    sample_index: int,
-    env_seed: int,
-    noise_seed: int,
-    vehicle_role: int,
-    selected_mode_idx: torch.Tensor,
-    candidates: torch.Tensor,
-    rewards: torch.Tensor,
-) -> GalleryState:
-    mode = int(selected_mode_idx[vehicle_role].detach().cpu().item())
-    trajectories = candidates[vehicle_role, :, mode].detach().cpu().numpy().astype(np.float32)
-    reward_values = rewards[vehicle_role, :, mode].detach().cpu().numpy().astype(np.float32)
-    return GalleryState(
-        checkpoint=checkpoint,
-        scenario=scenario,
-        sample_index=int(sample_index),
-        env_seed=int(env_seed),
-        noise_seed=int(noise_seed),
-        vehicle_role=int(vehicle_role),
-        mode=mode,
-        trajectories=trajectories,
-        rewards=reward_values,
-    )
-
-
 def _run_checkpoint(
     args: argparse.Namespace,
     checkpoint: CheckpointSpec,
     *,
     device: torch.device,
-) -> tuple[
-    list[ProbeSampleSummary],
-    list[ProbeGroupSummary],
-    list[ProbeVehicleModeSummary],
-    list[GalleryState],
-]:
+) -> tuple[list[ProbeSampleSummary], list[ProbeGroupSummary], list[ProbeVehicleModeSummary]]:
     adapter, model = _build_model(checkpoint, device)
-    sampler = GroupDiffusionSampler(model, group_size=int(args.group_size), eta=float(args.eta))
+    sampler = GroupDiffusionSampler(
+        model,
+        group_size=int(args.group_size),
+        eta=float(args.eta),
+    )
     reward_adapter = CandidateRewardAdapter(resolve_reward_evaluator(args.reward_fn))
 
     sample_rows: list[ProbeSampleSummary] = []
     group_rows: list[ProbeGroupSummary] = []
     vm_rows: list[ProbeVehicleModeSummary] = []
-    gallery_rows: list[GalleryState] = []
 
     scenarios = _scenario_order(args)
     for scenario_index, scenario_name in enumerate(scenarios):
@@ -246,7 +215,10 @@ def _run_checkpoint(
             env_seed = _state_seed(args.seed, scenario_index, attempts)
             attempts += 1
             env = env_cls(
-                config={"show_trajectories": False, "show_future_trajectories": False},
+                config={
+                    "show_trajectories": False,
+                    "show_future_trajectories": False,
+                },
                 render_mode=None,
             )
             try:
@@ -260,14 +232,20 @@ def _run_checkpoint(
                     continue
 
                 features = _scenario_features(env, adapter)
-                context, selected_mode_idx = _frozen_reward_context(model, features, env)
-                noise_seed = _sample_noise_seed(args.noise_seed, scenario_index, collected)
+                context = _frozen_reward_context(model, features, env)
+                noise_seed = _sample_noise_seed(
+                    args.noise_seed,
+                    scenario_index,
+                    collected,
+                )
                 generator = torch.Generator(device=device.type).manual_seed(noise_seed)
 
                 with torch.no_grad():
                     trace = sampler.sample(features, generator=generator)
                     reward_result = reward_adapter.evaluate_result(
-                        trace.candidates, features=features, context=context
+                        trace.candidates,
+                        features=features,
+                        context=context,
                     )
                     rewards = w4_to_grpo_rewards(
                         reward_result.rewards,
@@ -278,7 +256,6 @@ def _run_checkpoint(
                 sample_summary, one_group_rows, one_vm_rows = analyze_group_rewards(
                     rewards,
                     features["mode_valid_mask"],
-                    candidates=trace.candidates,
                     checkpoint=checkpoint.name,
                     scenario=scenario_name,
                     sample_index=collected,
@@ -289,19 +266,6 @@ def _run_checkpoint(
                 sample_rows.append(sample_summary)
                 group_rows.extend(one_group_rows)
                 vm_rows.extend(one_vm_rows)
-                gallery_rows.append(
-                    _gallery_state(
-                        checkpoint=checkpoint.name,
-                        scenario=scenario_name,
-                        sample_index=collected,
-                        env_seed=env_seed,
-                        noise_seed=noise_seed,
-                        vehicle_role=int(args.gallery_vehicle_role),
-                        selected_mode_idx=selected_mode_idx,
-                        candidates=trace.candidates,
-                        rewards=rewards,
-                    )
-                )
 
                 print(
                     f"[probe] ckpt={checkpoint.name} scenario={scenario_name} "
@@ -312,8 +276,6 @@ def _run_checkpoint(
                     f"better_groups={sample_summary.better_group_count}/{args.group_size - 1} "
                     f"({sample_summary.better_group_fraction:.3f}) "
                     f"pair_better={sample_summary.pair_better_fraction:.3f} "
-                    f"traj_ADE={sample_summary.element_sparse_pairwise_ade_mean:.3f}m "
-                    f"vm_Rstd={sample_summary.element_reward_std_mean:.3f} "
                     f"rank0={sample_summary.group0_rank}/{args.group_size}"
                 )
                 collected += 1
@@ -324,114 +286,7 @@ def _run_checkpoint(
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    return sample_rows, group_rows, vm_rows, gallery_rows
-
-
-def _write_gallery_manifest(path: Path, rows: list[dict[str, object]]) -> None:
-    if not rows:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _plot_random_state_galleries(
-    output_dir: Path,
-    gallery_rows: list[GalleryState],
-    *,
-    visualization_seed: int,
-    gallery_count: int,
-) -> None:
-    try:
-        import matplotlib.pyplot as plt
-    except Exception as exc:
-        print(f"[gallery] skipped: {exc}")
-        return
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoints = list(dict.fromkeys(row.checkpoint for row in gallery_rows))
-    manifest_rows: list[dict[str, object]] = []
-
-    for checkpoint in checkpoints:
-        subset = [row for row in gallery_rows if row.checkpoint == checkpoint]
-        if not subset:
-            continue
-        n = min(int(gallery_count), len(subset))
-        rng = np.random.default_rng(int(visualization_seed))
-        selected_indices = sorted(rng.choice(len(subset), size=n, replace=False).tolist())
-        selected = [subset[index] for index in selected_indices]
-
-        fig, axes = plt.subplots(3, 3, figsize=(15, 12), squeeze=False)
-        flat_axes = list(axes.flat)
-        for ax in flat_axes:
-            ax.set_visible(False)
-
-        for slot, row in enumerate(selected):
-            ax = flat_axes[slot]
-            ax.set_visible(True)
-            trajectories = row.trajectories
-            rewards = row.rewards
-            best_group = int(np.argmax(rewards))
-            r0 = float(rewards[0])
-            rbest = float(rewards[best_group])
-
-            for group_id, trajectory in enumerate(trajectories):
-                ax.plot(
-                    trajectory[:, 0], trajectory[:, 1],
-                    linewidth=0.8, alpha=0.18,
-                )
-            ax.plot(
-                trajectories[0, :, 0], trajectories[0, :, 1],
-                linewidth=2.2, marker="o", markersize=3.0,
-                label=f"Group 0 (R={r0:.2f})",
-            )
-            ax.plot(
-                trajectories[best_group, :, 0], trajectories[best_group, :, 1],
-                linewidth=2.6, marker="o", markersize=3.2,
-                label=f"Best g={best_group} (R={rbest:.2f})",
-            )
-            ax.scatter([0.0], [0.0], marker="x", s=35, label="Ego")
-            ax.set_title(
-                f"{row.scenario} | state={row.sample_index:02d} | v{row.vehicle_role} m{row.mode}\n"
-                f"best-group gain={rbest - r0:+.3f}",
-                fontsize=10,
-            )
-            ax.set_xlabel("x [m]")
-            ax.set_ylabel("y [m]")
-            ax.grid(alpha=0.2)
-            ax.set_aspect("equal", adjustable="datalim")
-            ax.legend(fontsize=7, loc="best")
-
-            manifest_rows.append(
-                {
-                    "checkpoint": checkpoint,
-                    "gallery_slot": slot,
-                    "scenario": row.scenario,
-                    "sample_index": row.sample_index,
-                    "env_seed": row.env_seed,
-                    "noise_seed": row.noise_seed,
-                    "vehicle_role": row.vehicle_role,
-                    "mode": row.mode,
-                    "best_group_id": best_group,
-                    "group0_reward": r0,
-                    "best_reward": rbest,
-                    "best_gain": rbest - r0,
-                }
-            )
-
-        fig.suptitle(
-            f"Random states: 48 diffusion-noise trajectory groups | {checkpoint}",
-            fontsize=14,
-        )
-        fig.tight_layout(rect=(0, 0, 1, 0.97))
-        out = output_dir / f"random_noise_trajectory_gallery_3x3_{checkpoint}.png"
-        fig.savefig(out, dpi=180)
-        plt.close(fig)
-        print(f"[gallery] {out}")
-
-    _write_gallery_manifest(output_dir / "random_gallery_manifest.csv", manifest_rows)
+    return sample_rows, group_rows, vm_rows
 
 
 def _write_outputs(
@@ -439,7 +294,6 @@ def _write_outputs(
     sample_rows: list[ProbeSampleSummary],
     group_rows: list[ProbeGroupSummary],
     vm_rows: list[ProbeVehicleModeSummary],
-    gallery_rows: list[GalleryState],
 ) -> None:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -456,38 +310,35 @@ def _write_outputs(
         )
         for scenario in _scenario_order(args):
             summary_rows.append(
-                aggregate_sample_summaries(sample_rows, checkpoint=checkpoint, scenario=scenario)
+                aggregate_sample_summaries(
+                    sample_rows,
+                    checkpoint=checkpoint,
+                    scenario=scenario,
+                )
             )
 
     write_dict_csv(output_dir / "overall_summary.csv", summary_rows)
     write_summary_json(output_dir / "overall_summary.json", summary_rows)
     if not args.no_plots:
         maybe_plot_summary(output_dir / "plots", sample_rows)
-        _plot_random_state_galleries(
-            output_dir / "plots",
-            gallery_rows,
-            visualization_seed=int(args.visualization_seed),
-            gallery_count=int(args.gallery_count),
-        )
 
     print(f"[OK] sample CSV       : {output_dir / 'sample_summary.csv'}")
     print(f"[OK] group CSV        : {output_dir / 'group_summary.csv'}")
     print(f"[OK] vehicle-mode CSV : {output_dir / 'vehicle_mode_summary.csv'}")
     print(f"[OK] overall summary  : {output_dir / 'overall_summary.csv'}")
 
-    print("\n=== OVERALL V2 ===")
+    print("\n=== OVERALL ===")
     for row in summary_rows:
         if row["scenario"] != "all":
             continue
         print(
             f"{row['checkpoint']}: "
-            f"traj_pair_ADE={row['mean_element_sparse_pairwise_ADE']:.3f}m | "
-            f"endpoint_spread={row['mean_element_sparse_endpoint_dist']:.3f}m | "
-            f"vm_Rrange={row['mean_element_reward_range']:.3f} | "
-            f"vm_Rstd={row['mean_element_reward_std']:.3f} | "
-            f"best-mean={row['mean_best_minus_group_mean']:+.3f} | "
-            f"best-nonbest={row['mean_best_minus_nonbest_mean']:+.3f} | "
-            f"ADE/Rstd corr={row['mean_element_ADE_reward_std_corr']:.3f}"
+            f"improvable_state={row['improvable_state_fraction']:.3f} | "
+            f"better_group={row['mean_better_group_fraction']:.3f} | "
+            f"pair_better={row['mean_pair_better_fraction']:.3f} | "
+            f"best_gain={row['mean_best_group_gain']:+.5f} | "
+            f"reward_range={row['mean_group_reward_range']:.5f} | "
+            f"group0_rank={row['mean_group0_rank']:.2f}"
         )
 
 
@@ -501,8 +352,6 @@ def main() -> int:
         raise SystemExit("--improvement-eps must be >= 0")
     if args.max_seed_attempts < args.samples_per_scenario:
         raise SystemExit("--max-seed-attempts must be >= --samples-per-scenario")
-    if args.gallery_count < 1:
-        raise SystemExit("--gallery-count must be >= 1")
 
     checkpoint_names = [spec.name for spec in args.checkpoint]
     if len(checkpoint_names) != len(set(checkpoint_names)):
@@ -519,30 +368,24 @@ def main() -> int:
     print(
         f"[config] device={device} group_size={args.group_size} eta={args.eta} "
         f"scenario={args.scenario} samples_per_scenario={args.samples_per_scenario} "
-        f"improvement_eps={args.improvement_eps:g} gallery={args.gallery_count}"
+        f"improvement_eps={args.improvement_eps:g}"
     )
 
     all_sample_rows: list[ProbeSampleSummary] = []
     all_group_rows: list[ProbeGroupSummary] = []
     all_vm_rows: list[ProbeVehicleModeSummary] = []
-    all_gallery_rows: list[GalleryState] = []
 
     for checkpoint in args.checkpoint:
-        sample_rows, group_rows, vm_rows, gallery_rows = _run_checkpoint(
-            args, checkpoint, device=device
+        sample_rows, group_rows, vm_rows = _run_checkpoint(
+            args,
+            checkpoint,
+            device=device,
         )
         all_sample_rows.extend(sample_rows)
         all_group_rows.extend(group_rows)
         all_vm_rows.extend(vm_rows)
-        all_gallery_rows.extend(gallery_rows)
 
-    _write_outputs(
-        args,
-        all_sample_rows,
-        all_group_rows,
-        all_vm_rows,
-        all_gallery_rows,
-    )
+    _write_outputs(args, all_sample_rows, all_group_rows, all_vm_rows)
     return 0
 
 
