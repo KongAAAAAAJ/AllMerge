@@ -896,8 +896,8 @@ class StructuredDiffusionPlanner(nn.Module):
                 trajectory_spline=self.dense_trajectory_spline,
                 start_velocity_xy=selected_start_velocity_xy,
                 curvature_limit=self.sparse_curvature_guidance.curvature_limit,
-                min_segment_m=(
-                    self.sparse_curvature_guidance.dense_min_segment_m
+                min_speed_mps=(
+                    self.sparse_curvature_guidance.dense_min_speed_mps
                 ),
                 eps=self.sparse_curvature_guidance.eps,
             )
@@ -907,7 +907,7 @@ class StructuredDiffusionPlanner(nn.Module):
             trajectory_spline=self.dense_trajectory_spline,
             start_velocity_xy=selected_start_velocity_xy,
             curvature_limit=self.sparse_curvature_guidance.curvature_limit,
-            min_segment_m=self.sparse_curvature_guidance.dense_min_segment_m,
+            min_speed_mps=self.sparse_curvature_guidance.dense_min_speed_mps,
             eps=self.sparse_curvature_guidance.eps,
         )
 
@@ -1030,25 +1030,6 @@ class StructuredDiffusionPlanner(nn.Module):
             ),
             "selected_dense_curvature_violation_ratio": (
                 selected_dense_curvature_stats["violation_ratio"]
-            ),
-            # DENSE_CURVATURE_GUIDANCE_V2: peak geometric-curvature location.
-            "selected_dense_peak_time_s_pre_guidance": (
-                selected_dense_curvature_stats_pre_guidance["peak_time_s"]
-            ),
-            "selected_dense_peak_x_m_pre_guidance": (
-                selected_dense_curvature_stats_pre_guidance["peak_x_m"]
-            ),
-            "selected_dense_peak_y_m_pre_guidance": (
-                selected_dense_curvature_stats_pre_guidance["peak_y_m"]
-            ),
-            "selected_dense_peak_time_s": (
-                selected_dense_curvature_stats["peak_time_s"]
-            ),
-            "selected_dense_peak_x_m": (
-                selected_dense_curvature_stats["peak_x_m"]
-            ),
-            "selected_dense_peak_y_m": (
-                selected_dense_curvature_stats["peak_y_m"]
             ),
         }
 

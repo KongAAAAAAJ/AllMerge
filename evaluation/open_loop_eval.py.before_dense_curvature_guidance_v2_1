@@ -156,13 +156,6 @@ CSV_FIELDS = [
     "selected_dense_curvature_violation_ratio_pre_guidance",
     "selected_dense_max_abs_curvature",
     "selected_dense_curvature_violation_ratio",
-    # DENSE_CURVATURE_GUIDANCE_V2
-    "selected_dense_peak_time_s_pre_guidance",
-    "selected_dense_peak_x_m_pre_guidance",
-    "selected_dense_peak_y_m_pre_guidance",
-    "selected_dense_peak_time_s",
-    "selected_dense_peak_x_m",
-    "selected_dense_peak_y_m",
 ]
 
 
@@ -512,9 +505,6 @@ def evaluate_open_loop(
     guidance_preserve_endpoint: bool = True,
     guidance_type: str = "sparse_curvature",
     guidance_dense_min_speed_mps: float = 0.5,
-    guidance_dense_step_m: float = 0.20,
-    guidance_dense_topk_fraction: float = 0.20,
-    guidance_dense_min_segment_m: float = 0.25,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -556,10 +546,6 @@ def evaluate_open_loop(
             # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
             "type": str(guidance_type),
             "dense_min_speed_mps": float(guidance_dense_min_speed_mps),
-            # DENSE_CURVATURE_GUIDANCE_V2
-            "dense_step_m": float(guidance_dense_step_m),
-            "dense_topk_fraction": float(guidance_dense_topk_fraction),
-            "dense_min_segment_m": float(guidance_dense_min_segment_m),
         },
     }
     if checkpoint_model_config:
@@ -997,15 +983,6 @@ def evaluate_open_loop(
                                 if hasattr(value, "detach")
                             },
                             guidance_type=str(guidance_type),
-                            # DENSE_CURVATURE_GUIDANCE_V2
-                            max_curvature_x_pre_guidance=(
-                                _float(output["selected_dense_peak_x_m_pre_guidance"], i)
-                                if str(guidance_type) == "dense_curvature" else None
-                            ),
-                            max_curvature_x_post_guidance=(
-                                _float(output["selected_dense_peak_x_m"], i)
-                                if str(guidance_type) == "dense_curvature" else None
-                            ),
                         )
                         if gallery_slot == len(gallery_samples):
                             gallery_samples.append(visual_sample)
@@ -1204,13 +1181,6 @@ def evaluate_open_loop(
                         "selected_dense_curvature_violation_ratio": _float(
                             output["selected_dense_curvature_violation_ratio"], i
                         ),
-                        # DENSE_CURVATURE_GUIDANCE_V2
-                        "selected_dense_peak_time_s_pre_guidance": _float(output["selected_dense_peak_time_s_pre_guidance"], i),
-                        "selected_dense_peak_x_m_pre_guidance": _float(output["selected_dense_peak_x_m_pre_guidance"], i),
-                        "selected_dense_peak_y_m_pre_guidance": _float(output["selected_dense_peak_y_m_pre_guidance"], i),
-                        "selected_dense_peak_time_s": _float(output["selected_dense_peak_time_s"], i),
-                        "selected_dense_peak_x_m": _float(output["selected_dense_peak_x_m"], i),
-                        "selected_dense_peak_y_m": _float(output["selected_dense_peak_y_m"], i),
                     }
                 )
 
@@ -1398,10 +1368,6 @@ def evaluate_open_loop(
         "mean_selected_dense_curvature_violation_ratio": _mean(
             rows, "selected_dense_curvature_violation_ratio"
         ),
-        # DENSE_CURVATURE_GUIDANCE_V2
-        "guidance_dense_step_m": float(guidance_dense_step_m),
-        "guidance_dense_topk_fraction": float(guidance_dense_topk_fraction),
-        "guidance_dense_min_segment_m": float(guidance_dense_min_segment_m),
     }
     # EVAL_VIZ_V2_SUMMARY
     # DENSE_ALL_MODE_EXECUTION_EVAL_V1

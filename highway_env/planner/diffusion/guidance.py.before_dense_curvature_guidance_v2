@@ -24,10 +24,7 @@ class SparseCurvatureGuidanceConfig:
     preserve_endpoint: bool = True
     apply_timesteps: Optional[Tuple[int, ...]] = None
     min_segment_length_m: float = 1.0e-3
-    dense_min_speed_mps: float = 0.5  # legacy V1; ignored by dense V2
-    dense_step_m: float = 0.20
-    dense_topk_fraction: float = 0.20
-    dense_min_segment_m: float = 0.25
+    dense_min_speed_mps: float = 0.5
     eps: float = 1.0e-6
 
     @classmethod
@@ -84,14 +81,8 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("guidance grad_clip_norm must be positive")
         if self.min_segment_length_m <= 0.0:
             raise ValueError("guidance min_segment_length_m must be positive")
-        if self.dense_min_speed_mps < 0.0:
-            raise ValueError("legacy dense_min_speed_mps must be >= 0")
-        if self.dense_step_m < 0.0:
-            raise ValueError("guidance dense_step_m must be >= 0")
-        if not (0.0 < self.dense_topk_fraction <= 1.0):
-            raise ValueError("guidance dense_topk_fraction must be in (0, 1]")
-        if self.dense_min_segment_m <= 0.0:
-            raise ValueError("guidance dense_min_segment_m must be positive")
+        if self.dense_min_speed_mps <= 0.0:
+            raise ValueError("guidance dense_min_speed_mps must be positive")
         if self.eps <= 0.0:
             raise ValueError("guidance eps must be positive")
         if self.apply_timesteps is not None:
@@ -99,12 +90,11 @@ class SparseCurvatureGuidanceConfig:
                 raise ValueError("guidance apply_timesteps must be >= 0")
 
     def applies_to(self, timestep: int) -> bool:
-        if not self.enabled or self.guidance_type == "none":
-            return False
-        if self.guidance_type == "dense_curvature":
-            if self.dense_step_m <= 0.0:
-                return False
-        elif self.scale <= 0.0:
+        if (
+            not self.enabled
+            or self.scale <= 0.0
+            or self.guidance_type == "none"
+        ):
             return False
         if self.apply_timesteps is None:
             return True
@@ -343,20 +333,27 @@ def apply_sparse_curvature_guidance(
 
 
 # DENSE_CURVATURE_GUIDANCE_V1
-# DENSE_CURVATURE_GUIDANCE_V2
-# Dense curvature is geometry-based: three consecutive 10 Hz spline positions
-# are used instead of time derivatives, avoiding near-zero-speed singularities.
-def _dense_spline_geometry(
+def dense_spline_curvature(
     trajectory_xy_m: torch.Tensor,
     *,
     trajectory_spline,
     start_velocity_xy: torch.Tensor,
+    min_speed_mps: float = 0.5,
+    eps: float = 1.0e-6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Analytic curvature of the differentiable 10 Hz clamped cubic spline.
+
+    ``trajectory_xy_m`` contains the 8 future sparse control points and may be
+    [B,H,2] or [B,M,H,2].  The existing PyTorch spline prepends ego-local
+    start_xy=(0,0), uses ego velocity as the clamped start derivative, and is
+    evaluated at t=0.1,...,4.0 s.
+    """
     if trajectory_xy_m.ndim not in (3, 4) or trajectory_xy_m.shape[-1] != 2:
         raise ValueError(
             "trajectory_xy_m must be [B,H,2] or [B,M,H,2], got "
             f"{tuple(trajectory_xy_m.shape)}"
         )
+
     start_xy = torch.zeros_like(trajectory_xy_m[..., 0, :])
     start_velocity = torch.as_tensor(
         start_velocity_xy,
@@ -365,82 +362,33 @@ def _dense_spline_geometry(
     )
     while start_velocity.ndim < trajectory_xy_m.ndim - 1:
         start_velocity = start_velocity.unsqueeze(-2)
+
     dense_time = trajectory_spline.dense_time_s.to(
         device=trajectory_xy_m.device,
         dtype=trajectory_xy_m.dtype,
     )
-    position, _, _ = trajectory_spline.evaluate(
+    if dense_time.numel() < 2:
+        raise ValueError("trajectory spline dense grid must include future samples")
+
+    _, velocity, acceleration = trajectory_spline.evaluate(
         trajectory_xy_m,
         start_xy=start_xy,
         start_velocity_xy=start_velocity,
-        query_time_s=dense_time,
+        query_time_s=dense_time[1:],
     )
-    return position, dense_time
-
-
-def dense_spline_geometric_curvature(
-    trajectory_xy_m: torch.Tensor,
-    *,
-    trajectory_spline,
-    start_velocity_xy: torch.Tensor,
-    min_segment_m: float = 0.25,
-    eps: float = 1.0e-6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Three-point geometric curvature on differentiable 10 Hz spline points.
-
-    Returns curvature, valid mask, center xy and center time. The signed
-    circumcircle formula is independent of the time-parametric speed:
-
-        kappa = 2 * cross(e_prev, e_next) /
-                (|e_prev| |e_next| |p_next-p_prev|)
-    """
-    position, dense_time = _dense_spline_geometry(
-        trajectory_xy_m,
-        trajectory_spline=trajectory_spline,
-        start_velocity_xy=start_velocity_xy,
-    )
-    if position.shape[-2] < 3:
-        raise ValueError("dense spline must contain at least three positions")
-
-    edge_prev = position[..., 1:-1, :] - position[..., :-2, :]
-    edge_next = position[..., 2:, :] - position[..., 1:-1, :]
-    chord = position[..., 2:, :] - position[..., :-2, :]
-    len_prev = torch.linalg.vector_norm(edge_prev, dim=-1)
-    len_next = torch.linalg.vector_norm(edge_next, dim=-1)
-    len_chord = torch.linalg.vector_norm(chord, dim=-1)
-    valid = (
-        (len_prev >= float(min_segment_m))
-        & (len_next >= float(min_segment_m))
-        & (len_chord >= float(min_segment_m))
-    )
-
-    cross = (
-        edge_prev[..., 0] * edge_next[..., 1]
-        - edge_prev[..., 1] * edge_next[..., 0]
-    )
-    denominator = len_prev * len_next * len_chord
-    raw = 2.0 * cross / denominator.clamp_min(float(eps))
-    curvature = torch.where(valid, raw, torch.zeros_like(raw))
-    return curvature, valid, position[..., 1:-1, :], dense_time[1:-1]
-
-
-def dense_spline_curvature(
-    trajectory_xy_m: torch.Tensor,
-    *,
-    trajectory_spline,
-    start_velocity_xy: torch.Tensor,
-    min_speed_mps: float = 0.5,
-    min_segment_m: float = 0.25,
-    eps: float = 1.0e-6,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Backward-compatible API; min_speed_mps is ignored by dense V2."""
-    del min_speed_mps
-    curvature, valid, _, _ = dense_spline_geometric_curvature(
-        trajectory_xy_m,
-        trajectory_spline=trajectory_spline,
-        start_velocity_xy=start_velocity_xy,
-        min_segment_m=min_segment_m,
-        eps=eps,
+    vx = velocity[..., 0]
+    vy = velocity[..., 1]
+    ax = acceleration[..., 0]
+    ay = acceleration[..., 1]
+    speed_sq = vx.square() + vy.square()
+    speed = torch.sqrt(speed_sq.clamp_min(float(eps)))
+    valid = speed > float(min_speed_mps)
+    numerator = vx * ay - vy * ax
+    denominator = speed_sq.clamp_min(float(eps)).pow(1.5)
+    curvature = torch.where(
+        valid,
+        numerator / denominator,
+        torch.zeros_like(numerator),
     )
     return curvature, valid
 
@@ -451,37 +399,23 @@ def _dense_loss_per_mode(
     trajectory_spline,
     start_velocity_xy: torch.Tensor,
     curvature_limit: float,
-    topk_fraction: float,
-    min_segment_m: float,
+    min_speed_mps: float,
     eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    curvature, valid, _, _ = dense_spline_geometric_curvature(
+    curvature, valid = dense_spline_curvature(
         trajectory_xy_m,
         trajectory_spline=trajectory_spline,
         start_velocity_xy=start_velocity_xy,
-        min_segment_m=min_segment_m,
+        min_speed_mps=min_speed_mps,
         eps=eps,
     )
-    violation = F.relu(
+    excess_ratio = F.relu(
         curvature.abs() / float(curvature_limit) - 1.0
-    ).square()
-    violation = violation * valid.to(dtype=trajectory_xy_m.dtype)
-
-    # Only the worst geometric part of the curve drives the update.
-    sorted_violation, _ = torch.sort(violation, dim=-1, descending=True)
-    valid_count = valid.sum(dim=-1)
-    k = torch.ceil(
-        valid_count.to(dtype=trajectory_xy_m.dtype) * float(topk_fraction)
-    ).to(dtype=torch.long).clamp_min(1)
-    rank = torch.arange(
-        sorted_violation.shape[-1],
-        device=trajectory_xy_m.device,
     )
-    rank = rank.view(*([1] * (sorted_violation.ndim - 1)), -1)
-    topk_mask = rank < k.unsqueeze(-1)
-    selected = sorted_violation * topk_mask.to(dtype=trajectory_xy_m.dtype)
-    loss = selected.sum(dim=-1) / k.to(dtype=trajectory_xy_m.dtype)
-    return torch.where(valid_count > 0, loss, torch.zeros_like(loss)), curvature, valid
+    valid_f = valid.to(dtype=trajectory_xy_m.dtype)
+    count = valid_f.sum(dim=-1).clamp_min(1.0)
+    loss = (excess_ratio.square() * valid_f).sum(dim=-1) / count
+    return loss, curvature, valid
 
 
 def dense_spline_curvature_statistics(
@@ -491,49 +425,29 @@ def dense_spline_curvature_statistics(
     start_velocity_xy: torch.Tensor,
     curvature_limit: float,
     min_speed_mps: float = 0.5,
-    min_segment_m: float = 0.25,
     eps: float = 1.0e-6,
 ) -> dict[str, torch.Tensor]:
-    """Geometry-based dense curvature statistics plus maximum location."""
-    del min_speed_mps
-    curvature, valid, center_xy, center_time_s = dense_spline_geometric_curvature(
+    curvature, valid = dense_spline_curvature(
         trajectory_xy_m,
         trajectory_spline=trajectory_spline,
         start_velocity_xy=start_velocity_xy,
-        min_segment_m=min_segment_m,
+        min_speed_mps=min_speed_mps,
         eps=eps,
     )
     abs_curvature = curvature.abs()
     valid_f = valid.to(dtype=trajectory_xy_m.dtype)
     count = valid_f.sum(dim=-1).clamp_min(1.0)
-    masked_abs = torch.where(
+    max_abs = torch.where(
         valid,
         abs_curvature,
-        torch.full_like(abs_curvature, -1.0),
-    )
-    peak_index = masked_abs.argmax(dim=-1)
-    has_valid = valid.any(dim=-1)
-    max_abs = torch.gather(
-        abs_curvature, -1, peak_index.unsqueeze(-1)
-    ).squeeze(-1)
-    max_abs = torch.where(has_valid, max_abs, torch.zeros_like(max_abs))
-
-    gather_xy = peak_index[..., None, None].expand(*peak_index.shape, 1, 2)
-    peak_xy = torch.gather(center_xy, -2, gather_xy).squeeze(-2)
-    peak_xy = torch.where(has_valid[..., None], peak_xy, torch.zeros_like(peak_xy))
-    peak_time = center_time_s[peak_index]
-    peak_time = torch.where(has_valid, peak_time, torch.zeros_like(peak_time))
-
+        torch.zeros_like(abs_curvature),
+    ).amax(dim=-1)
     violation = (
         (abs_curvature > float(curvature_limit)) & valid
     ).to(dtype=trajectory_xy_m.dtype)
     return {
         "max_abs_curvature": max_abs,
         "violation_ratio": violation.sum(dim=-1) / count,
-        "peak_index": peak_index,
-        "peak_time_s": peak_time,
-        "peak_x_m": peak_xy[..., 0],
-        "peak_y_m": peak_xy[..., 1],
     }
 
 
@@ -549,7 +463,12 @@ def apply_dense_curvature_guidance(
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
-    """Dense V2: geometric curvature + top-k loss + normalized metric step."""
+    """Guide sparse x0 with curvature of the 10 Hz execution spline.
+
+    If the Dense Residual Head is present, its current correction is included
+    before spline decoding.  The residual is intentionally stop-gradient, so
+    the guidance gradient updates only Diffusion x0 coordinates.
+    """
     if (
         not config.applies_to(int(timestep))
         or config.guidance_type != "dense_curvature"
@@ -576,6 +495,8 @@ def apply_dense_curvature_guidance(
             raise ValueError(
                 "mode_features are required when execution_residual_head is used"
             )
+        if tuple(mode_features.shape[:2]) != (batch, modes):
+            raise ValueError("mode_features shape mismatch for dense guidance")
         flat_feature = mode_features.detach().reshape(batch * modes, -1)
         flat_norm = (
             physical_xy.detach() / scale_xy
@@ -584,8 +505,7 @@ def apply_dense_curvature_guidance(
             flat_feature,
             flat_norm,
         ).reshape(batch, modes, horizon, 2)
-        # Residual geometry is included, but its response to x0 is stop-gradient.
-        return physical_xy + residual.detach().to(
+        return physical_xy + residual.to(
             device=physical_xy.device,
             dtype=physical_xy.dtype,
         )
@@ -600,13 +520,18 @@ def apply_dense_curvature_guidance(
             trajectory_spline=trajectory_spline,
             start_velocity_xy=start_velocity_xy,
             curvature_limit=config.curvature_limit,
-            topk_fraction=config.dense_topk_fraction,
-            min_segment_m=config.dense_min_segment_m,
+            min_speed_mps=config.dense_min_speed_mps,
             eps=config.eps,
         )
         valid_mode_f = mode_valid_mask.to(dtype=physical_xy.dtype)
         objective = (loss_per_mode * valid_mode_f).sum()
-        gradient = torch.autograd.grad(objective, physical_xy)[0]
+        gradient = torch.autograd.grad(
+            objective,
+            physical_xy,
+            create_graph=False,
+            retain_graph=False,
+            allow_unused=False,
+        )[0]
         gradient = gradient * valid_mode_f[..., None, None]
 
         if config.preserve_endpoint:
@@ -616,11 +541,13 @@ def apply_dense_curvature_guidance(
 
         flat = gradient.flatten(start_dim=-2)
         grad_norm = torch.linalg.vector_norm(flat, dim=-1)
-        has_gradient = grad_norm > float(config.eps)
-        direction = gradient / grad_norm.clamp_min(float(config.eps))[..., None, None]
-        direction = direction * has_gradient[..., None, None].to(direction.dtype)
+        clip_factor = (
+            float(config.grad_clip_norm)
+            / grad_norm.clamp_min(float(config.eps))
+        ).clamp(max=1.0)
+        gradient = gradient * clip_factor[..., None, None]
         guided_xy = (
-            physical_xy - float(config.dense_step_m) * direction
+            physical_xy - float(config.scale) * gradient
         ).detach()
 
     with torch.no_grad():
@@ -630,14 +557,14 @@ def apply_dense_curvature_guidance(
             trajectory_spline=trajectory_spline,
             start_velocity_xy=start_velocity_xy,
             curvature_limit=config.curvature_limit,
-            topk_fraction=config.dense_topk_fraction,
-            min_segment_m=config.dense_min_segment_m,
+            min_speed_mps=config.dense_min_speed_mps,
             eps=config.eps,
         )
         valid_mode_f = mode_valid_mask.to(dtype=guided_xy.dtype)
         mode_count = valid_mode_f.sum(dim=-1).clamp_min(1.0)
         update_per_mode = torch.linalg.vector_norm(
-            (guided_xy - physical_xy.detach()).flatten(start_dim=-2), dim=-1
+            (guided_xy - physical_xy.detach()).flatten(start_dim=-2),
+            dim=-1,
         )
         loss_before_sample = (
             loss_per_mode.detach() * valid_mode_f

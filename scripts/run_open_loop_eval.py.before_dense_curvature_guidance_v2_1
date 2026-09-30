@@ -187,25 +187,6 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Ignore dense spline curvature below this speed (m/s).",
     )
-    # DENSE_CURVATURE_GUIDANCE_V2
-    parser.add_argument(
-        "--guidance-dense-step-m",
-        type=float,
-        default=0.20,
-        help="Normalized dense-guidance step length in metres per reverse step.",
-    )
-    parser.add_argument(
-        "--guidance-dense-topk-fraction",
-        type=float,
-        default=0.20,
-        help="Fraction of valid dense curvature points used by top-k loss.",
-    )
-    parser.add_argument(
-        "--guidance-dense-min-segment-m",
-        type=float,
-        default=0.25,
-        help="Minimum adjacent/chord length for geometric dense curvature.",
-    )
     return parser.parse_args()
 
 
@@ -249,10 +230,6 @@ def main() -> int:
         # DENSE_CURVATURE_GUIDANCE_V1_REPAIR
         guidance_type=args.guidance_type,
         guidance_dense_min_speed_mps=args.guidance_dense_min_speed_mps,
-        # DENSE_CURVATURE_GUIDANCE_V2
-        guidance_dense_step_m=args.guidance_dense_step_m,
-        guidance_dense_topk_fraction=args.guidance_dense_topk_fraction,
-        guidance_dense_min_segment_m=args.guidance_dense_min_segment_m,
     )
     print_summary(summary)
     return 0

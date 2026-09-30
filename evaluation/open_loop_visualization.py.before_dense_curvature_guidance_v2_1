@@ -33,9 +33,6 @@ class TrajectoryVisualizationSample:
     guidance_update_l2_m: Optional[float] = None
     max_abs_curvature_pre_guidance: Optional[float] = None
     max_abs_curvature_post_guidance: Optional[float] = None
-    # DENSE_CURVATURE_GUIDANCE_V2
-    max_curvature_x_pre_guidance: Optional[float] = None
-    max_curvature_x_post_guidance: Optional[float] = None
 
 
 # OPEN_LOOP_DENSE_VIZ_V1: visualization
@@ -490,11 +487,6 @@ def plot_random_trajectory_gallery(
                 )
             if update is not None:
                 title += f"  update={update:.4f} m"
-                if sample.guidance_type == "dense_curvature":
-                    peak_x_pre = sample.max_curvature_x_pre_guidance
-                    peak_x_post = sample.max_curvature_x_post_guidance
-                    if peak_x_pre is not None and peak_x_post is not None:
-                        title += f"\npeak x {peak_x_pre:.1f}->{peak_x_post:.1f} m"
 
         ax.set_title(title, fontsize=9.1)
         ax.set_xlabel("x [m]")
