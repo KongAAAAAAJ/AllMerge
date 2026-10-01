@@ -854,23 +854,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 if guidance_last is not None
                 else zero_diag
             ),
-            # DENSE_GUIDANCE_G1_POLISHING_V3_2
-            "guidance_polish_trigger_fraction": (
-                guidance_last.get("polish_trigger_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_polish_iterations_used": (
-                guidance_last.get("polish_iterations_used", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_polish_backtracking_reductions": (
-                guidance_last.get("polish_backtracking_reductions", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_polish_update_l2_m": (
-                guidance_last.get("polish_update_l2_m", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
             "guidance_bound_loss_before": (
                 guidance_last.get("bound_loss_before", zero_diag)
                 if guidance_last is not None else zero_diag
@@ -1055,11 +1038,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_update_l2_m": base["guidance_update_l2_m"],
             "guidance_inner_iterations_used": base["guidance_inner_iterations_used"],
             "guidance_backtracking_reductions": base["guidance_backtracking_reductions"],
-            # DENSE_GUIDANCE_G1_POLISHING_V3_2
-            "guidance_polish_trigger_fraction": base["guidance_polish_trigger_fraction"],
-            "guidance_polish_iterations_used": base["guidance_polish_iterations_used"],
-            "guidance_polish_backtracking_reductions": base["guidance_polish_backtracking_reductions"],
-            "guidance_polish_update_l2_m": base["guidance_polish_update_l2_m"],
             "guidance_bound_loss_before": base["guidance_bound_loss_before"],
             "guidance_bound_loss_after": base["guidance_bound_loss_after"],
             "guidance_peak_loss_before": base["guidance_peak_loss_before"],

@@ -41,12 +41,6 @@ class SparseCurvatureGuidanceConfig:
     dense_peak_alpha: float = 10.0
     dense_residual_gradient_enabled: bool = True
     dense_normal_projection_enabled: bool = True
-    # DENSE_GUIDANCE_G1_POLISHING_V3_2
-    # Disabled by default so F' / Full V3.1 remains bit-for-bit the baseline.
-    dense_polish_enabled: bool = False
-    dense_polish_max_curvature: float = 0.04
-    dense_polish_iters: int = 3
-    dense_polish_step_m: float = 0.075
     eps: float = 1.0e-6
 
     @classmethod
@@ -125,15 +119,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("dense V3 loss weights must be >= 0")
         if self.dense_peak_alpha <= 0.0:
             raise ValueError("guidance dense_peak_alpha must be positive")
-        # DENSE_GUIDANCE_G1_POLISHING_V3_2
-        if self.dense_polish_max_curvature <= self.curvature_limit:
-            raise ValueError(
-                "dense_polish_max_curvature must be greater than curvature_limit"
-            )
-        if self.dense_polish_iters < 1:
-            raise ValueError("guidance dense_polish_iters must be >= 1")
-        if self.dense_polish_step_m <= 0.0:
-            raise ValueError("guidance dense_polish_step_m must be positive")
         if self.eps <= 0.0:
             raise ValueError("guidance eps must be positive")
         if self.apply_timesteps is not None:
@@ -743,9 +728,6 @@ def apply_dense_curvature_guidance(
         physical_xy: torch.Tensor,
         *,
         allow_input_gradient: bool,
-        bound_weight: Optional[float] = None,
-        peak_weight: Optional[float] = None,
-        dkappa_weight: Optional[float] = None,
     ):
         execution_xy = execution_points(
             physical_xy,
@@ -759,18 +741,9 @@ def apply_dense_curvature_guidance(
             topk_fraction=config.dense_topk_fraction,
             min_segment_m=config.dense_min_segment_m,
             eps=config.eps,
-            bound_weight=(
-                config.dense_bound_weight
-                if bound_weight is None else float(bound_weight)
-            ),
-            peak_weight=(
-                config.dense_peak_weight
-                if peak_weight is None else float(peak_weight)
-            ),
-            dkappa_weight=(
-                config.dense_dkappa_weight
-                if dkappa_weight is None else float(dkappa_weight)
-            ),
+            bound_weight=config.dense_bound_weight,
+            peak_weight=config.dense_peak_weight,
+            dkappa_weight=config.dense_dkappa_weight,
             peak_alpha=config.dense_peak_alpha,
         )
 
@@ -913,167 +886,6 @@ def apply_dense_curvature_guidance(
         if not bool(accepted_this.any().item()):
             break
 
-    # DENSE_GUIDANCE_G1_POLISHING_V3_2
-    # A second, conservative feasibility-polishing stage is used only for
-    # trajectories that are already close to the hard curvature boundary.
-    # It deliberately removes the d-kappa term: at this stage the goal is to
-    # cross the feasibility boundary without changing the main F' solver.
-    polish_start_xy = current_xy.clone()
-    polish_triggered = torch.zeros_like(mode_valid)
-    polish_accepted = torch.zeros(
-        (batch, modes), device=current_xy.device, dtype=current_xy.dtype
-    )
-    polish_backtracking = torch.zeros_like(polish_accepted)
-
-    if bool(config.dense_polish_enabled):
-        with torch.no_grad():
-            _, polish_curvature0, polish_valid0, _ = evaluate(
-                current_xy,
-                allow_input_gradient=False,
-                dkappa_weight=0.0,
-            )
-            polish_max0 = torch.where(
-                polish_valid0,
-                polish_curvature0.abs(),
-                torch.zeros_like(polish_curvature0),
-            ).amax(dim=-1)
-            polish_triggered = (
-                mode_valid
-                & (polish_max0 > float(config.curvature_limit) + 1.0e-8)
-                & (polish_max0 <= float(config.dense_polish_max_curvature) + 1.0e-8)
-            )
-
-        for _ in range(int(config.dense_polish_iters)):
-            with torch.enable_grad():
-                x_var = current_xy.detach().requires_grad_(True)
-                polish_loss, polish_curvature, polish_valid, polish_components = evaluate(
-                    x_var,
-                    allow_input_gradient=bool(
-                        config.dense_residual_gradient_enabled
-                    ),
-                    dkappa_weight=0.0,
-                )
-                polish_max = torch.where(
-                    polish_valid,
-                    polish_curvature.abs(),
-                    torch.zeros_like(polish_curvature),
-                ).amax(dim=-1)
-                polish_window = (
-                    polish_triggered
-                    & (polish_max > float(config.curvature_limit) + 1.0e-8)
-                    & (polish_max <= float(config.dense_polish_max_curvature) + 1.0e-8)
-                )
-                objective = (
-                    polish_loss * polish_window.to(polish_loss.dtype)
-                ).sum()
-                if not objective.requires_grad:
-                    break
-                gradient = torch.autograd.grad(
-                    objective,
-                    x_var,
-                    create_graph=False,
-                    retain_graph=False,
-                    allow_unused=False,
-                )[0]
-                gradient = gradient * polish_window[..., None, None].to(gradient.dtype)
-
-                if config.dense_normal_projection_enabled:
-                    gradient = _project_gradient_to_sparse_normals(
-                        gradient,
-                        x_var,
-                        eps=config.eps,
-                    )
-                if config.preserve_endpoint:
-                    gradient = gradient.clone()
-                    gradient[..., -1, :] = 0.0
-
-                grad_norm = torch.linalg.vector_norm(
-                    gradient.flatten(start_dim=-2), dim=-1
-                )
-                direction = gradient / grad_norm.clamp_min(
-                    float(config.eps)
-                )[..., None, None]
-                active = (
-                    polish_window
-                    & (grad_norm > float(config.eps))
-                    & polish_components["has_violation"]
-                )
-
-            if not bool(active.any().item()):
-                break
-
-            old_loss = polish_loss.detach()
-            old_max = polish_max.detach()
-            accepted_this = torch.zeros_like(active)
-            step = torch.full_like(
-                old_loss, float(config.dense_polish_step_m)
-            )
-            max_trials = (
-                int(config.dense_backtracking_max_trials)
-                if config.dense_backtracking_enabled else 1
-            )
-
-            for trial in range(max_trials):
-                trial_active = active & ~accepted_this
-                if not bool(trial_active.any().item()):
-                    break
-
-                candidate = current_xy - step[..., None, None] * direction.detach()
-                delta = candidate - initial_xy
-                total_move = torch.linalg.vector_norm(
-                    delta.flatten(start_dim=-2), dim=-1
-                )
-                trust_scale = (
-                    float(config.dense_max_total_move_m)
-                    / total_move.clamp_min(float(config.eps))
-                ).clamp(max=1.0)
-                candidate = initial_xy + delta * trust_scale[..., None, None]
-                if config.preserve_endpoint:
-                    candidate = candidate.clone()
-                    candidate[..., -1, :] = initial_xy[..., -1, :]
-
-                with torch.no_grad():
-                    cand_loss, cand_curvature, cand_valid, _ = evaluate(
-                        candidate,
-                        allow_input_gradient=False,
-                        dkappa_weight=0.0,
-                    )
-                    cand_max = torch.where(
-                        cand_valid,
-                        cand_curvature.abs(),
-                        torch.zeros_like(cand_curvature),
-                    ).amax(dim=-1)
-
-                if config.dense_backtracking_enabled:
-                    improved_loss = cand_loss < (old_loss - 1.0e-8)
-                    nonincreasing_peak = cand_max <= (old_max + 1.0e-8)
-                    accept = trial_active & improved_loss & nonincreasing_peak
-                else:
-                    accept = trial_active
-
-                current_xy = torch.where(
-                    accept[..., None, None], candidate, current_xy
-                )
-                accepted_this |= accept
-
-                rejected = trial_active & ~accept
-                if trial + 1 < max_trials:
-                    polish_backtracking = (
-                        polish_backtracking + rejected.to(current_xy.dtype)
-                    )
-                    step = torch.where(
-                        rejected,
-                        step * float(config.dense_backtracking_factor),
-                        step,
-                    )
-                    step = step.clamp_min(float(config.dense_min_step_m))
-
-            polish_accepted = (
-                polish_accepted + accepted_this.to(current_xy.dtype)
-            )
-            if not bool(accepted_this.any().item()):
-                break
-
     guided_xy = current_xy.detach()
     with torch.no_grad():
         loss_after, curvature_after, valid_after, components_after = evaluate(
@@ -1098,22 +910,6 @@ def apply_dense_curvature_guidance(
         ).sum(dim=-1) / mode_count
         backtracking_sample = (
             backtracking_reductions * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        # DENSE_GUIDANCE_G1_POLISHING_V3_2 diagnostics
-        polish_trigger_fraction = (
-            polish_triggered.to(current_xy.dtype) * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        polish_iterations_sample = (
-            polish_accepted * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        polish_backtracking_sample = (
-            polish_backtracking * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        polish_update_per_mode = torch.linalg.vector_norm(
-            (guided_xy - polish_start_xy).flatten(start_dim=-2), dim=-1
-        )
-        polish_update_sample = (
-            polish_update_per_mode * mode_valid_f
         ).sum(dim=-1) / mode_count
 
         valid_before_all = valid_before & mode_valid[..., None]
@@ -1140,11 +936,6 @@ def apply_dense_curvature_guidance(
             "update_l2_m": update_l2_sample,
             "inner_iterations_used": accepted_inner_sample,
             "backtracking_reductions": backtracking_sample,
-            # DENSE_GUIDANCE_G1_POLISHING_V3_2
-            "polish_trigger_fraction": polish_trigger_fraction,
-            "polish_iterations_used": polish_iterations_sample,
-            "polish_backtracking_reductions": polish_backtracking_sample,
-            "polish_update_l2_m": polish_update_sample,
             "bound_loss_before": sample_component("bound_loss", components_before),
             "bound_loss_after": sample_component("bound_loss", components_after),
             "peak_loss_before": sample_component("peak_loss", components_before),
