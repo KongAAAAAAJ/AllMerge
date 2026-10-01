@@ -113,12 +113,12 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
-    # GRU_REFINEMENT_GOAL_V3
+    # GRU_REFINEMENT_COARSE_GOAL_V4
     # ``mlp``: original MLP diffusion denoising head only.
     # ``gru``: keep the same MLP denoiser, then add a goal-conditioned GRU
-    # sparse-trajectory refinement stage. During supervised training the goal
-    # is the expert trajectory endpoint; inference/GRPO use each coarse mode's
-    # endpoint. GRU therefore refines x0 instead of directly predicting the
+    # sparse-trajectory refinement stage. Supervised training, inference, and
+    # GRPO all use each coarse decision mode's endpoint as the navigation goal.
+    # GRU therefore refines x0 instead of directly predicting the
     # diffusion residual.
     reg_head_type: str = "mlp"
     gru_refine_max_x_m: float = 3.0

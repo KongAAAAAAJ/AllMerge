@@ -317,7 +317,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
             persistent=False,
         )
 
-        # GRU_REFINEMENT_GOAL_V3
+        # GRU_REFINEMENT_COARSE_GOAL_V4
         refine_limit_norm = torch.tensor(
             [
                 float(config.gru_refine_max_x_m) / trajectory_scale_x,
@@ -382,7 +382,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
             ]
         )
 
-        # GRU_REFINEMENT_GOAL_V3
+        # GRU_REFINEMENT_COARSE_GOAL_V4
         # The MLP reg_head always remains the diffusion denoiser.  ``gru`` no
         # longer replaces it; instead a second GRU predicts a bounded local
         # correction on the already-denoised sparse x0 trajectory.
@@ -480,7 +480,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
                 time_embed,
             )
 
-        # GRU_REFINEMENT_GOAL_V3 -- stage 1: original MLP diffusion denoising.
+        # GRU_REFINEMENT_COARSE_GOAL_V4 -- stage 1: original MLP diffusion denoising.
         residual = self.reg_head(mode_tokens).reshape(
             batch, modes, steps, dims
         )
@@ -669,9 +669,9 @@ class StructuredDiffusionPlanner(nn.Module):
         clean_anchor_norm = self.adapter.normalize_trajectory(
             features["coarse_trajectories"]
         )
-        # GRU_REFINEMENT_GOAL_V3: inference defaults to one endpoint per
-        # decision/coarse mode. Supervised callers may override this with the
-        # expert endpoint [B,2].
+        # GRU_REFINEMENT_COARSE_GOAL_V4: inference defaults to one endpoint per
+        # decision/coarse mode. Supervised training now passes the same
+        # per-mode coarse endpoint explicitly, so train/runtime distributions match.
         runtime_navigation_point_norm = navigation_point_norm
         if runtime_navigation_point_norm is None:
             runtime_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
@@ -1154,19 +1154,17 @@ class StructuredDiffusionPlanner(nn.Module):
             timesteps,
         )
 
-        # GRU_REFINEMENT_GOAL_V3: supervised training uses the expert
-        # trajectory endpoint as the navigation goal. It is broadcast across
-        # candidate modes inside the denoiser; target_mode still determines
-        # which mode receives trajectory regression supervision.
-        expert_navigation_point_norm = self.adapter.normalize_trajectory(
-            target[:, -1, :]
-        )
+        # GRU_REFINEMENT_COARSE_GOAL_V4: remove the train/inference goal gap.
+        # Every candidate mode uses the endpoint of its own normalized coarse
+        # decision trajectory, exactly matching runtime/GRPO conditioning.
+        # GT trajectory remains supervision only and is never used as a goal input.
+        coarse_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
         predicted_x0_norm, logits = (
             self.denoiser(
                 noisy,
                 timesteps,
                 scene,
-                navigation_point_norm=expert_navigation_point_norm,
+                navigation_point_norm=coarse_navigation_point_norm,
             )
         )
 
@@ -1256,7 +1254,7 @@ class StructuredDiffusionPlanner(nn.Module):
                 dense_loss_lambda_p=float(dense_loss_lambda_p),
                 dense_loss_weight_mode=dense_loss_weight_mode,
                 dense_loss_terminal_weight=float(dense_loss_terminal_weight),
-                navigation_point_norm=expert_navigation_point_norm,
+                navigation_point_norm=coarse_navigation_point_norm,
             )
             dense_loss_raw = dense_aux["dense_loss_raw"]
             dense_loss_weighted = dense_aux["dense_loss_weighted"]
