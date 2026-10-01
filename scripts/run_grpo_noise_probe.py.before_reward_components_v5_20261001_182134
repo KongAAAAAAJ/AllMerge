@@ -57,278 +57,6 @@ SCENARIOS = {
 }
 
 
-# Active VehicleModeRewardConfig weights.  Component statistics are verified
-# against reward_result.rewards on every state, so a future reward-config drift
-# fails loudly instead of silently reporting stale weighted contributions.
-REWARD_COMPONENT_WEIGHTS = {
-    "progress_score": 0.47,
-    "gap_penalty": -1.185,
-    "ttc_penalty": -0.5,
-    "road_penalty": -0.5,
-    "comfort_penalty": -0.0225,
-}
-REWARD_EVENT_WEIGHTS = {
-    "collision": -5.0,
-    "out_of_drivable": -4.0,
-}
-REWARD_DIAGNOSTIC_COMPONENTS = (
-    "minimum_background_gap_m",
-    "minimum_teammate_gap_m",
-    "minimum_road_margin_m",
-    "minimum_ttc_s",
-)
-
-
-def _reward_array_to_vgm(value: object, *, group_size: int, name: str) -> np.ndarray:
-    """Normalize reward tensors to [vehicle, group, mode]."""
-    if hasattr(value, "detach"):
-        value = value.detach().cpu().numpy()
-    array = np.asarray(value)
-    if array.shape == (3, 10, int(group_size)):
-        return np.transpose(array, (0, 2, 1))
-    if array.shape == (3, int(group_size), 10):
-        return array
-    raise RuntimeError(
-        f"{name} has unsupported shape {array.shape}; expected [3,10,G] or [3,G,10]"
-    )
-
-
-def _reward_result_arrays(reward_result: object, *, group_size: int) -> dict[str, np.ndarray]:
-    """Extract raw components/events and verify exact reward recomposition."""
-    arrays: dict[str, np.ndarray] = {}
-    arrays["reward"] = _reward_array_to_vgm(
-        getattr(reward_result, "rewards"), group_size=group_size, name="rewards"
-    ).astype(np.float64, copy=False)
-
-    components = getattr(reward_result, "components", None)
-    if components is None:
-        raise RuntimeError(
-            "reward_result does not expose .components; current W4 reward contract is required"
-        )
-    for name in (*REWARD_COMPONENT_WEIGHTS.keys(), *REWARD_DIAGNOSTIC_COMPONENTS):
-        if name not in components:
-            raise RuntimeError(f"reward_result.components missing {name!r}")
-        arrays[name] = _reward_array_to_vgm(
-            components[name], group_size=group_size, name=f"components[{name}]"
-        ).astype(np.float64, copy=False)
-
-    for name in ("unsafe", "collision", "out_of_drivable", "clearance_violation"):
-        arrays[name] = _reward_array_to_vgm(
-            getattr(reward_result, name), group_size=group_size, name=name
-        ).astype(bool, copy=False)
-
-    reconstructed = np.zeros_like(arrays["reward"], dtype=np.float64)
-    for name, weight in REWARD_COMPONENT_WEIGHTS.items():
-        reconstructed += float(weight) * arrays[name]
-    for name, weight in REWARD_EVENT_WEIGHTS.items():
-        reconstructed += float(weight) * arrays[name].astype(np.float64)
-    max_error = float(np.max(np.abs(reconstructed - arrays["reward"])))
-    if not np.isfinite(max_error) or max_error > 5e-4:
-        raise RuntimeError(
-            "reward-component reconstruction mismatch: "
-            f"max_abs_error={max_error:.6g}. Reward weights/config may have changed."
-        )
-    arrays["reconstruction_max_abs_error"] = np.asarray(max_error, dtype=np.float64)
-    return arrays
-
-
-def _add_component_triplet(
-    row: dict[str, object],
-    arrays: dict[str, np.ndarray],
-    selector: tuple[int, int],
-    *,
-    group0: int,
-    best_group: int,
-) -> None:
-    role, mode = selector
-    for name, weight in REWARD_COMPONENT_WEIGHTS.items():
-        values = arrays[name][role, :, mode]
-        row[f"group0_raw_{name}"] = float(values[group0])
-        row[f"best_raw_{name}"] = float(values[best_group])
-        row[f"mean_raw_{name}"] = float(np.mean(values))
-        row[f"group0_contrib_{name}"] = float(weight * values[group0])
-        row[f"best_contrib_{name}"] = float(weight * values[best_group])
-        row[f"mean_contrib_{name}"] = float(weight * np.mean(values))
-        row[f"best_minus_group0_contrib_{name}"] = float(
-            weight * (values[best_group] - values[group0])
-        )
-
-    for name, weight in REWARD_EVENT_WEIGHTS.items():
-        values = arrays[name][role, :, mode].astype(np.float64)
-        row[f"group0_{name}"] = int(values[group0] > 0.5)
-        row[f"best_{name}"] = int(values[best_group] > 0.5)
-        row[f"{name}_rate"] = float(np.mean(values))
-        row[f"group0_contrib_{name}"] = float(weight * values[group0])
-        row[f"best_contrib_{name}"] = float(weight * values[best_group])
-        row[f"mean_contrib_{name}"] = float(weight * np.mean(values))
-        row[f"best_minus_group0_contrib_{name}"] = float(
-            weight * (values[best_group] - values[group0])
-        )
-
-    for name in ("unsafe", "clearance_violation"):
-        values = arrays[name][role, :, mode].astype(np.float64)
-        row[f"group0_{name}"] = int(values[group0] > 0.5)
-        row[f"best_{name}"] = int(values[best_group] > 0.5)
-        row[f"{name}_rate"] = float(np.mean(values))
-
-    for name in REWARD_DIAGNOSTIC_COMPONENTS:
-        values = arrays[name][role, :, mode]
-        row[f"group0_{name}"] = float(values[group0])
-        row[f"best_{name}"] = float(values[best_group])
-        row[f"mean_{name}"] = float(np.mean(values))
-
-
-def _selected_reward_component_rows(
-    *,
-    checkpoint: str,
-    scenario: str,
-    sample_index: int,
-    env_seed: int,
-    noise_seed: int,
-    selected_mode_idx: torch.Tensor,
-    arrays: dict[str, np.ndarray],
-) -> list[dict[str, object]]:
-    selected = selected_mode_idx.detach().cpu().numpy().reshape(-1)
-    rows: list[dict[str, object]] = []
-    for role in range(3):
-        mode = int(selected[role])
-        rewards = arrays["reward"][role, :, mode]
-        best_group = int(np.argmax(rewards))
-        row: dict[str, object] = {
-            "checkpoint": checkpoint,
-            "scenario": scenario,
-            "sample_index": int(sample_index),
-            "env_seed": int(env_seed),
-            "noise_seed": int(noise_seed),
-            "vehicle_role": int(role),
-            "mode": mode,
-            "group_size": int(rewards.shape[0]),
-            "group0_reward": float(rewards[0]),
-            "best_reward": float(rewards[best_group]),
-            "mean_reward": float(np.mean(rewards)),
-            "best_group_id": best_group,
-            "best_gain": float(rewards[best_group] - rewards[0]),
-            "reconstruction_max_abs_error": float(arrays["reconstruction_max_abs_error"]),
-        }
-        _add_component_triplet(row, arrays, (role, mode), group0=0, best_group=best_group)
-        rows.append(row)
-    return rows
-
-
-def _state_reward_component_row(
-    *,
-    checkpoint: str,
-    scenario: str,
-    sample_index: int,
-    env_seed: int,
-    noise_seed: int,
-    arrays: dict[str, np.ndarray],
-    mode_valid_mask: torch.Tensor,
-) -> dict[str, object]:
-    valid = mode_valid_mask.detach().cpu().numpy().astype(bool)
-    reward_vgm = arrays["reward"]
-    group_size = int(reward_vgm.shape[1])
-    valid_expand = np.broadcast_to(valid[:, None, :], reward_vgm.shape)
-    group_reward = np.asarray(
-        [np.mean(reward_vgm[:, g, :][valid]) for g in range(group_size)],
-        dtype=np.float64,
-    )
-    best_group = int(np.argmax(group_reward))
-    row: dict[str, object] = {
-        "checkpoint": checkpoint,
-        "scenario": scenario,
-        "sample_index": int(sample_index),
-        "env_seed": int(env_seed),
-        "noise_seed": int(noise_seed),
-        "group_size": group_size,
-        "valid_vehicle_mode_count": int(valid.sum()),
-        "group0_reward": float(group_reward[0]),
-        "best_group_reward": float(group_reward[best_group]),
-        "mean_group_reward": float(np.mean(group_reward)),
-        "best_group_id": best_group,
-        "best_group_gain": float(group_reward[best_group] - group_reward[0]),
-        "reconstruction_max_abs_error": float(arrays["reconstruction_max_abs_error"]),
-    }
-
-    for name, weight in REWARD_COMPONENT_WEIGHTS.items():
-        values = arrays[name]
-        group0_mean = float(np.mean(values[:, 0, :][valid]))
-        best_mean = float(np.mean(values[:, best_group, :][valid]))
-        all_mean = float(np.mean(values[valid_expand]))
-        row[f"group0_raw_{name}"] = group0_mean
-        row[f"best_raw_{name}"] = best_mean
-        row[f"mean_raw_{name}"] = all_mean
-        row[f"group0_contrib_{name}"] = float(weight * group0_mean)
-        row[f"best_contrib_{name}"] = float(weight * best_mean)
-        row[f"mean_contrib_{name}"] = float(weight * all_mean)
-        row[f"best_minus_group0_contrib_{name}"] = float(weight * (best_mean - group0_mean))
-
-    for name, weight in REWARD_EVENT_WEIGHTS.items():
-        values = arrays[name].astype(np.float64)
-        group0_rate = float(np.mean(values[:, 0, :][valid]))
-        best_rate = float(np.mean(values[:, best_group, :][valid]))
-        all_rate = float(np.mean(values[valid_expand]))
-        row[f"group0_{name}_rate"] = group0_rate
-        row[f"best_{name}_rate"] = best_rate
-        row[f"{name}_rate"] = all_rate
-        row[f"group0_contrib_{name}"] = float(weight * group0_rate)
-        row[f"best_contrib_{name}"] = float(weight * best_rate)
-        row[f"mean_contrib_{name}"] = float(weight * all_rate)
-        row[f"best_minus_group0_contrib_{name}"] = float(weight * (best_rate - group0_rate))
-
-    for name in ("unsafe", "clearance_violation"):
-        values = arrays[name].astype(np.float64)
-        row[f"group0_{name}_rate"] = float(np.mean(values[:, 0, :][valid]))
-        row[f"best_{name}_rate"] = float(np.mean(values[:, best_group, :][valid]))
-        row[f"{name}_rate"] = float(np.mean(values[valid_expand]))
-
-    for name in REWARD_DIAGNOSTIC_COMPONENTS:
-        values = arrays[name]
-        row[f"group0_{name}"] = float(np.mean(values[:, 0, :][valid]))
-        row[f"best_{name}"] = float(np.mean(values[:, best_group, :][valid]))
-        row[f"mean_{name}"] = float(np.mean(values[valid_expand]))
-
-    return row
-
-
-def _aggregate_reward_component_rows(
-    rows: list[dict[str, object]],
-    *,
-    checkpoint: str,
-    scenario: str,
-    scope: str,
-) -> dict[str, object]:
-    subset = [
-        row for row in rows
-        if row["checkpoint"] == checkpoint and (scenario == "all" or row["scenario"] == scenario)
-    ]
-    if not subset:
-        raise ValueError(
-            f"no reward-component rows for checkpoint={checkpoint} scenario={scenario} scope={scope}"
-        )
-    excluded = {
-        "checkpoint", "scenario", "sample_index", "env_seed", "noise_seed",
-        "vehicle_role", "mode", "best_group_id",
-    }
-    out: dict[str, object] = {
-        "checkpoint": checkpoint,
-        "scenario": scenario,
-        "scope": scope,
-        "row_count": len(subset),
-    }
-    for key in subset[0].keys():
-        if key in excluded:
-            continue
-        values = []
-        for row in subset:
-            value = row.get(key)
-            if isinstance(value, (int, float, np.integer, np.floating, bool)):
-                values.append(float(value))
-        if values:
-            out[f"mean_{key}"] = float(np.mean(values))
-    return out
-
-
 @dataclass(frozen=True)
 class CheckpointSpec:
     name: str
@@ -396,9 +124,10 @@ def parse_args() -> argparse.Namespace:
             "Probe current GRPO group sampling without training. For each fixed "
             "environment state, generate G trajectories from different diffusion "
             "noise, score them with the production W4 reward, and compare every "
-            "group against group 0. V5 keeps V4 noise sampling and adds reward-component "
-            "decomposition for all-valid group means and selected modes, while preserving "
-            "the existing selected-mode diversity diagnostics and 3x3 gallery."
+            "group against group 0. V4 supports additive, multiplicative, and hybrid "
+            "x-multiplicative/y-additive reverse-transition exploration, "
+            "selected-mode x/y diversity diagnostics, and the existing random "
+            "3x3 trajectory gallery."
         )
     )
     parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint, required=True)
@@ -457,7 +186,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reward-fn", default="auto")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v5"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v4"))
     parser.add_argument(
         "--visualization-seed", type=int, default=0,
         help="deterministic seed used to choose random gallery states",
@@ -680,8 +409,6 @@ def _run_checkpoint(
     list[ProbeVehicleModeSummary],
     list[SelectedModeSummary],
     list[GalleryState],
-    list[dict[str, object]],
-    list[dict[str, object]],
 ]:
     adapter, model = _build_model(checkpoint, device)
     if args.noise_type == "additive":
@@ -712,8 +439,6 @@ def _run_checkpoint(
     vm_rows: list[ProbeVehicleModeSummary] = []
     selected_rows: list[SelectedModeSummary] = []
     gallery_rows: list[GalleryState] = []
-    state_component_rows: list[dict[str, object]] = []
-    selected_component_rows: list[dict[str, object]] = []
 
     scenarios = _scenario_order(args)
     for scenario_index, scenario_name in enumerate(scenarios):
@@ -758,32 +483,6 @@ def _run_checkpoint(
                         device=trace.candidates.device,
                         dtype=trace.candidates.dtype,
                     )
-                    reward_arrays = _reward_result_arrays(
-                        reward_result, group_size=int(args.group_size)
-                    )
-
-                state_component_rows.append(
-                    _state_reward_component_row(
-                        checkpoint=checkpoint.name,
-                        scenario=scenario_name,
-                        sample_index=collected,
-                        env_seed=env_seed,
-                        noise_seed=noise_seed,
-                        arrays=reward_arrays,
-                        mode_valid_mask=features["mode_valid_mask"],
-                    )
-                )
-                selected_component_rows.extend(
-                    _selected_reward_component_rows(
-                        checkpoint=checkpoint.name,
-                        scenario=scenario_name,
-                        sample_index=collected,
-                        env_seed=env_seed,
-                        noise_seed=noise_seed,
-                        selected_mode_idx=selected_mode_idx,
-                        arrays=reward_arrays,
-                    )
-                )
 
                 sample_summary, one_group_rows, one_vm_rows = analyze_group_rewards(
                     rewards,
@@ -854,8 +553,6 @@ def _run_checkpoint(
                     f"sel_ADE={np.mean([r.sparse_pairwise_ade_mean for r in one_selected_rows]):.3f}m "
                     f"sel_dy={np.mean([r.sparse_pairwise_abs_dy_mean for r in one_selected_rows]):.3f}m "
                     f"sel_Rstd={np.mean([r.reward_std for r in one_selected_rows]):.3f} "
-                    f"collision={state_component_rows[-1]['collision_rate']:.3f} "
-                    f"offroad={state_component_rows[-1]['out_of_drivable_rate']:.3f} "
                     f"rank0={sample_summary.group0_rank}/{args.group_size}"
                 )
                 collected += 1
@@ -866,10 +563,7 @@ def _run_checkpoint(
     del model
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    return (
-        sample_rows, group_rows, vm_rows, selected_rows, gallery_rows,
-        state_component_rows, selected_component_rows,
-    )
+    return sample_rows, group_rows, vm_rows, selected_rows, gallery_rows
 
 
 def _write_gallery_manifest(path: Path, rows: list[dict[str, object]]) -> None:
@@ -988,8 +682,6 @@ def _write_outputs(
     vm_rows: list[ProbeVehicleModeSummary],
     selected_rows: list[SelectedModeSummary],
     gallery_rows: list[GalleryState],
-    state_component_rows: list[dict[str, object]],
-    selected_component_rows: list[dict[str, object]],
 ) -> None:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -998,8 +690,6 @@ def _write_outputs(
     write_dataclass_csv(output_dir / "group_summary.csv", group_rows)
     write_dataclass_csv(output_dir / "vehicle_mode_summary.csv", vm_rows)
     write_dataclass_csv(output_dir / "selected_mode_summary.csv", selected_rows)
-    write_dict_csv(output_dir / "reward_component_state_summary.csv", state_component_rows)
-    write_dict_csv(output_dir / "reward_component_selected_mode.csv", selected_component_rows)
 
     checkpoints = [spec.name for spec in args.checkpoint]
     summary_rows = []
@@ -1051,28 +741,6 @@ def _write_outputs(
         selected_summary_rows,
     )
 
-    reward_component_summary_rows: list[dict[str, object]] = []
-    for checkpoint in checkpoints:
-        for scope, source_rows in (
-            ("all_valid_vehicle_modes", state_component_rows),
-            ("selected_modes", selected_component_rows),
-        ):
-            reward_component_summary_rows.append(
-                _aggregate_reward_component_rows(
-                    source_rows, checkpoint=checkpoint, scenario="all", scope=scope
-                )
-            )
-            for scenario in _scenario_order(args):
-                reward_component_summary_rows.append(
-                    _aggregate_reward_component_rows(
-                        source_rows, checkpoint=checkpoint, scenario=scenario, scope=scope
-                    )
-                )
-    write_dict_csv(
-        output_dir / "reward_component_overall_summary.csv",
-        reward_component_summary_rows,
-    )
-
     config_payload = {
         "noise_type": str(args.noise_type),
         "multiplicative_std": (
@@ -1097,8 +765,6 @@ def _write_outputs(
         "noise_seed": int(args.noise_seed),
         "samples_per_scenario": int(args.samples_per_scenario),
         "scenario": str(args.scenario),
-        "reward_component_weights": REWARD_COMPONENT_WEIGHTS,
-        "reward_event_weights": REWARD_EVENT_WEIGHTS,
     }
     with (output_dir / "probe_config.json").open("w", encoding="utf-8") as file:
         json.dump(config_payload, file, indent=2)
@@ -1129,12 +795,9 @@ def _write_outputs(
     print(f"[OK] selected-mode CSV: {output_dir / 'selected_mode_summary.csv'}")
     print(f"[OK] overall summary  : {output_dir / 'overall_summary.csv'}")
     print(f"[OK] selected summary : {output_dir / 'selected_overall_summary.csv'}")
-    print(f"[OK] reward state     : {output_dir / 'reward_component_state_summary.csv'}")
-    print(f"[OK] reward selected  : {output_dir / 'reward_component_selected_mode.csv'}")
-    print(f"[OK] reward overall   : {output_dir / 'reward_component_overall_summary.csv'}")
     print(f"[OK] probe config     : {output_dir / 'probe_config.json'}")
 
-    print("\n=== OVERALL V5 ===")
+    print("\n=== OVERALL V4 ===")
     for row in summary_rows:
         if row["scenario"] != "all":
             continue
@@ -1149,7 +812,7 @@ def _write_outputs(
             f"ADE/Rstd corr={row['mean_element_ADE_reward_std_corr']:.3f}"
         )
 
-    print("\n=== SELECTED-MODE V5 ===")
+    print("\n=== SELECTED-MODE V4 ===")
     for row in selected_summary_rows:
         if row["scenario"] != "all":
             continue
@@ -1163,43 +826,6 @@ def _write_outputs(
             f"sel_Rstd={row['mean_selected_reward_std']:.3f} | "
             f"sel_Rrange={row['mean_selected_reward_range']:.3f} | "
             f"best-mean={row['mean_selected_best_minus_mean']:+.3f}"
-        )
-
-
-    print("\n=== REWARD COMPONENTS V5 (ALL STATES) ===")
-    for row in reward_component_summary_rows:
-        if row["scenario"] != "all" or row["scope"] != "all_valid_vehicle_modes":
-            continue
-        print(
-            f"{row['checkpoint']}: "
-            f"Rmean={row['mean_mean_group_reward']:.3f} | "
-            f"progress={row['mean_mean_contrib_progress_score']:+.3f} | "
-            f"gap={row['mean_mean_contrib_gap_penalty']:+.3f} | "
-            f"ttc={row['mean_mean_contrib_ttc_penalty']:+.3f} | "
-            f"road={row['mean_mean_contrib_road_penalty']:+.3f} | "
-            f"comfort={row['mean_mean_contrib_comfort_penalty']:+.3f} | "
-            f"collision={row['mean_mean_contrib_collision']:+.3f} | "
-            f"offroad={row['mean_mean_contrib_out_of_drivable']:+.3f} | "
-            f"collision_rate={row['mean_collision_rate']:.3f} | "
-            f"offroad_rate={row['mean_out_of_drivable_rate']:.3f}"
-        )
-
-    print("\n=== REWARD COMPONENTS V5 (SELECTED MODES) ===")
-    for row in reward_component_summary_rows:
-        if row["scenario"] != "all" or row["scope"] != "selected_modes":
-            continue
-        print(
-            f"{row['checkpoint']}: "
-            f"Rmean={row['mean_mean_reward']:.3f} | "
-            f"progress={row['mean_mean_contrib_progress_score']:+.3f} | "
-            f"gap={row['mean_mean_contrib_gap_penalty']:+.3f} | "
-            f"ttc={row['mean_mean_contrib_ttc_penalty']:+.3f} | "
-            f"road={row['mean_mean_contrib_road_penalty']:+.3f} | "
-            f"comfort={row['mean_mean_contrib_comfort_penalty']:+.3f} | "
-            f"collision={row['mean_mean_contrib_collision']:+.3f} | "
-            f"offroad={row['mean_mean_contrib_out_of_drivable']:+.3f} | "
-            f"collision_rate={row['mean_collision_rate']:.3f} | "
-            f"offroad_rate={row['mean_out_of_drivable_rate']:.3f}"
         )
 
 
@@ -1248,21 +874,16 @@ def main() -> int:
     all_vm_rows: list[ProbeVehicleModeSummary] = []
     all_selected_rows: list[SelectedModeSummary] = []
     all_gallery_rows: list[GalleryState] = []
-    all_state_component_rows: list[dict[str, object]] = []
-    all_selected_component_rows: list[dict[str, object]] = []
 
     for checkpoint in args.checkpoint:
-        (
-            sample_rows, group_rows, vm_rows, selected_rows, gallery_rows,
-            state_component_rows, selected_component_rows,
-        ) = _run_checkpoint(args, checkpoint, device=device)
+        sample_rows, group_rows, vm_rows, selected_rows, gallery_rows = _run_checkpoint(
+            args, checkpoint, device=device
+        )
         all_sample_rows.extend(sample_rows)
         all_group_rows.extend(group_rows)
         all_vm_rows.extend(vm_rows)
         all_selected_rows.extend(selected_rows)
         all_gallery_rows.extend(gallery_rows)
-        all_state_component_rows.extend(state_component_rows)
-        all_selected_component_rows.extend(selected_component_rows)
 
     _write_outputs(
         args,
@@ -1271,8 +892,6 @@ def main() -> int:
         all_vm_rows,
         all_selected_rows,
         all_gallery_rows,
-        all_state_component_rows,
-        all_selected_component_rows,
     )
     return 0
 
