@@ -41,13 +41,6 @@ class SparseCurvatureGuidanceConfig:
     dense_peak_alpha: float = 10.0
     dense_residual_gradient_enabled: bool = True
     dense_normal_projection_enabled: bool = True
-    # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3
-    # Disabled by default: F' + G1.1 remains exactly reproducible.
-    dense_adaptive_normal_enabled: bool = False
-    dense_adaptive_normal_medium_curvature: float = 0.04
-    dense_adaptive_normal_hard_curvature: float = 0.10
-    dense_adaptive_normal_medium_tangent_weight: float = 0.20
-    dense_adaptive_normal_hard_tangent_weight: float = 0.50
     # DENSE_GUIDANCE_G1_POLISHING_V3_2
     # Disabled by default so F' / Full V3.1 remains bit-for-bit the baseline.
     dense_polish_enabled: bool = False
@@ -132,30 +125,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("dense V3 loss weights must be >= 0")
         if self.dense_peak_alpha <= 0.0:
             raise ValueError("guidance dense_peak_alpha must be positive")
-        # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3
-        if self.dense_adaptive_normal_medium_curvature <= self.curvature_limit:
-            raise ValueError(
-                "dense_adaptive_normal_medium_curvature must exceed curvature_limit"
-            )
-        if self.dense_adaptive_normal_hard_curvature <= self.dense_adaptive_normal_medium_curvature:
-            raise ValueError(
-                "dense_adaptive_normal_hard_curvature must exceed the medium threshold"
-            )
-        if not (0.0 <= self.dense_adaptive_normal_medium_tangent_weight <= 1.0):
-            raise ValueError(
-                "dense_adaptive_normal_medium_tangent_weight must be in [0,1]"
-            )
-        if not (0.0 <= self.dense_adaptive_normal_hard_tangent_weight <= 1.0):
-            raise ValueError(
-                "dense_adaptive_normal_hard_tangent_weight must be in [0,1]"
-            )
-        if (
-            self.dense_adaptive_normal_hard_tangent_weight
-            < self.dense_adaptive_normal_medium_tangent_weight
-        ):
-            raise ValueError(
-                "hard tangent weight must be >= medium tangent weight"
-            )
         # DENSE_GUIDANCE_G1_POLISHING_V3_2
         if self.dense_polish_max_curvature <= self.curvature_limit:
             raise ValueError(
@@ -685,50 +654,6 @@ def _project_gradient_to_sparse_normals(
     return torch.where(usable, projected, gradient)
 
 
-def _blend_gradient_with_sparse_tangent(
-    gradient: torch.Tensor,
-    trajectory_xy_m: torch.Tensor,
-    tangent_weight: torch.Tensor,
-    *,
-    eps: float,
-) -> torch.Tensor:
-    """Normal gradient plus severity-dependent tangent component.
-
-    ``tangent_weight`` is [B,M].  Weight 0 exactly recovers normal-only
-    projection; weight 1 recovers the full local tangent+normal gradient.
-    """
-    horizon = int(trajectory_xy_m.shape[-2])
-    if horizon <= 1:
-        return gradient
-    tangent = torch.zeros_like(trajectory_xy_m)
-    origin = torch.zeros_like(trajectory_xy_m[..., 0, :])
-    tangent[..., 0, :] = trajectory_xy_m[..., 1, :] - origin
-    if horizon > 2:
-        tangent[..., 1:-1, :] = (
-            trajectory_xy_m[..., 2:, :] - trajectory_xy_m[..., :-2, :]
-        )
-    tangent[..., -1, :] = (
-        trajectory_xy_m[..., -1, :] - trajectory_xy_m[..., -2, :]
-    )
-    tangent_norm = torch.linalg.vector_norm(tangent, dim=-1, keepdim=True)
-    tangent_unit = tangent / tangent_norm.clamp_min(float(eps))
-    normal = torch.stack(
-        (-tangent_unit[..., 1], tangent_unit[..., 0]),
-        dim=-1,
-    )
-    normal_component = (
-        gradient * normal
-    ).sum(dim=-1, keepdim=True) * normal
-    tangent_component = (
-        gradient * tangent_unit
-    ).sum(dim=-1, keepdim=True) * tangent_unit
-    blended = (
-        normal_component
-        + tangent_weight[..., None, None] * tangent_component
-    )
-    usable = tangent_norm > float(eps)
-    return torch.where(usable, blended, gradient)
-
 def apply_dense_curvature_guidance(
     predicted_x0_norm: torch.Tensor,
     *,
@@ -863,9 +788,6 @@ def apply_dense_curvature_guidance(
         (batch, modes), device=current_xy.device, dtype=current_xy.dtype
     )
     backtracking_reductions = torch.zeros_like(accepted_inner)
-    # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3 diagnostics: maximum tangent
-    # freedom granted to each mode over all accepted/attempted inner steps.
-    adaptive_tangent_weight_max = torch.zeros_like(accepted_inner)
 
     for _ in range(int(config.dense_inner_iters)):
         with torch.enable_grad():
@@ -889,65 +811,11 @@ def apply_dense_curvature_guidance(
             gradient = gradient * mode_valid_f[..., None, None]
 
             if config.dense_normal_projection_enabled:
-                normal_gradient = _project_gradient_to_sparse_normals(
+                gradient = _project_gradient_to_sparse_normals(
                     gradient,
                     x_var,
                     eps=config.eps,
                 )
-                if config.dense_adaptive_normal_enabled:
-                    current_max_curvature = torch.where(
-                        valid_now,
-                        curvature_now.detach().abs(),
-                        torch.zeros_like(curvature_now),
-                    ).amax(dim=-1)
-                    tangent_weight = torch.zeros_like(current_max_curvature)
-                    medium_mask = (
-                        current_max_curvature
-                        > float(config.dense_adaptive_normal_medium_curvature)
-                    ) & (
-                        current_max_curvature
-                        <= float(config.dense_adaptive_normal_hard_curvature)
-                    )
-                    hard_mask = (
-                        current_max_curvature
-                        > float(config.dense_adaptive_normal_hard_curvature)
-                    )
-                    tangent_weight = torch.where(
-                        medium_mask,
-                        torch.full_like(
-                            tangent_weight,
-                            float(config.dense_adaptive_normal_medium_tangent_weight),
-                        ),
-                        tangent_weight,
-                    )
-                    tangent_weight = torch.where(
-                        hard_mask,
-                        torch.full_like(
-                            tangent_weight,
-                            float(config.dense_adaptive_normal_hard_tangent_weight),
-                        ),
-                        tangent_weight,
-                    )
-                    tangent_weight = tangent_weight * mode_valid_f
-                    adaptive_tangent_weight_max = torch.maximum(
-                        adaptive_tangent_weight_max,
-                        tangent_weight.detach(),
-                    )
-                    adaptive_gradient = _blend_gradient_with_sparse_tangent(
-                        gradient,
-                        x_var,
-                        tangent_weight,
-                        eps=config.eps,
-                    )
-                    # Preserve the exact F'+G1.1 direction for modes below
-                    # the G2 threshold.
-                    gradient = torch.where(
-                        (tangent_weight > 0.0)[..., None, None],
-                        adaptive_gradient,
-                        normal_gradient,
-                    )
-                else:
-                    gradient = normal_gradient
 
             if config.preserve_endpoint:
                 gradient = gradient.clone()
@@ -1232,14 +1100,6 @@ def apply_dense_curvature_guidance(
         backtracking_sample = (
             backtracking_reductions * mode_valid_f
         ).sum(dim=-1) / mode_count
-        # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3 diagnostics
-        adaptive_normal_trigger_fraction = (
-            (adaptive_tangent_weight_max > 0.0).to(current_xy.dtype)
-            * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        adaptive_normal_mean_tangent_weight = (
-            adaptive_tangent_weight_max * mode_valid_f
-        ).sum(dim=-1) / mode_count
         # DENSE_GUIDANCE_G1_POLISHING_V3_2 diagnostics
         polish_trigger_fraction = (
             polish_triggered.to(current_xy.dtype) * mode_valid_f
@@ -1281,9 +1141,6 @@ def apply_dense_curvature_guidance(
             "update_l2_m": update_l2_sample,
             "inner_iterations_used": accepted_inner_sample,
             "backtracking_reductions": backtracking_sample,
-            # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3
-            "adaptive_normal_trigger_fraction": adaptive_normal_trigger_fraction,
-            "adaptive_normal_mean_tangent_weight": adaptive_normal_mean_tangent_weight,
             # DENSE_GUIDANCE_G1_POLISHING_V3_2
             "polish_trigger_fraction": polish_trigger_fraction,
             "polish_iterations_used": polish_iterations_sample,

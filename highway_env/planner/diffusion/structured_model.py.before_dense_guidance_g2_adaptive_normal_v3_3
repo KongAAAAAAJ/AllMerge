@@ -855,15 +855,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 if guidance_last is not None
                 else zero_diag
             ),
-            # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3
-            "guidance_adaptive_normal_trigger_fraction": (
-                guidance_last.get("adaptive_normal_trigger_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_adaptive_normal_mean_tangent_weight": (
-                guidance_last.get("adaptive_normal_mean_tangent_weight", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
             # DENSE_GUIDANCE_G1_POLISHING_V3_2
             "guidance_polish_trigger_fraction": (
                 guidance_last.get("polish_trigger_fraction", zero_diag)
@@ -1065,9 +1056,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_update_l2_m": base["guidance_update_l2_m"],
             "guidance_inner_iterations_used": base["guidance_inner_iterations_used"],
             "guidance_backtracking_reductions": base["guidance_backtracking_reductions"],
-            # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3
-            "guidance_adaptive_normal_trigger_fraction": base["guidance_adaptive_normal_trigger_fraction"],
-            "guidance_adaptive_normal_mean_tangent_weight": base["guidance_adaptive_normal_mean_tangent_weight"],
             # DENSE_GUIDANCE_G1_POLISHING_V3_2
             "guidance_polish_trigger_fraction": base["guidance_polish_trigger_fraction"],
             "guidance_polish_iterations_used": base["guidance_polish_iterations_used"],
