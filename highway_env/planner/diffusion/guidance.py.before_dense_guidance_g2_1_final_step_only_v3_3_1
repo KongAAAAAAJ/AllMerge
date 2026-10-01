@@ -741,7 +741,6 @@ def apply_dense_curvature_guidance(
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
     allow_polish: bool = True,
-    allow_adaptive_normal: bool = True,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
     """Dense V3: iterative trust-region projection on execution curvature.
 
@@ -895,7 +894,7 @@ def apply_dense_curvature_guidance(
                     x_var,
                     eps=config.eps,
                 )
-                if (config.dense_adaptive_normal_enabled) and bool(allow_adaptive_normal):
+                if config.dense_adaptive_normal_enabled:
                     current_max_curvature = torch.where(
                         valid_now,
                         curvature_now.detach().abs(),
@@ -1312,7 +1311,6 @@ def apply_curvature_guidance(
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
     allow_polish: bool = True,
-    allow_adaptive_normal: bool = True,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
     if not config.applies_to(int(timestep)):
         return predicted_x0_norm, None
@@ -1341,6 +1339,5 @@ def apply_curvature_guidance(
             mode_features=mode_features,
             execution_residual_head=execution_residual_head,
                    allow_polish=allow_polish,  # DENSE_GUIDANCE_G1_FINAL_STEP_ONLY_V3_2_1
-                   allow_adaptive_normal=allow_adaptive_normal,  # DENSE_GUIDANCE_G2_1_FINAL_STEP_ONLY_V3_3_1
         )
     return predicted_x0_norm, None
