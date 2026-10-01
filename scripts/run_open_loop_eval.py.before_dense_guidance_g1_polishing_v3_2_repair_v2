@@ -219,11 +219,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-peak-alpha", type=float, default=10.0)
     parser.add_argument("--guidance-dense-stop-residual-gradient", action="store_true")
     parser.add_argument("--guidance-dense-no-normal-projection", action="store_true")
-    # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-    parser.add_argument("--guidance-dense-polish-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-polish-max-curvature", type=float, default=0.04)
-    parser.add_argument("--guidance-dense-polish-iters", type=int, default=3)
-    parser.add_argument("--guidance-dense-polish-step-m", type=float, default=0.075)
     return parser.parse_args()
 
 
@@ -283,11 +278,6 @@ def main() -> int:
         guidance_dense_peak_alpha=args.guidance_dense_peak_alpha,
         guidance_dense_residual_gradient_enabled=not args.guidance_dense_stop_residual_gradient,
         guidance_dense_normal_projection_enabled=not args.guidance_dense_no_normal_projection,
-        # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-        guidance_dense_polish_enabled=args.guidance_dense_polish_enabled,
-        guidance_dense_polish_max_curvature=args.guidance_dense_polish_max_curvature,
-        guidance_dense_polish_iters=args.guidance_dense_polish_iters,
-        guidance_dense_polish_step_m=args.guidance_dense_polish_step_m,
     )
     print_summary(summary)
     return 0

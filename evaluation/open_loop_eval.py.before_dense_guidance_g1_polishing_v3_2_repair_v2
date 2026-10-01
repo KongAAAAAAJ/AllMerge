@@ -172,11 +172,6 @@ CSV_FIELDS = [
     "selected_dense_peak_time_s",
     "selected_dense_peak_x_m",
     "selected_dense_peak_y_m",
-    # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-    'guidance_polish_trigger_fraction',
-    'guidance_polish_iterations_used',
-    'guidance_polish_backtracking_reductions',
-    'guidance_polish_update_l2_m',
 ]
 
 
@@ -542,11 +537,6 @@ def evaluate_open_loop(
     guidance_dense_peak_alpha: float = 10.0,
     guidance_dense_residual_gradient_enabled: bool = True,
     guidance_dense_normal_projection_enabled: bool = True,
-    # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-    guidance_dense_polish_enabled: bool = False,
-    guidance_dense_polish_max_curvature: float = 0.04,
-    guidance_dense_polish_iters: int = 3,
-    guidance_dense_polish_step_m: float = 0.075,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -605,11 +595,6 @@ def evaluate_open_loop(
             "dense_peak_alpha": float(guidance_dense_peak_alpha),
             "dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
             "dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
-            # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-            "dense_polish_enabled": bool(guidance_dense_polish_enabled),
-            "dense_polish_max_curvature": float(guidance_dense_polish_max_curvature),
-            "dense_polish_iters": int(guidance_dense_polish_iters),
-            "dense_polish_step_m": float(guidance_dense_polish_step_m),
         },
     }
     if checkpoint_model_config:
@@ -1224,11 +1209,6 @@ def evaluate_open_loop(
                         ),
                         "guidance_inner_iterations_used": _float(output["guidance_inner_iterations_used"], i),
                         "guidance_backtracking_reductions": _float(output["guidance_backtracking_reductions"], i),
-                        # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-                        'guidance_polish_trigger_fraction': _float(output["guidance_polish_trigger_fraction"], i),
-                        'guidance_polish_iterations_used': _float(output["guidance_polish_iterations_used"], i),
-                        'guidance_polish_backtracking_reductions': _float(output["guidance_polish_backtracking_reductions"], i),
-                        'guidance_polish_update_l2_m': _float(output["guidance_polish_update_l2_m"], i),
                         "guidance_bound_loss_before": _float(output["guidance_bound_loss_before"], i),
                         "guidance_bound_loss_after": _float(output["guidance_bound_loss_after"], i),
                         "guidance_peak_loss_before": _float(output["guidance_peak_loss_before"], i),
@@ -1478,15 +1458,6 @@ def evaluate_open_loop(
         "guidance_dense_peak_alpha": float(guidance_dense_peak_alpha),
         "guidance_dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
         "guidance_dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
-        # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
-        "guidance_dense_polish_enabled": bool(guidance_dense_polish_enabled),
-        "guidance_dense_polish_max_curvature": float(guidance_dense_polish_max_curvature),
-        "guidance_dense_polish_iters": int(guidance_dense_polish_iters),
-        "guidance_dense_polish_step_m": float(guidance_dense_polish_step_m),
-        "mean_guidance_polish_trigger_fraction": _mean(rows, "guidance_polish_trigger_fraction"),
-        "mean_guidance_polish_iterations_used": _mean(rows, "guidance_polish_iterations_used"),
-        "mean_guidance_polish_backtracking_reductions": _mean(rows, "guidance_polish_backtracking_reductions"),
-        "mean_guidance_polish_update_l2_m": _mean(rows, "guidance_polish_update_l2_m"),
         "mean_guidance_inner_iterations_used": _mean(rows, "guidance_inner_iterations_used"),
         "mean_guidance_backtracking_reductions": _mean(rows, "guidance_backtracking_reductions"),
     }
