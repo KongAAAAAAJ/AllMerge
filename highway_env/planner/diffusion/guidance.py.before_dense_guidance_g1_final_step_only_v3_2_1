@@ -665,7 +665,6 @@ def apply_dense_curvature_guidance(
     start_velocity_xy: torch.Tensor,
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
-    allow_polish: bool = True,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
     """Dense V3: iterative trust-region projection on execution curvature.
 
@@ -926,7 +925,7 @@ def apply_dense_curvature_guidance(
     )
     polish_backtracking = torch.zeros_like(polish_accepted)
 
-    if (bool(config.dense_polish_enabled)) and bool(allow_polish):
+    if bool(config.dense_polish_enabled):
         with torch.no_grad():
             _, polish_curvature0, polish_valid0, _ = evaluate(
                 current_xy,
@@ -1167,7 +1166,6 @@ def apply_curvature_guidance(
     start_velocity_xy: Optional[torch.Tensor] = None,
     mode_features: Optional[torch.Tensor] = None,
     execution_residual_head=None,
-    allow_polish: bool = True,
 ) -> tuple[torch.Tensor, Optional[dict[str, torch.Tensor]]]:
     if not config.applies_to(int(timestep)):
         return predicted_x0_norm, None
@@ -1195,6 +1193,5 @@ def apply_curvature_guidance(
             start_velocity_xy=start_velocity_xy,
             mode_features=mode_features,
             execution_residual_head=execution_residual_head,
-                   allow_polish=allow_polish,  # DENSE_GUIDANCE_G1_FINAL_STEP_ONLY_V3_2_1
         )
     return predicted_x0_norm, None

@@ -700,7 +700,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 start_velocity_xy=features["ego_state"][:, 0:2].float(),
                 mode_features=mode_tokens,
                 execution_residual_head=self.dense_residual_head,
-                                              allow_polish=(index == len(timesteps) - 1),  # DENSE_GUIDANCE_G1_FINAL_STEP_ONLY_V3_2_1
             )
             if guidance_step is not None:
                 guidance_last = guidance_step
