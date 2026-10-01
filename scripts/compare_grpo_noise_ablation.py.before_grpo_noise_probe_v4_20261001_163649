@@ -47,13 +47,13 @@ def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Combine GRPO noise-probe v4 additive/multiplicative/hybrid ablation summaries."
+        description="Combine GRPO noise-probe v3 additive/multiplicative ablation summaries."
     )
     parser.add_argument("--run", action="append", type=_parse_run, required=True)
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/grpo_noise_probe_v4_ablation"),
+        default=Path("outputs/grpo_noise_probe_v3_ablation"),
     )
     args = parser.parse_args()
 
@@ -85,9 +85,6 @@ def main() -> int:
             continue
         print(
             f"{row['run']:>10s} | {row['checkpoint']:<18s} | "
-            f"type={row.get('noise_type','?'):<14s} | "
-            f"xmul={float(row.get('hybrid_multiplicative_x_std') or 0.0):.3f} | "
-            f"yadd={float(row.get('hybrid_additive_y_std_m') or 0.0):.3f}m | "
             f"ADE={float(row['mean_selected_pairwise_ADE']):.3f}m | "
             f"dx={float(row['mean_selected_pairwise_abs_dx']):.3f}m | "
             f"dy={float(row['mean_selected_pairwise_abs_dy']):.3f}m | "

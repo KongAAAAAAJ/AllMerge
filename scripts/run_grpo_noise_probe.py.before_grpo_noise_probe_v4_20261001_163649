@@ -40,10 +40,7 @@ from highway_env.planner.diffusion.grpo.reward_adapter import (
     w4_to_grpo_rewards,
 )
 from highway_env.planner.diffusion.grpo.sampling import GroupDiffusionSampler
-from evaluation.grpo_probe_sampling import (
-    HybridProbeGroupDiffusionSampler,
-    MultiplicativeProbeGroupDiffusionSampler,
-)
+from evaluation.grpo_probe_sampling import MultiplicativeProbeGroupDiffusionSampler
 from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
 from highway_env.planner.diffusion.tensor_adapter import BOOL_KEYS, FLOAT_KEYS, PlannerTensorAdapter
 
@@ -85,8 +82,6 @@ class SelectedModeSummary:
     noise_seed: int
     noise_type: str
     multiplicative_std: float
-    hybrid_multiplicative_x_std: float
-    hybrid_additive_y_std_m: float
     vehicle_role: int
     mode: int
     group_size: int
@@ -124,10 +119,9 @@ def parse_args() -> argparse.Namespace:
             "Probe current GRPO group sampling without training. For each fixed "
             "environment state, generate G trajectories from different diffusion "
             "noise, score them with the production W4 reward, and compare every "
-            "group against group 0. V4 supports additive, multiplicative, and hybrid "
-            "x-multiplicative/y-additive reverse-transition exploration, "
-            "selected-mode x/y diversity diagnostics, and the existing random "
-            "3x3 trajectory gallery."
+            "group against group 0. V3 supports paired additive vs multiplicative "
+            "reverse-transition exploration, selected-mode diversity diagnostics, "
+            "and the existing random 3x3 trajectory gallery."
         )
     )
     parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint, required=True)
@@ -137,13 +131,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eta", type=float, default=0.02)
     parser.add_argument(
         "--noise-type",
-        choices=("additive", "multiplicative", "hybrid"),
+        choices=("additive", "multiplicative"),
         default="additive",
         help=(
             "reverse-transition exploration type. additive uses the existing GRPO "
-            "sampler; multiplicative uses shared x/y scale factors; hybrid keeps "
-            "longitudinal x multiplicative while adding a horizon-ramped lateral "
-            "y offset in meters. Anchor and initial forward noising stay unchanged."
+            "sampler; multiplicative uses a DiffusionDriveV2-style shared x/y scale "
+            "factor per vehicle-group-mode, while keeping the anchor and initial "
+            "forward noising unchanged"
         ),
     )
     parser.add_argument(
@@ -153,24 +147,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "std of epsilon in prev_sample = prev_sample_mean * (1 + epsilon_xy) "
             "for multiplicative probe sampling; ignored for additive"
-        ),
-    )
-    parser.add_argument(
-        "--hybrid-multiplicative-x-std",
-        type=float,
-        default=0.12,
-        help=(
-            "longitudinal multiplicative std for hybrid sampling; x is scaled as "
-            "x * (1 + eps_x). Default 0.12."
-        ),
-    )
-    parser.add_argument(
-        "--hybrid-additive-y-std-m",
-        type=float,
-        default=0.50,
-        help=(
-            "4-second endpoint lateral additive-noise std in meters for hybrid "
-            "sampling. The offset is linearly ramped over the trajectory horizon."
         ),
     )
     parser.add_argument("--group-action", type=int, default=3)
@@ -186,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reward-fn", default="auto")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v4"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/grpo_noise_probe_100ep_v3"))
     parser.add_argument(
         "--visualization-seed", type=int, default=0,
         help="deterministic seed used to choose random gallery states",
@@ -295,8 +271,6 @@ def _selected_mode_stats(
     noise_seed: int,
     noise_type: str,
     multiplicative_std: float,
-    hybrid_multiplicative_x_std: float,
-    hybrid_additive_y_std_m: float,
     selected_mode_idx: torch.Tensor,
     candidates: torch.Tensor,
     rewards: torch.Tensor,
@@ -333,8 +307,6 @@ def _selected_mode_stats(
                 noise_seed=int(noise_seed),
                 noise_type=str(noise_type),
                 multiplicative_std=float(multiplicative_std),
-                hybrid_multiplicative_x_std=float(hybrid_multiplicative_x_std),
-                hybrid_additive_y_std_m=float(hybrid_additive_y_std_m),
                 vehicle_role=int(role),
                 mode=mode,
                 group_size=group_size,
@@ -379,8 +351,6 @@ def _aggregate_selected_mode(
         "scenario": scenario,
         "noise_type": subset[0].noise_type,
         "multiplicative_std": float(subset[0].multiplicative_std),
-        "hybrid_multiplicative_x_std": float(subset[0].hybrid_multiplicative_x_std),
-        "hybrid_additive_y_std_m": float(subset[0].hybrid_additive_y_std_m),
         "selected_vehicle_mode_count": len(subset),
         "group_size": int(subset[0].group_size),
         "mean_selected_pairwise_ADE": mean("sparse_pairwise_ade_mean"),
@@ -417,20 +387,12 @@ def _run_checkpoint(
             group_size=int(args.group_size),
             eta=float(args.eta),
         )
-    elif args.noise_type == "multiplicative":
+    else:
         sampler = MultiplicativeProbeGroupDiffusionSampler(
             model,
             group_size=int(args.group_size),
             eta=float(args.eta),
             multiplicative_std=float(args.multiplicative_std),
-        )
-    else:
-        sampler = HybridProbeGroupDiffusionSampler(
-            model,
-            group_size=int(args.group_size),
-            eta=float(args.eta),
-            multiplicative_x_std=float(args.hybrid_multiplicative_x_std),
-            additive_y_std_m=float(args.hybrid_additive_y_std_m),
         )
     reward_adapter = CandidateRewardAdapter(resolve_reward_evaluator(args.reward_fn))
 
@@ -508,16 +470,6 @@ def _run_checkpoint(
                     multiplicative_std=(
                         float(args.multiplicative_std)
                         if args.noise_type == "multiplicative"
-                        else 0.0
-                    ),
-                    hybrid_multiplicative_x_std=(
-                        float(args.hybrid_multiplicative_x_std)
-                        if args.noise_type == "hybrid"
-                        else 0.0
-                    ),
-                    hybrid_additive_y_std_m=(
-                        float(args.hybrid_additive_y_std_m)
-                        if args.noise_type == "hybrid"
                         else 0.0
                     ),
                     selected_mode_idx=selected_mode_idx,
@@ -709,16 +661,6 @@ def _write_outputs(
             if args.noise_type == "multiplicative"
             else 0.0
         )
-        row["hybrid_multiplicative_x_std"] = (
-            float(args.hybrid_multiplicative_x_std)
-            if args.noise_type == "hybrid"
-            else 0.0
-        )
-        row["hybrid_additive_y_std_m"] = (
-            float(args.hybrid_additive_y_std_m)
-            if args.noise_type == "hybrid"
-            else 0.0
-        )
 
     selected_summary_rows = []
     for checkpoint in checkpoints:
@@ -748,17 +690,6 @@ def _write_outputs(
             if args.noise_type == "multiplicative"
             else 0.0
         ),
-        "hybrid_multiplicative_x_std": (
-            float(args.hybrid_multiplicative_x_std)
-            if args.noise_type == "hybrid"
-            else 0.0
-        ),
-        "hybrid_additive_y_std_m": (
-            float(args.hybrid_additive_y_std_m)
-            if args.noise_type == "hybrid"
-            else 0.0
-        ),
-        "hybrid_y_ramp": "linear_1_over_H_to_1",
         "eta": float(args.eta),
         "group_size": int(args.group_size),
         "seed": int(args.seed),
@@ -778,14 +709,7 @@ def _write_outputs(
             noise_label=(
                 "additive"
                 if args.noise_type == "additive"
-                else (
-                    f"multiplicative sigma={args.multiplicative_std:g}"
-                    if args.noise_type == "multiplicative"
-                    else (
-                        f"hybrid x-mul={args.hybrid_multiplicative_x_std:g}, "
-                        f"y-add={args.hybrid_additive_y_std_m:g}m"
-                    )
-                )
+                else f"multiplicative sigma={args.multiplicative_std:g}"
             ),
         )
 
@@ -797,7 +721,7 @@ def _write_outputs(
     print(f"[OK] selected summary : {output_dir / 'selected_overall_summary.csv'}")
     print(f"[OK] probe config     : {output_dir / 'probe_config.json'}")
 
-    print("\n=== OVERALL V4 ===")
+    print("\n=== OVERALL V3 ===")
     for row in summary_rows:
         if row["scenario"] != "all":
             continue
@@ -812,7 +736,7 @@ def _write_outputs(
             f"ADE/Rstd corr={row['mean_element_ADE_reward_std_corr']:.3f}"
         )
 
-    print("\n=== SELECTED-MODE V4 ===")
+    print("\n=== SELECTED-MODE V3 ===")
     for row in selected_summary_rows:
         if row["scenario"] != "all":
             continue
@@ -839,10 +763,6 @@ def main() -> int:
         raise SystemExit("--improvement-eps must be >= 0")
     if args.noise_type == "multiplicative" and args.multiplicative_std <= 0:
         raise SystemExit("--multiplicative-std must be > 0 for multiplicative sampling")
-    if args.noise_type == "hybrid" and args.hybrid_multiplicative_x_std <= 0:
-        raise SystemExit("--hybrid-multiplicative-x-std must be > 0 for hybrid sampling")
-    if args.noise_type == "hybrid" and args.hybrid_additive_y_std_m < 0:
-        raise SystemExit("--hybrid-additive-y-std-m must be >= 0 for hybrid sampling")
     if args.max_seed_attempts < args.samples_per_scenario:
         raise SystemExit("--max-seed-attempts must be >= --samples-per-scenario")
     if args.gallery_count < 1:
@@ -863,8 +783,6 @@ def main() -> int:
     print(
         f"[config] device={device} group_size={args.group_size} eta={args.eta} "
         f"noise_type={args.noise_type} mul_std={args.multiplicative_std:g} "
-        f"hybrid_x_mul={args.hybrid_multiplicative_x_std:g} "
-        f"hybrid_y_add_m={args.hybrid_additive_y_std_m:g} "
         f"scenario={args.scenario} samples_per_scenario={args.samples_per_scenario} "
         f"improvement_eps={args.improvement_eps:g} gallery={args.gallery_count}"
     )
