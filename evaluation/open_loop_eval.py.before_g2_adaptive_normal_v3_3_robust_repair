@@ -177,9 +177,6 @@ CSV_FIELDS = [
     'guidance_polish_iterations_used',
     'guidance_polish_backtracking_reductions',
     'guidance_polish_update_l2_m',
-    # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3_ROBUST_REPAIR
-    'guidance_adaptive_normal_trigger_fraction',
-    'guidance_adaptive_normal_mean_tangent_weight',
 ]
 
 
@@ -545,12 +542,6 @@ def evaluate_open_loop(
     guidance_dense_peak_alpha: float = 10.0,
     guidance_dense_residual_gradient_enabled: bool = True,
     guidance_dense_normal_projection_enabled: bool = True,
-    # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3_ROBUST_REPAIR
-    guidance_dense_adaptive_normal_enabled: bool = False,
-    guidance_dense_adaptive_normal_medium_curvature: float = 0.04,
-    guidance_dense_adaptive_normal_hard_curvature: float = 0.10,
-    guidance_dense_adaptive_normal_medium_tangent_weight: float = 0.20,
-    guidance_dense_adaptive_normal_hard_tangent_weight: float = 0.50,
     # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
     guidance_dense_polish_enabled: bool = False,
     guidance_dense_polish_max_curvature: float = 0.04,
@@ -614,12 +605,6 @@ def evaluate_open_loop(
             "dense_peak_alpha": float(guidance_dense_peak_alpha),
             "dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
             "dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
-            # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3_ROBUST_REPAIR
-            "dense_adaptive_normal_enabled": bool(guidance_dense_adaptive_normal_enabled),
-            "dense_adaptive_normal_medium_curvature": float(guidance_dense_adaptive_normal_medium_curvature),
-            "dense_adaptive_normal_hard_curvature": float(guidance_dense_adaptive_normal_hard_curvature),
-            "dense_adaptive_normal_medium_tangent_weight": float(guidance_dense_adaptive_normal_medium_tangent_weight),
-            "dense_adaptive_normal_hard_tangent_weight": float(guidance_dense_adaptive_normal_hard_tangent_weight),
             # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
             "dense_polish_enabled": bool(guidance_dense_polish_enabled),
             "dense_polish_max_curvature": float(guidance_dense_polish_max_curvature),
@@ -1239,9 +1224,6 @@ def evaluate_open_loop(
                         ),
                         "guidance_inner_iterations_used": _float(output["guidance_inner_iterations_used"], i),
                         "guidance_backtracking_reductions": _float(output["guidance_backtracking_reductions"], i),
-                        # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3_ROBUST_REPAIR
-                        "guidance_adaptive_normal_trigger_fraction": _float(output["guidance_adaptive_normal_trigger_fraction"], i),
-                        "guidance_adaptive_normal_mean_tangent_weight": _float(output["guidance_adaptive_normal_mean_tangent_weight"], i),
                         # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
                         'guidance_polish_trigger_fraction': _float(output["guidance_polish_trigger_fraction"], i),
                         'guidance_polish_iterations_used': _float(output["guidance_polish_iterations_used"], i),
@@ -1496,14 +1478,6 @@ def evaluate_open_loop(
         "guidance_dense_peak_alpha": float(guidance_dense_peak_alpha),
         "guidance_dense_residual_gradient_enabled": bool(guidance_dense_residual_gradient_enabled),
         "guidance_dense_normal_projection_enabled": bool(guidance_dense_normal_projection_enabled),
-        # DENSE_GUIDANCE_G2_ADAPTIVE_NORMAL_V3_3_ROBUST_REPAIR
-        "guidance_dense_adaptive_normal_enabled": bool(guidance_dense_adaptive_normal_enabled),
-        "guidance_dense_adaptive_normal_medium_curvature": float(guidance_dense_adaptive_normal_medium_curvature),
-        "guidance_dense_adaptive_normal_hard_curvature": float(guidance_dense_adaptive_normal_hard_curvature),
-        "guidance_dense_adaptive_normal_medium_tangent_weight": float(guidance_dense_adaptive_normal_medium_tangent_weight),
-        "guidance_dense_adaptive_normal_hard_tangent_weight": float(guidance_dense_adaptive_normal_hard_tangent_weight),
-        "mean_guidance_adaptive_normal_trigger_fraction": _mean(rows, "guidance_adaptive_normal_trigger_fraction"),
-        "mean_guidance_adaptive_normal_mean_tangent_weight": _mean(rows, "guidance_adaptive_normal_mean_tangent_weight"),
         # DENSE_GUIDANCE_G1_POLISHING_V3_2_REPAIR_V2
         "guidance_dense_polish_enabled": bool(guidance_dense_polish_enabled),
         "guidance_dense_polish_max_curvature": float(guidance_dense_polish_max_curvature),
