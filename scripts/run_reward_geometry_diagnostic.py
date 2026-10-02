@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,42 @@ from evaluation.grpo_probe_sampling import (
     HybridProbeGroupDiffusionSampler,
     MultiplicativeProbeGroupDiffusionSampler,
 )
+from highway_env.planner.diffusion.trajectory_mode_reward.config import (
+    TrajectoryModeRewardConfig,
+)
+from highway_env.planner.diffusion.trajectory_mode_reward.counterfactual import (
+    TrajectoryModeCounterfactualReward,
+)
+from highway_env.planner.diffusion.trajectory_mode_reward.geometry import (
+    _dense_local_trajectories,
+    _footprint_corners,
+    _iter_lanes,
+    _lane_width_at,
+    local_to_world,
+    road_margin_series,
+    tracking_aware_dimensions,
+)
+
+
+@dataclass
+class ExactRoadDiagnostic:
+    local_traj_dense: np.ndarray
+    world_traj_dense: np.ndarray
+    margins: np.ndarray
+    min_time_index: int
+    first_negative_time_index: int
+    min_corner_world: np.ndarray
+    min_corner_local: np.ndarray
+    footprint_world: np.ndarray
+    footprint_local: np.ndarray
+    best_lane_index: int
+    best_lane_margin: float
+    best_lane_s: float
+    best_lane_length: float
+    best_lane_lateral: float
+    best_lane_width: float
+    best_lane_lateral_margin: float
+    best_lane_longitudinal_margin: float
 
 
 @dataclass
@@ -57,39 +94,29 @@ class DiagnosticState:
     best_offroad: int
     group0_collision: int
     best_collision: int
-    group0_min_margin_m: float
-    best_min_margin_m: float
-    group0_traj: np.ndarray
-    best_traj: np.ndarray
-    map_polylines: list[np.ndarray]
-    target_lane: np.ndarray | None
-    group0_margin_proxy_idx: int
-    best_margin_proxy_idx: int
-    vehicle_length_m: float
-    vehicle_width_m: float
+    group0_reported_min_margin_m: float
+    best_reported_min_margin_m: float
+    group0: ExactRoadDiagnostic
+    best: ExactRoadDiagnostic
+    lane_ribbons_local: list[tuple[np.ndarray, np.ndarray, np.ndarray]]
+    pose_world: np.ndarray
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Reward Geometry Diagnostic: sample random states per scenario and plot "
-            "road geometry (BEV-style map polylines), selected-mode candidate trajectories, "
-            "vehicle footprints, and proxy minimum road-margin points in 3x3 galleries."
+            "Exact Reward Geometry Diagnostic for the current GRPO branch. Uses the same "
+            "env.road lane geometry, local->world transform, tracking-aware footprint, "
+            "and road_margin_series() as the production trajectory-mode reward."
         )
     )
     parser.add_argument("--checkpoint", action="append", type=_parse_checkpoint, required=True)
     parser.add_argument("--scenario", choices=("all", *SCENARIOS.keys()), default="all")
-    parser.add_argument("--samples-per-scenario", type=int, default=25,
-                        help="collect this many valid states per scenario before random selection")
-    parser.add_argument("--states-per-gallery", type=int, default=9,
-                        help="number of random states shown per scenario gallery")
+    parser.add_argument("--samples-per-scenario", type=int, default=25)
+    parser.add_argument("--states-per-gallery", type=int, default=9)
     parser.add_argument("--group-size", type=int, default=48)
     parser.add_argument("--eta", type=float, default=0.02)
-    parser.add_argument(
-        "--noise-type",
-        choices=("additive", "multiplicative", "hybrid"),
-        default="hybrid",
-    )
+    parser.add_argument("--noise-type", choices=("additive", "multiplicative", "hybrid"), default="hybrid")
     parser.add_argument("--multiplicative-std", type=float, default=0.04)
     parser.add_argument("--hybrid-multiplicative-x-std", type=float, default=0.12)
     parser.add_argument("--hybrid-additive-y-std-m", type=float, default=1.00)
@@ -98,22 +125,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--noise-seed", type=int, default=700000)
     parser.add_argument("--max-seed-attempts", type=int, default=1000)
     parser.add_argument("--reward-fn", default="auto")
-    parser.add_argument("--vehicle-role", type=int, default=0, choices=(0, 1, 2),
-                        help="controlled vehicle role to visualize")
+    parser.add_argument("--vehicle-role", type=int, default=0, choices=(0, 1, 2))
     parser.add_argument("--visualization-seed", type=int, default=0)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", type=Path,
-                        default=Path("outputs/reward_geometry_diagnostic"))
+    parser.add_argument("--output-dir", type=Path, default=Path("outputs/reward_geometry_diagnostic_v2"))
     return parser.parse_args()
 
 
 def _build_sampler(args: argparse.Namespace, model: Any):
     if args.noise_type == "additive":
-        return GroupDiffusionSampler(
-            model,
-            group_size=int(args.group_size),
-            eta=float(args.eta),
-        )
+        return GroupDiffusionSampler(model, group_size=int(args.group_size), eta=float(args.eta))
     if args.noise_type == "multiplicative":
         return MultiplicativeProbeGroupDiffusionSampler(
             model,
@@ -130,105 +151,145 @@ def _build_sampler(args: argparse.Namespace, model: Any):
     )
 
 
-def _as_numpy(value: Any) -> np.ndarray:
-    if value is None:
-        return None
-    if hasattr(value, "detach"):
-        value = value.detach().cpu().numpy()
+def _to_numpy(value: Any) -> np.ndarray:
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
     return np.asarray(value)
 
 
-def _extract_map_polylines(features: dict[str, Any]) -> tuple[list[np.ndarray], np.ndarray | None]:
-    polys = _as_numpy(features.get("map_polylines"))
-    mask = _as_numpy(features.get("map_polylines_mask"))
-    target_lane = _as_numpy(features.get("target_lane_polyline"))
-
-    if polys is None:
-        return [], target_lane
-
-    polys = np.squeeze(polys)
-    if polys.ndim == 2:
-        polys = polys[None, ...]
-    if polys.ndim != 3 or polys.shape[-1] < 2:
-        return [], target_lane
-
-    if mask is not None:
-        mask = np.squeeze(mask)
-        if mask.ndim == 1:
-            mask = np.broadcast_to(mask[:, None], polys.shape[:2])
-        elif mask.ndim == 2:
-            pass
-        else:
-            mask = None
-    out: list[np.ndarray] = []
-    for i in range(polys.shape[0]):
-        pts = polys[i, :, :2]
-        if mask is None:
-            valid = np.isfinite(pts).all(axis=1)
-        else:
-            valid = mask[i].astype(bool) & np.isfinite(pts).all(axis=1)
-        pts = pts[valid]
-        if pts.shape[0] >= 2:
-            out.append(pts.astype(np.float32))
-    if target_lane is not None:
-        target_lane = np.squeeze(target_lane)
-        if target_lane.ndim == 2 and target_lane.shape[-1] >= 2:
-            target_lane = target_lane[:, :2].astype(np.float32)
-        else:
-            target_lane = None
-    return out, target_lane
+def _world_xy_to_local(points: np.ndarray, pose_world: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    pose = np.asarray(pose_world, dtype=np.float64).reshape(3)
+    shifted = pts - pose[None, :2]
+    c = math.cos(float(pose[2]))
+    s = math.sin(float(pose[2]))
+    # inverse rotation R(-heading)
+    x = c * shifted[:, 0] + s * shifted[:, 1]
+    y = -s * shifted[:, 0] + c * shifted[:, 1]
+    return np.column_stack((x, y))
 
 
-def _vehicle_size(env: Any, vehicle_role: int) -> tuple[float, float]:
-    vehicle = None
-    if hasattr(env, "controlled_vehicles"):
-        cvs = getattr(env, "controlled_vehicles")
-        if isinstance(cvs, (list, tuple)) and len(cvs) > vehicle_role:
-            vehicle = cvs[vehicle_role]
-    if vehicle is None and hasattr(env, "vehicle"):
-        vehicle = getattr(env, "vehicle")
-    length = float(getattr(vehicle, "LENGTH", getattr(vehicle, "length", 5.0))) if vehicle is not None else 5.0
-    width = float(getattr(vehicle, "WIDTH", getattr(vehicle, "width", 2.0))) if vehicle is not None else 2.0
-    return length, width
+def _lane_diag_for_point(point_world: np.ndarray, lanes: list[object]) -> dict[str, float | int]:
+    best = None
+    for lane_index, lane in enumerate(lanes):
+        try:
+            s, lateral = lane.local_coordinates(point_world)
+            s = float(s)
+            lateral = float(lateral)
+            length = float(lane.length)
+            width = float(_lane_width_at(lane, float(np.clip(s, 0.0, length))))
+            lateral_margin = 0.5 * width - abs(lateral)
+            longitudinal_margin = min(s, length - s)
+            margin = min(lateral_margin, longitudinal_margin)
+            row = {
+                "lane_index": int(lane_index),
+                "margin": float(margin),
+                "s": s,
+                "length": length,
+                "lateral": lateral,
+                "width": width,
+                "lateral_margin": float(lateral_margin),
+                "longitudinal_margin": float(longitudinal_margin),
+            }
+            if best is None or float(row["margin"]) > float(best["margin"]):
+                best = row
+        except (AttributeError, TypeError, ValueError):
+            continue
+    if best is None:
+        return {
+            "lane_index": -1,
+            "margin": -1.0e6,
+            "s": float("nan"),
+            "length": float("nan"),
+            "lateral": float("nan"),
+            "width": float("nan"),
+            "lateral_margin": float("nan"),
+            "longitudinal_margin": float("nan"),
+        }
+    return best
 
 
-def _trajectory_heading(traj: np.ndarray, idx: int) -> float:
-    if traj.shape[0] == 1:
-        return 0.0
-    if idx <= 0:
-        delta = traj[1] - traj[0]
-    elif idx >= traj.shape[0] - 1:
-        delta = traj[-1] - traj[-2]
-    else:
-        delta = traj[idx + 1] - traj[idx - 1]
-    return float(np.arctan2(delta[1], delta[0] + 1e-9))
+def _exact_road_diag(
+    *,
+    target_trajectory: np.ndarray,
+    role: int,
+    frozen_argmax: np.ndarray,
+    geometry_context: Any,
+    config: TrajectoryModeRewardConfig,
+) -> ExactRoadDiagnostic:
+    frozen = np.asarray(frozen_argmax, dtype=np.float64)
+    joint = frozen.copy()
+    joint[role] = np.asarray(target_trajectory, dtype=np.float64)
+    dense_local, _ = _dense_local_trajectories(joint[None], config)
+    local = dense_local[0, role]
+    world = local_to_world(local, np.asarray(geometry_context.poses[role], dtype=np.float64))
+    margins = road_margin_series(world, geometry_context.road, config, tracking_aware=True)
+    min_idx = int(np.argmin(margins))
+    neg = np.flatnonzero(margins[1:] < 0.0)
+    first_neg_idx = int(neg[0] + 1) if neg.size else -1
 
+    dims = tracking_aware_dimensions(config)
+    footprints = _footprint_corners(world, dims)
+    footprint_world = footprints[min_idx]
+    lanes = list(_iter_lanes(geometry_context.road))
+    corner_margins = []
+    corner_diags = []
+    for corner in footprint_world:
+        diag = _lane_diag_for_point(corner, lanes)
+        corner_margins.append(float(diag["margin"]))
+        corner_diags.append(diag)
+    worst_corner_idx = int(np.argmin(np.asarray(corner_margins)))
+    worst_corner_world = footprint_world[worst_corner_idx]
+    lane_diag = corner_diags[worst_corner_idx]
+    pose = np.asarray(geometry_context.poses[role], dtype=np.float64)
+    footprint_local = _world_xy_to_local(footprint_world, pose)
+    corner_local = _world_xy_to_local(worst_corner_world[None, :], pose)[0]
 
-def _footprint_corners(center_xy: np.ndarray, heading: float, length: float, width: float) -> np.ndarray:
-    c = np.cos(heading)
-    s = np.sin(heading)
-    rot = np.asarray([[c, -s], [s, c]], dtype=np.float32)
-    half = np.asarray(
-        [[ length / 2,  width / 2],
-         [ length / 2, -width / 2],
-         [-length / 2, -width / 2],
-         [-length / 2,  width / 2],
-         [ length / 2,  width / 2]],
-        dtype=np.float32,
+    return ExactRoadDiagnostic(
+        local_traj_dense=local[:, :2].astype(np.float32),
+        world_traj_dense=world[:, :2].astype(np.float64),
+        margins=margins.astype(np.float64),
+        min_time_index=min_idx,
+        first_negative_time_index=first_neg_idx,
+        min_corner_world=worst_corner_world.astype(np.float64),
+        min_corner_local=corner_local.astype(np.float64),
+        footprint_world=footprint_world.astype(np.float64),
+        footprint_local=footprint_local.astype(np.float64),
+        best_lane_index=int(lane_diag["lane_index"]),
+        best_lane_margin=float(lane_diag["margin"]),
+        best_lane_s=float(lane_diag["s"]),
+        best_lane_length=float(lane_diag["length"]),
+        best_lane_lateral=float(lane_diag["lateral"]),
+        best_lane_width=float(lane_diag["width"]),
+        best_lane_lateral_margin=float(lane_diag["lateral_margin"]),
+        best_lane_longitudinal_margin=float(lane_diag["longitudinal_margin"]),
     )
-    return center_xy[None, :] + half @ rot.T
 
 
-def _proxy_min_margin_index(traj: np.ndarray, polylines: list[np.ndarray]) -> int:
-    if traj.size == 0:
-        return 0
-    if not polylines:
-        return int(traj.shape[0] - 1)
-    cloud = np.concatenate(polylines, axis=0)
-    d2 = np.sum((traj[:, None, :2] - cloud[None, :, :2]) ** 2, axis=2)
-    # smaller road margin => trajectory gets closer to any road polyline / boundary proxy
-    nearest_d2 = np.min(d2, axis=1)
-    return int(np.argmin(nearest_d2))
+def _lane_ribbons_local(road: object, pose_world: np.ndarray) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    ribbons: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for lane in _iter_lanes(road):
+        try:
+            length = float(lane.length)
+            if not np.isfinite(length) or length <= 0.0:
+                continue
+            sample_count = max(25, min(160, int(length / 1.5) + 2))
+            ss = np.linspace(0.0, length, sample_count)
+            center_world = []
+            left_world = []
+            right_world = []
+            for s in ss:
+                width = float(_lane_width_at(lane, float(s)))
+                center_world.append(np.asarray(lane.position(float(s), 0.0), dtype=np.float64)[:2])
+                left_world.append(np.asarray(lane.position(float(s), +0.5 * width), dtype=np.float64)[:2])
+                right_world.append(np.asarray(lane.position(float(s), -0.5 * width), dtype=np.float64)[:2])
+            center = _world_xy_to_local(np.asarray(center_world), pose_world)
+            left = _world_xy_to_local(np.asarray(left_world), pose_world)
+            right = _world_xy_to_local(np.asarray(right_world), pose_world)
+            ribbons.append((center.astype(np.float32), left.astype(np.float32), right.astype(np.float32)))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return ribbons
 
 
 def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: CheckpointSpec) -> dict[str, list[DiagnosticState]]:
@@ -236,8 +297,10 @@ def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: Checkpo
     adapter, model = _build_model(checkpoint, device)
     sampler = _build_sampler(args, model)
     reward_adapter = CandidateRewardAdapter(resolve_reward_evaluator(args.reward_fn))
+    reward_config = TrajectoryModeRewardConfig(trajectories_per_mode=int(args.group_size))
+    exact_scorer = TrajectoryModeCounterfactualReward(reward_config)
 
-    output: dict[str, list[DiagnosticState]] = {name: [] for name in _scenario_order(args)}
+    output = {name: [] for name in _scenario_order(args)}
     for scenario_index, scenario_name in enumerate(_scenario_order(args)):
         env_cls = SCENARIOS[scenario_name]
         collected = 0
@@ -245,8 +308,7 @@ def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: Checkpo
         while collected < int(args.samples_per_scenario):
             if attempts >= int(args.max_seed_attempts):
                 raise RuntimeError(
-                    f"could not collect {args.samples_per_scenario} valid states for "
-                    f"scenario={scenario_name} within {args.max_seed_attempts} attempts"
+                    f"could not collect {args.samples_per_scenario} valid states for scenario={scenario_name}"
                 )
             env_seed = _state_seed(args.seed, scenario_index, attempts)
             attempts += 1
@@ -264,20 +326,47 @@ def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: Checkpo
                     trace = sampler.sample(features, generator=generator)
                     reward_result = reward_adapter.evaluate_result(trace.candidates, features=features, context=context)
                     arrays = _reward_result_arrays(reward_result, group_size=int(args.group_size))
+
                 role = int(args.vehicle_role)
                 mode = int(selected_mode_idx[role].detach().cpu().item())
                 rewards = arrays["reward"][role, :, mode]
                 best_group = int(np.argmax(rewards))
-                group0_traj = trace.candidates[role, 0, mode].detach().cpu().numpy().astype(np.float32)
-                best_traj = trace.candidates[role, best_group, mode].detach().cpu().numpy().astype(np.float32)
-                polylines, target_lane = _extract_map_polylines(features)
-                vehicle_length_m, vehicle_width_m = _vehicle_size(env, role)
+                frozen_argmax = _to_numpy(context.frozen_argmax_joint_trajectories)
+                geometry_context = exact_scorer.build_geometry_context(env, frozen_argmax)
+                group0_traj = _to_numpy(trace.candidates[role, 0, mode]).astype(np.float64)
+                best_traj = _to_numpy(trace.candidates[role, best_group, mode]).astype(np.float64)
+                group0_diag = _exact_road_diag(
+                    target_trajectory=group0_traj,
+                    role=role,
+                    frozen_argmax=frozen_argmax,
+                    geometry_context=geometry_context,
+                    config=reward_config,
+                )
+                best_diag = _exact_road_diag(
+                    target_trajectory=best_traj,
+                    role=role,
+                    frozen_argmax=frozen_argmax,
+                    geometry_context=geometry_context,
+                    config=reward_config,
+                )
+                reported_g0 = float(arrays["minimum_road_margin_m"][role, 0, mode])
+                reported_best = float(arrays["minimum_road_margin_m"][role, best_group, mode])
+                if abs(float(np.min(group0_diag.margins)) - reported_g0) > 1e-4:
+                    raise RuntimeError(
+                        f"exact Group0 margin mismatch: recomputed={np.min(group0_diag.margins):.6f} reported={reported_g0:.6f}"
+                    )
+                if abs(float(np.min(best_diag.margins)) - reported_best) > 1e-4:
+                    raise RuntimeError(
+                        f"exact Best margin mismatch: recomputed={np.min(best_diag.margins):.6f} reported={reported_best:.6f}"
+                    )
+                pose_world = np.asarray(geometry_context.poses[role], dtype=np.float64)
+                ribbons = _lane_ribbons_local(geometry_context.road, pose_world)
                 state = DiagnosticState(
                     checkpoint=checkpoint.name,
                     scenario=scenario_name,
-                    sample_index=int(collected),
-                    env_seed=int(env_seed),
-                    noise_seed=int(noise_seed),
+                    sample_index=collected,
+                    env_seed=env_seed,
+                    noise_seed=noise_seed,
                     vehicle_role=role,
                     mode=mode,
                     group0_reward=float(rewards[0]),
@@ -287,23 +376,20 @@ def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: Checkpo
                     best_offroad=int(arrays["out_of_drivable"][role, best_group, mode]),
                     group0_collision=int(arrays["collision"][role, 0, mode]),
                     best_collision=int(arrays["collision"][role, best_group, mode]),
-                    group0_min_margin_m=float(arrays["minimum_road_margin_m"][role, 0, mode]),
-                    best_min_margin_m=float(arrays["minimum_road_margin_m"][role, best_group, mode]),
-                    group0_traj=group0_traj,
-                    best_traj=best_traj,
-                    map_polylines=polylines,
-                    target_lane=target_lane,
-                    group0_margin_proxy_idx=_proxy_min_margin_index(group0_traj, polylines),
-                    best_margin_proxy_idx=_proxy_min_margin_index(best_traj, polylines),
-                    vehicle_length_m=vehicle_length_m,
-                    vehicle_width_m=vehicle_width_m,
+                    group0_reported_min_margin_m=reported_g0,
+                    best_reported_min_margin_m=reported_best,
+                    group0=group0_diag,
+                    best=best_diag,
+                    lane_ribbons_local=ribbons,
+                    pose_world=pose_world,
                 )
                 output[scenario_name].append(state)
                 print(
-                    f"[diag] ckpt={checkpoint.name} scenario={scenario_name} sample={collected + 1:03d}/{args.samples_per_scenario} "
+                    f"[diag-v2] ckpt={checkpoint.name} scenario={scenario_name} sample={collected+1:03d}/{args.samples_per_scenario} "
                     f"role={role} mode={mode} g0R={state.group0_reward:.3f} bestR={state.best_reward:.3f} "
-                    f"g0_off={state.group0_offroad} best_off={state.best_offroad} "
-                    f"g0_margin={state.group0_min_margin_m:.3f} best_margin={state.best_min_margin_m:.3f}"
+                    f"g0_off={state.group0_offroad} g0_margin={reported_g0:.3f} "
+                    f"g0_latM={group0_diag.best_lane_lateral_margin:.3f} g0_lonM={group0_diag.best_lane_longitudinal_margin:.3f} "
+                    f"best_off={state.best_offroad} best_margin={reported_best:.3f}"
                 )
                 collected += 1
             finally:
@@ -315,134 +401,155 @@ def _collect_states_for_checkpoint(args: argparse.Namespace, checkpoint: Checkpo
     return output
 
 
-def _subplot_limits(states: list[DiagnosticState]) -> tuple[float, float, float, float]:
-    xs: list[np.ndarray] = []
-    ys: list[np.ndarray] = []
-    for st in states:
-        xs.append(st.group0_traj[:, 0])
-        xs.append(st.best_traj[:, 0])
-        ys.append(st.group0_traj[:, 1])
-        ys.append(st.best_traj[:, 1])
-        if st.target_lane is not None:
-            xs.append(st.target_lane[:, 0]); ys.append(st.target_lane[:, 1])
-        for poly in st.map_polylines:
-            xs.append(poly[:, 0]); ys.append(poly[:, 1])
-    x = np.concatenate(xs) if xs else np.asarray([0.0])
-    y = np.concatenate(ys) if ys else np.asarray([0.0])
-    xmin, xmax = float(np.min(x)), float(np.max(x))
-    ymin, ymax = float(np.min(y)), float(np.max(y))
-    xpad = max(5.0, 0.08 * max(1.0, xmax - xmin))
-    ypad = max(3.0, 0.12 * max(1.0, ymax - ymin))
-    return xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad
+def _state_limits(st: DiagnosticState) -> tuple[float, float, float, float]:
+    arrays = [st.group0.local_traj_dense, st.best.local_traj_dense]
+    for center, left, right in st.lane_ribbons_local:
+        arrays.extend([center, left, right])
+    pts = np.concatenate([a.reshape(-1, 2) for a in arrays if a.size], axis=0)
+    # Keep plots focused near the planned horizon, not the entire road network.
+    traj = np.concatenate((st.group0.local_traj_dense, st.best.local_traj_dense), axis=0)
+    tx0, tx1 = float(np.min(traj[:, 0])), float(np.max(traj[:, 0]))
+    ty0, ty1 = float(np.min(traj[:, 1])), float(np.max(traj[:, 1]))
+    xmin = min(-10.0, tx0 - 8.0)
+    xmax = tx1 + 12.0
+    ymin = min(-12.0, ty0 - 8.0)
+    ymax = max(12.0, ty1 + 8.0)
+    return xmin, xmax, ymin, ymax
 
 
-def _draw_state(ax: Any, st: DiagnosticState, *, xlim: tuple[float, float], ylim: tuple[float, float]) -> None:
-    ax.set_facecolor("white")
-    for poly in st.map_polylines:
-        ax.plot(poly[:, 0], poly[:, 1], linewidth=0.8, alpha=0.55)
-    if st.target_lane is not None:
-        ax.plot(st.target_lane[:, 0], st.target_lane[:, 1], linewidth=1.5, alpha=0.9)
+def _draw_exact(ax: Any, st: DiagnosticState) -> None:
+    x0, x1, y0, y1 = _state_limits(st)
+    for center, left, right in st.lane_ribbons_local:
+        mask = (
+            ((center[:, 0] >= x0 - 20) & (center[:, 0] <= x1 + 20))
+            | ((left[:, 0] >= x0 - 20) & (left[:, 0] <= x1 + 20))
+            | ((right[:, 0] >= x0 - 20) & (right[:, 0] <= x1 + 20))
+        )
+        if not bool(np.any(mask)):
+            continue
+        ax.plot(center[:, 0], center[:, 1], linewidth=0.7, alpha=0.35)
+        ax.plot(left[:, 0], left[:, 1], linewidth=0.9, alpha=0.60)
+        ax.plot(right[:, 0], right[:, 1], linewidth=0.9, alpha=0.60)
+        try:
+            ax.fill(
+                np.concatenate((left[:, 0], right[::-1, 0])),
+                np.concatenate((left[:, 1], right[::-1, 1])),
+                alpha=0.06,
+            )
+        except Exception:
+            pass
 
-    # Group 0 trajectory and proxy minimum-road-margin footprint.
-    g0 = st.group0_traj
-    ax.plot(g0[:, 0], g0[:, 1], linewidth=2.0, alpha=0.95)
-    idx = st.group0_margin_proxy_idx
-    ax.scatter([g0[idx, 0]], [g0[idx, 1]], marker="x", s=36)
-    heading = _trajectory_heading(g0, idx)
-    corners = _footprint_corners(g0[idx, :2], heading, st.vehicle_length_m, st.vehicle_width_m)
-    ax.plot(corners[:, 0], corners[:, 1], linewidth=1.1, alpha=0.95)
+    # Group0 and Best dense trajectories (same interpolated geometry used by reward).
+    ax.plot(st.group0.local_traj_dense[:, 0], st.group0.local_traj_dense[:, 1], linewidth=2.0, label="Group0")
+    ax.plot(st.best.local_traj_dense[:, 0], st.best.local_traj_dense[:, 1], linewidth=2.0, label="Best")
 
-    # Best-of-48 trajectory and proxy minimum-road-margin footprint.
-    best = st.best_traj
-    ax.plot(best[:, 0], best[:, 1], linewidth=2.0, alpha=0.95)
-    idxb = st.best_margin_proxy_idx
-    ax.scatter([best[idxb, 0]], [best[idxb, 1]], marker="x", s=36)
-    headingb = _trajectory_heading(best, idxb)
-    cornersb = _footprint_corners(best[idxb, :2], headingb, st.vehicle_length_m, st.vehicle_width_m)
-    ax.plot(cornersb[:, 0], cornersb[:, 1], linewidth=1.1, alpha=0.95)
+    # Exact minimum-margin footprint and exact worst corner.
+    gfp = np.vstack((st.group0.footprint_local, st.group0.footprint_local[0]))
+    bfp = np.vstack((st.best.footprint_local, st.best.footprint_local[0]))
+    ax.plot(gfp[:, 0], gfp[:, 1], linewidth=1.4)
+    ax.plot(bfp[:, 0], bfp[:, 1], linewidth=1.4)
+    ax.scatter([st.group0.min_corner_local[0]], [st.group0.min_corner_local[1]], marker="x", s=45)
+    ax.scatter([st.best.min_corner_local[0]], [st.best.min_corner_local[1]], marker="x", s=45)
 
-    # start footprint using group 0 pose for context
-    start_heading = _trajectory_heading(g0, 0)
-    start_box = _footprint_corners(g0[0, :2], start_heading, st.vehicle_length_m, st.vehicle_width_m)
-    ax.plot(start_box[:, 0], start_box[:, 1], linewidth=0.9, alpha=0.7)
-
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
-    ax.set_aspect("equal")
-    ax.grid(True, alpha=0.18)
+    # Mark initial ego frame.
+    ax.scatter([0.0], [0.0], marker="o", s=18)
+    ax.axhline(0.0, linewidth=0.5, alpha=0.2)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.16)
     ax.set_title(
         f"id={st.sample_index:02d} seed={st.env_seed} role={st.vehicle_role} m={st.mode}\n"
-        f"G0 R={st.group0_reward:.2f} off={st.group0_offroad} col={st.group0_collision} mr={st.group0_min_margin_m:.2f}\n"
-        f"Best#{st.best_group_id} R={st.best_reward:.2f} off={st.best_offroad} col={st.best_collision} mr={st.best_min_margin_m:.2f}",
-        fontsize=8,
+        f"G0 R={st.group0_reward:.2f} off={st.group0_offroad} min={st.group0_reported_min_margin_m:.2f} "
+        f"latM={st.group0.best_lane_lateral_margin:.2f} lonM={st.group0.best_lane_longitudinal_margin:.2f}\n"
+        f"Best#{st.best_group_id} R={st.best_reward:.2f} off={st.best_offroad} min={st.best_reported_min_margin_m:.2f}",
+        fontsize=7.5,
     )
     ax.tick_params(labelsize=7)
 
 
-def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
+def _diag_row(st: DiagnosticState, label: str, diag: ExactRoadDiagnostic, reward: float, offroad: int, collision: int) -> dict[str, Any]:
+    return {
+        "checkpoint": st.checkpoint,
+        "scenario": st.scenario,
+        "sample_index": st.sample_index,
+        "env_seed": st.env_seed,
+        "noise_seed": st.noise_seed,
+        "vehicle_role": st.vehicle_role,
+        "mode": st.mode,
+        "candidate": label,
+        "reward": reward,
+        "offroad": offroad,
+        "collision": collision,
+        "reported_minimum_road_margin_m": st.group0_reported_min_margin_m if label == "group0" else st.best_reported_min_margin_m,
+        "recomputed_minimum_road_margin_m": float(np.min(diag.margins)),
+        "min_time_index": diag.min_time_index,
+        "min_time_s": float(diag.min_time_index * 0.1),
+        "first_negative_time_index": diag.first_negative_time_index,
+        "first_negative_time_s": float(diag.first_negative_time_index * 0.1) if diag.first_negative_time_index >= 0 else float("nan"),
+        "worst_corner_local_x": float(diag.min_corner_local[0]),
+        "worst_corner_local_y": float(diag.min_corner_local[1]),
+        "best_lane_index": diag.best_lane_index,
+        "best_lane_margin_m": diag.best_lane_margin,
+        "best_lane_s_m": diag.best_lane_s,
+        "best_lane_length_m": diag.best_lane_length,
+        "best_lane_lateral_m": diag.best_lane_lateral,
+        "best_lane_width_m": diag.best_lane_width,
+        "best_lane_lateral_margin_m": diag.best_lane_lateral_margin,
+        "best_lane_longitudinal_margin_m": diag.best_lane_longitudinal_margin,
+        "negative_due_to_lateral": int(diag.best_lane_lateral_margin < 0.0),
+        "negative_due_to_longitudinal_endpoint": int(diag.best_lane_longitudinal_margin < 0.0),
+    }
+
+
+def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    fieldnames: list[str] = []
-    seen: set[str] = set()
+    keys: list[str] = []
+    seen = set()
     for row in rows:
-        for key in row.keys():
+        for key in row:
             if key not in seen:
-                seen.add(key)
-                fieldnames.append(key)
+                seen.add(key); keys.append(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+        writer = csv.DictWriter(fh, fieldnames=keys)
+        writer.writeheader(); writer.writerows(rows)
 
 
 def _plot_checkpoint(args: argparse.Namespace, checkpoint: CheckpointSpec, states_by_scenario: dict[str, list[DiagnosticState]]) -> None:
-    out_dir = args.output_dir / checkpoint.name / "plots"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    root = args.output_dir / checkpoint.name
+    plots = root / "plots"
+    plots.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(int(args.visualization_seed))
-    manifest_rows: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
     for scenario_name, states in states_by_scenario.items():
         if not states:
             continue
         count = min(int(args.states_per_gallery), len(states))
-        select_ids = sorted(rng.choice(len(states), size=count, replace=False).tolist())
-        chosen = [states[i] for i in select_ids]
-        while len(chosen) < 9:
-            chosen.append(chosen[-1])
-        xlim = _subplot_limits(chosen)[:2]
-        ylim = _subplot_limits(chosen)[2:]
-        fig, axes = plt.subplots(3, 3, figsize=(14, 11), constrained_layout=True)
-        for ax, st in zip(axes.ravel(), chosen):
-            _draw_state(ax, st, xlim=xlim, ylim=ylim)
-            manifest_rows.append({
-                "checkpoint": checkpoint.name,
-                "scenario": scenario_name,
-                "sample_index": st.sample_index,
-                "env_seed": st.env_seed,
-                "noise_seed": st.noise_seed,
-                "vehicle_role": st.vehicle_role,
-                "mode": st.mode,
-                "group0_reward": st.group0_reward,
-                "best_reward": st.best_reward,
-                "group0_offroad": st.group0_offroad,
-                "best_offroad": st.best_offroad,
-                "group0_collision": st.group0_collision,
-                "best_collision": st.best_collision,
-                "group0_min_margin_m": st.group0_min_margin_m,
-                "best_min_margin_m": st.best_min_margin_m,
-            })
+        ids = sorted(rng.choice(len(states), size=count, replace=False).tolist())
+        chosen = [states[i] for i in ids]
+        fig, axes = plt.subplots(3, 3, figsize=(15, 11.5), constrained_layout=True)
+        for idx, ax in enumerate(axes.ravel()):
+            if idx < len(chosen):
+                st = chosen[idx]
+                _draw_exact(ax, st)
+                rows.append(_diag_row(st, "group0", st.group0, st.group0_reward, st.group0_offroad, st.group0_collision))
+                rows.append(_diag_row(st, "best", st.best, st.best_reward, st.best_offroad, st.best_collision))
+            else:
+                ax.axis("off")
         fig.suptitle(
-            f"Reward Geometry Diagnostic | {checkpoint.name} | {scenario_name} | "
-            f"noise={args.noise_type} | role={args.vehicle_role}\n"
-            "Background: drivable/road geometry proxy from valid map polylines; "
-            "blue=Group0, red=Best-of-48, X=proxy min-road-margin point, boxes=vehicle footprint",
-            fontsize=11,
+            f"Exact Reward Geometry Diagnostic | {checkpoint.name} | {scenario_name}\n"
+            "Lane ribbons come from env.road.network.graph used by production reward; trajectories/footprints use the exact reward transform. "
+            "X = exact worst footprint corner at minimum road margin.",
+            fontsize=10.5,
         )
-        out_path = out_dir / f"reward_geometry_diagnostic_{scenario_name}_3x3_{checkpoint.name}.png"
-        fig.savefig(out_path, dpi=180)
+        out = plots / f"reward_geometry_exact_{scenario_name}_3x3_{checkpoint.name}.png"
+        fig.savefig(out, dpi=180)
         plt.close(fig)
-        print(f"[write] {out_path}")
-    _write_manifest(args.output_dir / checkpoint.name / "reward_geometry_diagnostic_manifest.csv", manifest_rows)
+        print(f"[write] {out}")
+    _write_csv(root / "reward_geometry_exact_manifest.csv", rows)
+    print(f"[write] {root / 'reward_geometry_exact_manifest.csv'}")
 
 
 def main() -> int:
@@ -450,7 +557,7 @@ def main() -> int:
     for checkpoint in args.checkpoint:
         states = _collect_states_for_checkpoint(args, checkpoint)
         _plot_checkpoint(args, checkpoint, states)
-    print("[OK] Reward Geometry Diagnostic completed")
+    print("[OK] Exact Reward Geometry Diagnostic completed")
     return 0
 
 
