@@ -35,49 +35,6 @@ def soft_threshold_risk(
     return np.clip((width / threshold) * softplus, 0.0, 1.0)
 
 
-def continuous_outside_road_penalty(
-    signed_margin_m: np.ndarray,
-    *,
-    outside_scale_m: float,
-    max_weight: float,
-    mean_weight: float,
-) -> float:
-    """Continuous unbounded road penalty from negative signed footprint margin.
-
-    Inside-road samples (margin >= 0) contribute zero.  Outside samples
-    contribute ReLU(-margin) / outside_scale_m, so larger boundary violation
-    always produces a larger penalty.  Temporal aggregation preserves the
-    existing max/mean balance without clipping to [0, 1].
-    """
-    margin = np.asarray(signed_margin_m, dtype=np.float64)
-    scale = float(outside_scale_m)
-    if (
-        margin.ndim != 1
-        or margin.size == 0
-        or not np.isfinite(margin).all()
-        or not math.isfinite(scale)
-        or scale <= 0.0
-    ):
-        raise TrajectoryModeRewardError(
-            "road margins must be a finite non-empty vector and outside_scale_m positive"
-        )
-    if (
-        not math.isfinite(max_weight)
-        or not math.isfinite(mean_weight)
-        or max_weight < 0.0
-        or mean_weight < 0.0
-        or not math.isclose(max_weight + mean_weight, 1.0)
-    ):
-        raise TrajectoryModeRewardError(
-            "temporal aggregation weights must sum to one"
-        )
-    outside = np.maximum(-margin, 0.0) / scale
-    return float(
-        max_weight * np.max(outside)
-        + mean_weight * np.mean(outside)
-    )
-
-
 def closing_ttc_from_gap_series(
     gap_series: np.ndarray,
     *,

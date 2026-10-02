@@ -34,10 +34,6 @@ class TrajectoryModeRewardConfig:
     road_margin_warning_m: float = 1.0
     road_margin_softness_m: float = 0.25
 
-    # ROAD_REWARD_V2: scale for continuous outside-road distance penalty.
-    # road_penalty is unbounded and grows linearly with signed-margin violation.
-    road_outside_scale_m: float = 0.5
-
     tracking_longitudinal_margin_m: float = 0.0
     tracking_lateral_margin_m: float = 0.0
     tracking_heading_margin_rad: float = 0.0
@@ -50,9 +46,7 @@ class TrajectoryModeRewardConfig:
     road_weight: float = 0.5
     comfort_weight: float = 0.0225
     collision_penalty: float = 5.0
-    # ROAD_REWARD_V2: out_of_drivable remains a diagnostic/unsafe flag.
-    # The fixed reward cliff is disabled; continuous road_penalty carries severity.
-    out_of_drivable_penalty: float = 0.0
+    out_of_drivable_penalty: float = 4.0
 
     temporal_max_weight: float = 0.7
     temporal_mean_weight: float = 0.3
@@ -83,7 +77,6 @@ class TrajectoryModeRewardConfig:
             "closing_speed_epsilon_mps",
             "road_margin_warning_m",
             "road_margin_softness_m",
-            "road_outside_scale_m",
             "progress_norm_m",
             "no_risk_gap_m",
             "no_risk_ttc_s",

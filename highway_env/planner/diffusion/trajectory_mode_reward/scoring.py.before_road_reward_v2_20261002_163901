@@ -20,7 +20,6 @@ from .geometry import (
 from .risk import (
     aggregate_temporal_risk,
     closing_ttc_from_gap_series,
-    continuous_outside_road_penalty,
     soft_threshold_risk,
 )
 
@@ -163,14 +162,23 @@ class CounterfactualScoringMixin:
             out_of_drivable[group] = bool(
                 np.any(road_margin[1:] < 0.0)
             )
-            # ROAD_REWARD_V2
-            # Penalize only actual boundary violation, continuously in meters.
-            # No clipping/saturation: farther outside always means larger cost.
-            road_penalty[group] = continuous_outside_road_penalty(
-                road_margin[1:],
-                outside_scale_m=self.config.road_outside_scale_m,
-                max_weight=self.config.temporal_max_weight,
-                mean_weight=self.config.temporal_mean_weight,
+            road_risk = soft_threshold_risk(
+                road_margin,
+                warning_threshold=(
+                    self.config.road_margin_warning_m
+                ),
+                softness=(
+                    self.config.road_margin_softness_m
+                ),
+            )
+            road_penalty[group] = aggregate_temporal_risk(
+                road_risk,
+                max_weight=(
+                    self.config.temporal_max_weight
+                ),
+                mean_weight=(
+                    self.config.temporal_mean_weight
+                ),
             )
 
             motion_local = local[1:]
@@ -422,8 +430,8 @@ class CounterfactualScoringMixin:
             * comfort_penalty
             - self.config.collision_penalty
             * collision.astype(np.float64)
-            # ROAD_REWARD_V2: out_of_drivable stays diagnostic/unsafe only.
-            # Severity is already represented continuously by road_penalty.
+            - self.config.out_of_drivable_penalty
+            * out_of_drivable.astype(np.float64)
         )
         unsafe = (
             collision

@@ -7,7 +7,7 @@ import json
 
 
 TRAJECTORY_MODE_REWARD_CONTRACT = {
-    "version": "stage2_trajectory_mode_reward_v2_continuous_road",
+    "version": "stage2_trajectory_mode_reward_v1",
     "comparison_unit": "trajectory_mode",
     "candidate_shape": "[3,10,N,8,2]",
     "same_mode_pretrain_shape": "[3,10,8,2]",
@@ -16,9 +16,8 @@ TRAJECTORY_MODE_REWARD_CONTRACT = {
         "replace only the target trajectory; keep both teammate trajectories fixed"
     ),
     "reward_scope": (
-        "target progress, comfort and continuous signed-road-margin penalty plus "
-        "target-to-background and target-to-teammate gap, TTC and collision; "
-        "out-of-drivable remains diagnostic/unsafe only"
+        "target progress, comfort, road and out-of-drivable plus target-to-"
+        "background and target-to-teammate gap, TTC, collision and clearance"
     ),
     "formation_component": False,
     "other_vehicle_self_events": False,
@@ -29,6 +28,7 @@ TRAJECTORY_MODE_REWARD_CONTRACT = {
         "-road_weight*road_penalty"
         "-comfort_weight*comfort_penalty"
         "-collision_penalty*collision"
+        "-out_of_drivable_penalty*out_of_drivable"
     ),
     "invalid_mode_values": "zero-filled and excluded by valid_mode_mask",
 }

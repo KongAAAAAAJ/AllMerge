@@ -69,9 +69,7 @@ REWARD_COMPONENT_WEIGHTS = {
 }
 REWARD_EVENT_WEIGHTS = {
     "collision": -5.0,
-    # ROAD_REWARD_V2: out_of_drivable is diagnostic/unsafe only;
-    # continuous road_penalty contains the reward contribution.
-    "out_of_drivable": 0.0,
+    "out_of_drivable": -4.0,
 }
 REWARD_DIAGNOSTIC_COMPONENTS = (
     "minimum_background_gap_m",
