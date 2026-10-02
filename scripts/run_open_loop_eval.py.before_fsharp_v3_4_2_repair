@@ -230,12 +230,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-polish-max-curvature", type=float, default=0.04)
     parser.add_argument("--guidance-dense-polish-iters", type=int, default=3)
     parser.add_argument("--guidance-dense-polish-step-m", type=float, default=0.075)
-    # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4_2_REPAIR
-    parser.add_argument("--guidance-dense-post-recovery-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-post-recovery-threshold", type=float, default=0.04)
-    parser.add_argument("--guidance-dense-post-recovery-iters", type=int, default=3)
-    parser.add_argument("--guidance-dense-post-recovery-step-m", type=float, default=0.10)
-    parser.add_argument("--guidance-dense-post-recovery-max-total-move-m", type=float, default=0.50)
     return parser.parse_args()
 
 
@@ -306,12 +300,6 @@ def main() -> int:
         guidance_dense_polish_max_curvature=args.guidance_dense_polish_max_curvature,
         guidance_dense_polish_iters=args.guidance_dense_polish_iters,
         guidance_dense_polish_step_m=args.guidance_dense_polish_step_m,
-        # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4_2_REPAIR
-        guidance_dense_post_recovery_enabled=args.guidance_dense_post_recovery_enabled,
-        guidance_dense_post_recovery_threshold=args.guidance_dense_post_recovery_threshold,
-        guidance_dense_post_recovery_iters=args.guidance_dense_post_recovery_iters,
-        guidance_dense_post_recovery_step_m=args.guidance_dense_post_recovery_step_m,
-        guidance_dense_post_recovery_max_total_move_m=args.guidance_dense_post_recovery_max_total_move_m,
     )
     print_summary(summary)
     return 0

@@ -882,27 +882,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 guidance_last.get("polish_update_l2_m", zero_diag)
                 if guidance_last is not None else zero_diag
             ),
-            # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4_2_REPAIR
-            "guidance_post_recovery_trigger_fraction": (
-                guidance_last.get("post_recovery_trigger_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_post_recovery_iterations_used": (
-                guidance_last.get("post_recovery_iterations_used", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_post_recovery_backtracking_reductions": (
-                guidance_last.get("post_recovery_backtracking_reductions", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_post_recovery_update_l2_m": (
-                guidance_last.get("post_recovery_update_l2_m", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_post_recovery_trust_saturation_fraction": (
-                guidance_last.get("post_recovery_trust_saturation_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
             "guidance_bound_loss_before": (
                 guidance_last.get("bound_loss_before", zero_diag)
                 if guidance_last is not None else zero_diag
@@ -1095,12 +1074,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_polish_iterations_used": base["guidance_polish_iterations_used"],
             "guidance_polish_backtracking_reductions": base["guidance_polish_backtracking_reductions"],
             "guidance_polish_update_l2_m": base["guidance_polish_update_l2_m"],
-            # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4_2_REPAIR
-            "guidance_post_recovery_trigger_fraction": base["guidance_post_recovery_trigger_fraction"],
-            "guidance_post_recovery_iterations_used": base["guidance_post_recovery_iterations_used"],
-            "guidance_post_recovery_backtracking_reductions": base["guidance_post_recovery_backtracking_reductions"],
-            "guidance_post_recovery_update_l2_m": base["guidance_post_recovery_update_l2_m"],
-            "guidance_post_recovery_trust_saturation_fraction": base["guidance_post_recovery_trust_saturation_fraction"],
             "guidance_bound_loss_before": base["guidance_bound_loss_before"],
             "guidance_bound_loss_after": base["guidance_bound_loss_after"],
             "guidance_peak_loss_before": base["guidance_peak_loss_before"],
