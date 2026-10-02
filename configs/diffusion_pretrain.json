@@ -1,6 +1,6 @@
 {
   "model": {
-    "reg_head_type": "mlp"
+    "reg_head_type": "gru"
   },
   "training": {
     "dataset_root": "outputs/expert_dataset/allmerge_expert",
