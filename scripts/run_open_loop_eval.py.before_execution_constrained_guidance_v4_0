@@ -260,22 +260,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-peak-recovery-dkappa-weight", type=float, default=0.05)
     parser.add_argument("--guidance-dense-peak-recovery-peak-alpha", type=float, default=20.0)
     parser.add_argument("--guidance-dense-peak-recovery-min-peak-improvement", type=float, default=1.0e-6)
-    # EXECUTION_CONSTRAINED_GUIDANCE_V4_0
-    parser.add_argument("--guidance-dense-constraint-recovery-mode", choices=["none", "alm", "projection", "hybrid"], default="none")
-    parser.add_argument("--guidance-dense-constraint-recovery-threshold", type=float, default=0.02)
-    parser.add_argument("--guidance-dense-constraint-recovery-max-total-move-m", type=float, default=0.50)
-    parser.add_argument("--guidance-dense-constraint-recovery-min-improvement", type=float, default=1.0e-7)
-    parser.add_argument("--guidance-dense-alm-iters", type=int, default=8)
-    parser.add_argument("--guidance-dense-alm-step-m", type=float, default=0.10)
-    parser.add_argument("--guidance-dense-alm-rho", type=float, default=10.0)
-    parser.add_argument("--guidance-dense-alm-dual-step", type=float, default=10.0)
-    parser.add_argument("--guidance-dense-alm-lambda-max", type=float, default=100.0)
-    parser.add_argument("--guidance-dense-alm-active-margin", type=float, default=0.005)
-    parser.add_argument("--guidance-dense-alm-proximity-weight", type=float, default=0.02)
-    parser.add_argument("--guidance-dense-projection-iters", type=int, default=8)
-    parser.add_argument("--guidance-dense-projection-max-step-m", type=float, default=0.15)
-    parser.add_argument("--guidance-dense-projection-tightening", type=float, default=0.0)
-    parser.add_argument("--guidance-dense-projection-safety-factor", type=float, default=1.05)
     return parser.parse_args()
 
 
@@ -372,22 +356,6 @@ def main() -> int:
         guidance_dense_peak_recovery_dkappa_weight=args.guidance_dense_peak_recovery_dkappa_weight,
         guidance_dense_peak_recovery_peak_alpha=args.guidance_dense_peak_recovery_peak_alpha,
         guidance_dense_peak_recovery_min_peak_improvement=args.guidance_dense_peak_recovery_min_peak_improvement,
-        # EXECUTION_CONSTRAINED_GUIDANCE_V4_0
-        guidance_dense_constraint_recovery_mode=args.guidance_dense_constraint_recovery_mode,
-        guidance_dense_constraint_recovery_threshold=args.guidance_dense_constraint_recovery_threshold,
-        guidance_dense_constraint_recovery_max_total_move_m=args.guidance_dense_constraint_recovery_max_total_move_m,
-        guidance_dense_constraint_recovery_min_improvement=args.guidance_dense_constraint_recovery_min_improvement,
-        guidance_dense_alm_iters=args.guidance_dense_alm_iters,
-        guidance_dense_alm_step_m=args.guidance_dense_alm_step_m,
-        guidance_dense_alm_rho=args.guidance_dense_alm_rho,
-        guidance_dense_alm_dual_step=args.guidance_dense_alm_dual_step,
-        guidance_dense_alm_lambda_max=args.guidance_dense_alm_lambda_max,
-        guidance_dense_alm_active_margin=args.guidance_dense_alm_active_margin,
-        guidance_dense_alm_proximity_weight=args.guidance_dense_alm_proximity_weight,
-        guidance_dense_projection_iters=args.guidance_dense_projection_iters,
-        guidance_dense_projection_max_step_m=args.guidance_dense_projection_max_step_m,
-        guidance_dense_projection_tightening=args.guidance_dense_projection_tightening,
-        guidance_dense_projection_safety_factor=args.guidance_dense_projection_safety_factor,
     )
     print_summary(summary)
     return 0
