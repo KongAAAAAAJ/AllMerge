@@ -985,14 +985,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_projection_iterations_used": (guidance_last.get("projection_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_projection_backtracking_reductions": (guidance_last.get("projection_backtracking_reductions", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_projection_requested_step_m": (guidance_last.get("projection_requested_step_m", zero_diag) if guidance_last is not None else zero_diag),
-            # MULTI_ACTIVE_TRUST_PROJECTION_V4_2
-            "guidance_matp_iterations_used": (guidance_last.get("matp_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_backtracking_reductions": (guidance_last.get("matp_backtracking_reductions", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_active_constraints_sum": (guidance_last.get("matp_active_constraints_sum", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_mean_trust_limit_m": (guidance_last.get("matp_mean_trust_limit_m", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_trust_expansions": (guidance_last.get("matp_trust_expansions", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_archive_feasible_fraction": (guidance_last.get("matp_archive_feasible_fraction", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_trust_saturation_fraction": (guidance_last.get("matp_trust_saturation_fraction", zero_diag) if guidance_last is not None else zero_diag),
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "guidance_split_outer_iterations_used": (guidance_last.get("split_outer_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_split_primal_iterations_used": (guidance_last.get("split_primal_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
@@ -1230,14 +1222,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_projection_iterations_used": base["guidance_projection_iterations_used"],
             "guidance_projection_backtracking_reductions": base["guidance_projection_backtracking_reductions"],
             "guidance_projection_requested_step_m": base["guidance_projection_requested_step_m"],
-            # MULTI_ACTIVE_TRUST_PROJECTION_V4_2
-            "guidance_matp_iterations_used": base["guidance_matp_iterations_used"],
-            "guidance_matp_backtracking_reductions": base["guidance_matp_backtracking_reductions"],
-            "guidance_matp_active_constraints_sum": base["guidance_matp_active_constraints_sum"],
-            "guidance_matp_mean_trust_limit_m": base["guidance_matp_mean_trust_limit_m"],
-            "guidance_matp_trust_expansions": base["guidance_matp_trust_expansions"],
-            "guidance_matp_archive_feasible_fraction": base["guidance_matp_archive_feasible_fraction"],
-            "guidance_matp_trust_saturation_fraction": base["guidance_matp_trust_saturation_fraction"],
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "guidance_split_outer_iterations_used": base["guidance_split_outer_iterations_used"],
             "guidance_split_primal_iterations_used": base["guidance_split_primal_iterations_used"],

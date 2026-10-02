@@ -261,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-peak-recovery-peak-alpha", type=float, default=20.0)
     parser.add_argument("--guidance-dense-peak-recovery-min-peak-improvement", type=float, default=1.0e-6)
     # EXECUTION_CONSTRAINED_GUIDANCE_V4_0
-    parser.add_argument("--guidance-dense-constraint-recovery-mode", choices=["none", "alm", "projection", "hybrid", "split_projection", "matp"], default="none")  # MULTI_ACTIVE_TRUST_PROJECTION_V4_2
+    parser.add_argument("--guidance-dense-constraint-recovery-mode", choices=["none", "alm", "projection", "hybrid", "split_projection"], default="none")  # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     parser.add_argument("--guidance-dense-constraint-recovery-threshold", type=float, default=0.02)
     parser.add_argument("--guidance-dense-constraint-recovery-max-total-move-m", type=float, default=0.50)
     parser.add_argument("--guidance-dense-constraint-recovery-min-improvement", type=float, default=1.0e-7)
@@ -276,23 +276,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-projection-max-step-m", type=float, default=0.15)
     parser.add_argument("--guidance-dense-projection-tightening", type=float, default=0.0)
     parser.add_argument("--guidance-dense-projection-safety-factor", type=float, default=1.05)
-    # MULTI_ACTIVE_TRUST_PROJECTION_V4_2
-    parser.add_argument("--guidance-dense-matp-iters", type=int, default=6)
-    parser.add_argument("--guidance-dense-matp-max-active-constraints", type=int, default=8)
-    parser.add_argument("--guidance-dense-matp-active-threshold", type=float, default=0.015)
-    parser.add_argument("--guidance-dense-matp-regularization", type=float, default=1.0e-4)
-    parser.add_argument("--guidance-dense-matp-max-step-m", type=float, default=0.15)
-    parser.add_argument("--guidance-dense-matp-tightening", type=float, default=0.0)
-    parser.add_argument("--guidance-dense-matp-safety-factor", type=float, default=1.05)
-    parser.add_argument("--guidance-dense-matp-adaptive-trust-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-matp-initial-trust-m", type=float, default=0.30)
-    parser.add_argument("--guidance-dense-matp-trust-level2-m", type=float, default=0.50)
-    parser.add_argument("--guidance-dense-matp-trust-level3-m", type=float, default=0.75)
-    parser.add_argument("--guidance-dense-matp-max-trust-m", type=float, default=1.00)
-    parser.add_argument("--guidance-dense-matp-trust-saturation-threshold", type=float, default=0.90)
-    parser.add_argument("--guidance-dense-matp-filter-acceptance-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-matp-filter-peak-tolerance", type=float, default=2.0e-4)
-    parser.add_argument("--guidance-dense-matp-archive-enabled", action="store_true")
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     parser.add_argument("--guidance-dense-split-outer-iters", type=int, default=4)
     parser.add_argument("--guidance-dense-split-primal-iters", type=int, default=4)
@@ -415,23 +398,6 @@ def main() -> int:
         guidance_dense_projection_max_step_m=args.guidance_dense_projection_max_step_m,
         guidance_dense_projection_tightening=args.guidance_dense_projection_tightening,
         guidance_dense_projection_safety_factor=args.guidance_dense_projection_safety_factor,
-        # MULTI_ACTIVE_TRUST_PROJECTION_V4_2
-        guidance_dense_matp_iters=args.guidance_dense_matp_iters,
-        guidance_dense_matp_max_active_constraints=args.guidance_dense_matp_max_active_constraints,
-        guidance_dense_matp_active_threshold=args.guidance_dense_matp_active_threshold,
-        guidance_dense_matp_regularization=args.guidance_dense_matp_regularization,
-        guidance_dense_matp_max_step_m=args.guidance_dense_matp_max_step_m,
-        guidance_dense_matp_tightening=args.guidance_dense_matp_tightening,
-        guidance_dense_matp_safety_factor=args.guidance_dense_matp_safety_factor,
-        guidance_dense_matp_adaptive_trust_enabled=args.guidance_dense_matp_adaptive_trust_enabled,
-        guidance_dense_matp_initial_trust_m=args.guidance_dense_matp_initial_trust_m,
-        guidance_dense_matp_trust_level2_m=args.guidance_dense_matp_trust_level2_m,
-        guidance_dense_matp_trust_level3_m=args.guidance_dense_matp_trust_level3_m,
-        guidance_dense_matp_max_trust_m=args.guidance_dense_matp_max_trust_m,
-        guidance_dense_matp_trust_saturation_threshold=args.guidance_dense_matp_trust_saturation_threshold,
-        guidance_dense_matp_filter_acceptance_enabled=args.guidance_dense_matp_filter_acceptance_enabled,
-        guidance_dense_matp_filter_peak_tolerance=args.guidance_dense_matp_filter_peak_tolerance,
-        guidance_dense_matp_archive_enabled=args.guidance_dense_matp_archive_enabled,
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
         guidance_dense_split_outer_iters=args.guidance_dense_split_outer_iters,
         guidance_dense_split_primal_iters=args.guidance_dense_split_primal_iters,
