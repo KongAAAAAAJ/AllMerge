@@ -97,7 +97,12 @@ class GroupDiffusionSampler:
             current_t = torch.full(
                 (sample.shape[0],), int(timestep), dtype=torch.long, device=sample.device
             )
-            predicted_x0, logits = model.denoiser(sample, current_t, scene)
+            predicted_x0, logits = model.denoiser(
+                sample,
+                current_t,
+                scene,
+                navigation_point_norm=anchor[:, :, -1, :],
+            )
             final_x0, final_logits = predicted_x0, logits
             if index + 1 >= len(timesteps):
                 break
@@ -151,6 +156,9 @@ class GroupDiffusionSampler:
         batch, group_size = trace.old_log_prob.shape[:2]
         expanded = _expand_group(trace.features, group_size)
         scene = replay_model.scene_encoder(expanded)
+        replay_anchor = replay_model.adapter.normalize_trajectory(
+            expanded["coarse_trajectories"]
+        )
         log_probs = []
         for index, (state, next_state) in enumerate(zip(trace.states, trace.next_states)):
             timestep = trace.timesteps[index]
@@ -160,7 +168,12 @@ class GroupDiffusionSampler:
             t_batch = torch.full(
                 (flat_state.shape[0],), int(timestep), dtype=torch.long, device=flat_state.device
             )
-            predicted_x0, _ = replay_model.denoiser(flat_state, t_batch, scene)
+            predicted_x0, _ = replay_model.denoiser(
+                flat_state,
+                t_batch,
+                scene,
+                navigation_point_norm=replay_anchor[:, :, -1, :],
+            )
             replayed = transition.step(
                 flat_state,
                 predicted_x0,

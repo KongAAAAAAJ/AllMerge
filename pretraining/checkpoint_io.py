@@ -25,7 +25,11 @@ def load_planner_state_dict(checkpoint_obj) -> Tuple[Dict[str, torch.Tensor], di
     """
     model_config = {}
     if isinstance(checkpoint_obj, dict):
-        model_config = dict(checkpoint_obj.get("allmerge_model_config") or {})
+        model_config = dict(
+            checkpoint_obj.get("allmerge_model_config")
+            or checkpoint_obj.get("model_config")
+            or {}
+        )
         if "planner_state_dict" in checkpoint_obj:
             return dict(checkpoint_obj["planner_state_dict"]), model_config
         state_dict = checkpoint_obj.get("state_dict", checkpoint_obj)
