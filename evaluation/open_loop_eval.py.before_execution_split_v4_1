@@ -214,17 +214,6 @@ CSV_FIELDS = [
     "guidance_projection_iterations_used",
     "guidance_projection_backtracking_reductions",
     "guidance_projection_requested_step_m",
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    "guidance_split_outer_iterations_used",
-    "guidance_split_primal_iterations_used",
-    "guidance_split_primal_backtracking_reductions",
-    "guidance_split_projection_iterations_used",
-    "guidance_split_projection_backtracking_reductions",
-    "guidance_split_consistency_l2_m",
-    "guidance_split_dual_l2_m",
-    "guidance_split_update_l2_m",
-    "guidance_split_archive_feasible_fraction",
-    "guidance_split_rho_final",
 ]
 
 
@@ -643,16 +632,6 @@ def evaluate_open_loop(
     guidance_dense_projection_max_step_m: float = 0.15,
     guidance_dense_projection_tightening: float = 0.0,
     guidance_dense_projection_safety_factor: float = 1.05,
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    guidance_dense_split_outer_iters: int = 4,
-    guidance_dense_split_primal_iters: int = 4,
-    guidance_dense_split_primal_step_m: float = 0.08,
-    guidance_dense_split_rho: float = 5.0,
-    guidance_dense_split_rho_max: float = 40.0,
-    guidance_dense_split_rho_growth: float = 2.0,
-    guidance_dense_split_proximity_weight: float = 0.05,
-    guidance_dense_split_dual_clip_m: float = 0.50,
-    guidance_dense_split_consistency_tol_m: float = 1.0e-3,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -764,16 +743,6 @@ def evaluate_open_loop(
             "dense_projection_max_step_m": float(guidance_dense_projection_max_step_m),
             "dense_projection_tightening": float(guidance_dense_projection_tightening),
             "dense_projection_safety_factor": float(guidance_dense_projection_safety_factor),
-            # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-            "dense_split_outer_iters": int(guidance_dense_split_outer_iters),
-            "dense_split_primal_iters": int(guidance_dense_split_primal_iters),
-            "dense_split_primal_step_m": float(guidance_dense_split_primal_step_m),
-            "dense_split_rho": float(guidance_dense_split_rho),
-            "dense_split_rho_max": float(guidance_dense_split_rho_max),
-            "dense_split_rho_growth": float(guidance_dense_split_rho_growth),
-            "dense_split_proximity_weight": float(guidance_dense_split_proximity_weight),
-            "dense_split_dual_clip_m": float(guidance_dense_split_dual_clip_m),
-            "dense_split_consistency_tol_m": float(guidance_dense_split_consistency_tol_m),
         },
     }
     if checkpoint_model_config:
@@ -1430,17 +1399,6 @@ def evaluate_open_loop(
                         "guidance_projection_iterations_used": _float(output["guidance_projection_iterations_used"], i),
                         "guidance_projection_backtracking_reductions": _float(output["guidance_projection_backtracking_reductions"], i),
                         "guidance_projection_requested_step_m": _float(output["guidance_projection_requested_step_m"], i),
-                        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-                        "guidance_split_outer_iterations_used": _float(output["guidance_split_outer_iterations_used"], i),
-                        "guidance_split_primal_iterations_used": _float(output["guidance_split_primal_iterations_used"], i),
-                        "guidance_split_primal_backtracking_reductions": _float(output["guidance_split_primal_backtracking_reductions"], i),
-                        "guidance_split_projection_iterations_used": _float(output["guidance_split_projection_iterations_used"], i),
-                        "guidance_split_projection_backtracking_reductions": _float(output["guidance_split_projection_backtracking_reductions"], i),
-                        "guidance_split_consistency_l2_m": _float(output["guidance_split_consistency_l2_m"], i),
-                        "guidance_split_dual_l2_m": _float(output["guidance_split_dual_l2_m"], i),
-                        "guidance_split_update_l2_m": _float(output["guidance_split_update_l2_m"], i),
-                        "guidance_split_archive_feasible_fraction": _float(output["guidance_split_archive_feasible_fraction"], i),
-                        "guidance_split_rho_final": _float(output["guidance_split_rho_final"], i),
                         "guidance_bound_loss_before": _float(output["guidance_bound_loss_before"], i),
                         "guidance_bound_loss_after": _float(output["guidance_bound_loss_after"], i),
                         "guidance_peak_loss_before": _float(output["guidance_peak_loss_before"], i),
@@ -1761,16 +1719,6 @@ def evaluate_open_loop(
         "guidance_dense_projection_max_step_m": float(guidance_dense_projection_max_step_m),
         "guidance_dense_projection_tightening": float(guidance_dense_projection_tightening),
         "guidance_dense_projection_safety_factor": float(guidance_dense_projection_safety_factor),
-        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-        "guidance_dense_split_outer_iters": int(guidance_dense_split_outer_iters),
-        "guidance_dense_split_primal_iters": int(guidance_dense_split_primal_iters),
-        "guidance_dense_split_primal_step_m": float(guidance_dense_split_primal_step_m),
-        "guidance_dense_split_rho": float(guidance_dense_split_rho),
-        "guidance_dense_split_rho_max": float(guidance_dense_split_rho_max),
-        "guidance_dense_split_rho_growth": float(guidance_dense_split_rho_growth),
-        "guidance_dense_split_proximity_weight": float(guidance_dense_split_proximity_weight),
-        "guidance_dense_split_dual_clip_m": float(guidance_dense_split_dual_clip_m),
-        "guidance_dense_split_consistency_tol_m": float(guidance_dense_split_consistency_tol_m),
         "mean_guidance_peak_recovery_trigger_fraction": _mean(rows, "guidance_peak_recovery_trigger_fraction"),
         "mean_guidance_peak_recovery_iterations_used": _mean(rows, "guidance_peak_recovery_iterations_used"),
         "mean_guidance_peak_recovery_backtracking_reductions": _mean(rows, "guidance_peak_recovery_backtracking_reductions"),
@@ -1790,17 +1738,6 @@ def evaluate_open_loop(
         "mean_guidance_projection_iterations_used": _mean(rows, "guidance_projection_iterations_used"),
         "mean_guidance_projection_backtracking_reductions": _mean(rows, "guidance_projection_backtracking_reductions"),
         "mean_guidance_projection_requested_step_m": _mean(rows, "guidance_projection_requested_step_m"),
-        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-        "mean_guidance_split_outer_iterations_used": _mean(rows, "guidance_split_outer_iterations_used"),
-        "mean_guidance_split_primal_iterations_used": _mean(rows, "guidance_split_primal_iterations_used"),
-        "mean_guidance_split_primal_backtracking_reductions": _mean(rows, "guidance_split_primal_backtracking_reductions"),
-        "mean_guidance_split_projection_iterations_used": _mean(rows, "guidance_split_projection_iterations_used"),
-        "mean_guidance_split_projection_backtracking_reductions": _mean(rows, "guidance_split_projection_backtracking_reductions"),
-        "mean_guidance_split_consistency_l2_m": _mean(rows, "guidance_split_consistency_l2_m"),
-        "mean_guidance_split_dual_l2_m": _mean(rows, "guidance_split_dual_l2_m"),
-        "mean_guidance_split_update_l2_m": _mean(rows, "guidance_split_update_l2_m"),
-        "mean_guidance_split_archive_feasible_fraction": _mean(rows, "guidance_split_archive_feasible_fraction"),
-        "mean_guidance_split_rho_final": _mean(rows, "guidance_split_rho_final"),
         "mean_guidance_inner_iterations_used": _mean(rows, "guidance_inner_iterations_used"),
         "mean_guidance_backtracking_reductions": _mean(rows, "guidance_backtracking_reductions"),
     }

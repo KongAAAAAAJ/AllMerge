@@ -105,19 +105,6 @@ class SparseCurvatureGuidanceConfig:
     dense_projection_max_step_m: float = 0.15
     dense_projection_tightening: float = 0.0
     dense_projection_safety_factor: float = 1.05
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    # D: split planning x from execution-domain sparse trajectory z.
-    # z is projected to the execution feasible set; x is updated only through
-    # augmented planning-execution consistency and proximity to the B0 anchor.
-    dense_split_outer_iters: int = 4
-    dense_split_primal_iters: int = 4
-    dense_split_primal_step_m: float = 0.08
-    dense_split_rho: float = 5.0
-    dense_split_rho_max: float = 40.0
-    dense_split_rho_growth: float = 2.0
-    dense_split_proximity_weight: float = 0.05
-    dense_split_dual_clip_m: float = 0.50
-    dense_split_consistency_tol_m: float = 1.0e-3
     eps: float = 1.0e-6
 
     @classmethod
@@ -283,8 +270,8 @@ class SparseCurvatureGuidanceConfig:
         if self.dense_peak_recovery_min_peak_improvement < 0.0:
             raise ValueError("peak-recovery minimum peak improvement must be >= 0")
         # EXECUTION_CONSTRAINED_GUIDANCE_V4_0
-        if self.dense_constraint_recovery_mode not in {"none", "alm", "projection", "hybrid", "split_projection"}:
-            raise ValueError("dense_constraint_recovery_mode must be none/alm/projection/hybrid/split_projection")
+        if self.dense_constraint_recovery_mode not in {"none", "alm", "projection", "hybrid"}:
+            raise ValueError("dense_constraint_recovery_mode must be none/alm/projection/hybrid")
         if self.dense_constraint_recovery_threshold < self.curvature_limit:
             raise ValueError("constraint recovery threshold must be >= curvature_limit")
         if self.dense_constraint_recovery_max_total_move_m <= 0.0:
@@ -307,21 +294,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("projection tightening must be < curvature_limit")
         if self.dense_projection_safety_factor <= 0.0:
             raise ValueError("projection safety factor must be positive")
-        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-        if self.dense_split_outer_iters < 1 or self.dense_split_primal_iters < 1:
-            raise ValueError("split outer/primal iterations must be >= 1")
-        if self.dense_split_primal_step_m <= 0.0:
-            raise ValueError("split primal step must be positive")
-        if self.dense_split_rho <= 0.0 or self.dense_split_rho_max < self.dense_split_rho:
-            raise ValueError("split rho must be positive and rho_max >= rho")
-        if self.dense_split_rho_growth < 1.0:
-            raise ValueError("split rho growth must be >= 1")
-        if self.dense_split_proximity_weight < 0.0:
-            raise ValueError("split proximity weight must be >= 0")
-        if self.dense_split_dual_clip_m <= 0.0:
-            raise ValueError("split dual clip must be positive")
-        if self.dense_split_consistency_tol_m < 0.0:
-            raise ValueError("split consistency tolerance must be >= 0")
         if self.eps <= 0.0:
             raise ValueError("guidance eps must be positive")
         if self.apply_timesteps is not None:
@@ -1220,305 +1192,6 @@ def _run_execution_projection_recovery(
         "requested_step_sum": requested_step_sum,
     }
 
-
-# EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-# Variable-splitting constrained solver:
-#   x : planner sparse trajectory (close to the complete B0 output)
-#   z : execution-domain sparse trajectory after the differentiable execution map
-# Projection owns feasibility in z-space.  The x update owns planner fidelity and
-# execution consistency.  A scaled dual variable carries persistent mismatch.
-def _run_execution_split_augmented_projection(
-    current_xy: torch.Tensor,
-    *,
-    anchor_xy: torch.Tensor,
-    mode_valid: torch.Tensor,
-    config: SparseCurvatureGuidanceConfig,
-    execution_points_fn,
-    evaluate_planner_fn,
-    evaluate_execution_fn,
-):
-    dtype = current_xy.dtype
-    device = current_xy.device
-    with torch.no_grad():
-        start_max, _, _ = _constraint_max_state(evaluate_planner_fn, current_xy)
-    trigger = mode_valid & (
-        start_max > float(config.dense_constraint_recovery_threshold) + 1.0e-8
-    )
-
-    x = current_xy.clone()
-    with torch.no_grad():
-        execution_anchor = execution_points_fn(
-            anchor_xy, allow_input_gradient=False
-        ).detach()
-    scaled_dual = torch.zeros_like(execution_anchor)
-
-    accepted_primal = torch.zeros(trigger.shape, device=device, dtype=dtype)
-    primal_backtracking = torch.zeros_like(accepted_primal)
-    projection_accepted = torch.zeros_like(accepted_primal)
-    projection_backtracking = torch.zeros_like(accepted_primal)
-    outer_used = torch.zeros_like(accepted_primal)
-    projection_requested_step = torch.zeros_like(accepted_primal)
-
-    inf = torch.full(trigger.shape, float("inf"), device=device, dtype=dtype)
-    best_feasible_dist = inf.clone()
-    best_feasible_xy = x.clone()
-    best_feasible_mask = torch.zeros_like(trigger)
-    best_max_xy = x.clone()
-    best_max = start_max.clone()
-
-    rho = float(config.dense_split_rho)
-    previous_consistency = None
-    final_consistency = torch.zeros_like(start_max)
-
-    for _outer in range(int(config.dense_split_outer_iters)):
-        active_outer = trigger & ~best_feasible_mask
-        if not bool(active_outer.any().item()):
-            break
-        outer_used = outer_used + active_outer.to(dtype)
-
-        # --- z step: explicit feasibility projection in execution domain ---
-        with torch.no_grad():
-            execution_now = execution_points_fn(
-                x, allow_input_gradient=False
-            ).detach()
-            z_seed = execution_now + scaled_dual
-
-        z_projected, pdiag = _run_execution_projection_recovery(
-            z_seed,
-            anchor_xy=z_seed,
-            mode_valid=active_outer,
-            config=config,
-            evaluate_fn=evaluate_execution_fn,
-        )
-        projection_accepted = projection_accepted + pdiag["accepted"]
-        projection_backtracking = projection_backtracking + pdiag["backtracking"]
-        projection_requested_step = (
-            projection_requested_step + pdiag["requested_step_sum"]
-        )
-
-        # --- x step: preserve B0 while matching the feasible execution target ---
-        target_z = z_projected.detach()
-        for _inner in range(int(config.dense_split_primal_iters)):
-            with torch.enable_grad():
-                x_var = x.detach().requires_grad_(True)
-                execution_var = execution_points_fn(
-                    x_var,
-                    allow_input_gradient=bool(config.dense_residual_gradient_enabled),
-                )
-                residual = execution_var - target_z + scaled_dual.detach()
-                consistency = residual.square().sum(dim=(-1, -2))
-                proximity = (x_var - anchor_xy).square().sum(dim=(-1, -2))
-                active = active_outer
-                objective_per_mode = (
-                    0.5 * rho * consistency
-                    + 0.5 * float(config.dense_split_proximity_weight) * proximity
-                )
-                objective = (objective_per_mode * active.to(dtype)).sum()
-                if not objective.requires_grad:
-                    break
-                grad = torch.autograd.grad(objective, x_var)[0]
-                grad = grad * active[..., None, None].to(dtype)
-                if config.preserve_endpoint:
-                    grad = grad.clone()
-                    grad[..., -1, :] = 0.0
-                grad_norm = torch.linalg.vector_norm(
-                    grad.flatten(start_dim=-2), dim=-1
-                )
-                direction = grad / grad_norm.clamp_min(float(config.eps))[..., None, None]
-                active = active & (grad_norm > float(config.eps))
-                old_merit = objective_per_mode.detach()
-                with torch.no_grad():
-                    old_max, _, _ = _constraint_max_state(evaluate_planner_fn, x)
-
-            if not bool(active.any().item()):
-                break
-
-            accepted = torch.zeros_like(active)
-            step = torch.full_like(old_max, float(config.dense_split_primal_step_m))
-            max_trials = (
-                int(config.dense_backtracking_max_trials)
-                if config.dense_backtracking_enabled else 1
-            )
-            for trial in range(max_trials):
-                trial_active = active & ~accepted
-                if not bool(trial_active.any().item()):
-                    break
-                candidate = x - step[..., None, None] * direction.detach()
-                candidate = _apply_stage_trust_region(
-                    candidate,
-                    anchor_xy,
-                    float(config.dense_constraint_recovery_max_total_move_m),
-                    eps=config.eps,
-                )
-                if config.preserve_endpoint:
-                    candidate = candidate.clone()
-                    candidate[..., -1, :] = anchor_xy[..., -1, :]
-
-                with torch.no_grad():
-                    cand_execution = execution_points_fn(
-                        candidate, allow_input_gradient=False
-                    )
-                    cand_residual = cand_execution - target_z + scaled_dual
-                    cand_consistency = cand_residual.square().sum(dim=(-1, -2))
-                    cand_proximity = (candidate - anchor_xy).square().sum(dim=(-1, -2))
-                    cand_merit = (
-                        0.5 * rho * cand_consistency
-                        + 0.5 * float(config.dense_split_proximity_weight) * cand_proximity
-                    )
-                    cand_max, _, _ = _constraint_max_state(
-                        evaluate_planner_fn, candidate
-                    )
-
-                # The x step is allowed to rearrange planner geometry, but it
-                # must improve augmented consistency and must not increase the
-                # execution-domain max curvature.  Feasible candidates are
-                # always admissible when their merit is finite.
-                improve_merit = cand_merit < (old_merit - 1.0e-10)
-                nonincrease_peak = cand_max <= (old_max + 1.0e-8)
-                feasible_now = cand_max <= float(config.curvature_limit) + 1.0e-8
-                accept = trial_active & improve_merit & (nonincrease_peak | feasible_now)
-                x = torch.where(accept[..., None, None], candidate, x)
-                accepted |= accept
-                rejected = trial_active & ~accept
-                if trial + 1 < max_trials:
-                    primal_backtracking = (
-                        primal_backtracking + rejected.to(dtype)
-                    )
-                    step = torch.where(
-                        rejected,
-                        step * float(config.dense_backtracking_factor),
-                        step,
-                    ).clamp_min(float(config.dense_min_step_m))
-
-            accepted_primal = accepted_primal + accepted.to(dtype)
-            if not bool(accepted.any().item()):
-                break
-
-            # Archive both the closest feasible x and the lowest-max-curvature x.
-            with torch.no_grad():
-                x_max, _, _ = _constraint_max_state(evaluate_planner_fn, x)
-                x_dist = torch.linalg.vector_norm(
-                    (x - anchor_xy).flatten(start_dim=-2), dim=-1
-                )
-                feasible = trigger & (
-                    x_max <= float(config.curvature_limit) + 1.0e-8
-                )
-                better_feasible = feasible & (
-                    (~best_feasible_mask) | (x_dist < best_feasible_dist)
-                )
-                best_feasible_xy = torch.where(
-                    better_feasible[..., None, None], x, best_feasible_xy
-                )
-                best_feasible_dist = torch.where(
-                    better_feasible, x_dist, best_feasible_dist
-                )
-                best_feasible_mask |= feasible
-                better_max = trigger & (x_max < best_max)
-                best_max_xy = torch.where(
-                    better_max[..., None, None], x, best_max_xy
-                )
-                best_max = torch.where(better_max, x_max, best_max)
-
-        # --- scaled dual update: remember persistent planning-execution mismatch ---
-        with torch.no_grad():
-            execution_new = execution_points_fn(
-                x, allow_input_gradient=False
-            ).detach()
-            raw_residual = execution_new - z_projected
-            mode_residual = torch.linalg.vector_norm(
-                raw_residual.flatten(start_dim=-2), dim=-1
-            )
-            final_consistency = mode_residual
-            scaled_dual = scaled_dual + raw_residual
-            dual_norm = torch.linalg.vector_norm(
-                scaled_dual.flatten(start_dim=-2), dim=-1
-            )
-            dual_scale = (
-                float(config.dense_split_dual_clip_m)
-                / dual_norm.clamp_min(float(config.eps))
-            ).clamp(max=1.0)
-            scaled_dual = scaled_dual * dual_scale[..., None, None]
-            scaled_dual = scaled_dual * trigger[..., None, None].to(dtype)
-
-            # Lightweight augmented-Lagrangian continuation: only increase rho
-            # when the consensus residual stops shrinking materially.
-            active_residual = torch.where(trigger, mode_residual, torch.zeros_like(mode_residual))
-            residual_scalar = float(active_residual.max().item()) if bool(trigger.any().item()) else 0.0
-            if previous_consistency is not None:
-                if residual_scalar > 0.95 * previous_consistency:
-                    new_rho = min(
-                        rho * float(config.dense_split_rho_growth),
-                        float(config.dense_split_rho_max),
-                    )
-                    if new_rho != rho:
-                        # Keep the unscaled dual approximately invariant.
-                        scaled_dual = scaled_dual * (rho / new_rho)
-                        rho = new_rho
-            previous_consistency = residual_scalar
-
-            if residual_scalar <= float(config.dense_split_consistency_tol_m):
-                # Do not globally stop if some triggered modes are still infeasible;
-                # the best-feasible archive will select successful modes below.
-                pass
-
-    with torch.no_grad():
-        final_max, _, _ = _constraint_max_state(evaluate_planner_fn, x)
-        final_dist = torch.linalg.vector_norm(
-            (x - anchor_xy).flatten(start_dim=-2), dim=-1
-        )
-        feasible_final = trigger & (
-            final_max <= float(config.curvature_limit) + 1.0e-8
-        )
-        better_feasible = feasible_final & (
-            (~best_feasible_mask) | (final_dist < best_feasible_dist)
-        )
-        best_feasible_xy = torch.where(
-            better_feasible[..., None, None], x, best_feasible_xy
-        )
-        best_feasible_dist = torch.where(
-            better_feasible, final_dist, best_feasible_dist
-        )
-        best_feasible_mask |= feasible_final
-        better_max = trigger & (final_max < best_max)
-        best_max_xy = torch.where(
-            better_max[..., None, None], x, best_max_xy
-        )
-        best_max = torch.where(better_max, final_max, best_max)
-
-        # Feasibility-preserving archive: successful modes can never be damaged
-        # by later split/dual iterations.  Infeasible modes return the lowest
-        # max-curvature candidate seen during the solve.
-        result = torch.where(
-            best_feasible_mask[..., None, None],
-            best_feasible_xy,
-            best_max_xy,
-        )
-        result = torch.where(trigger[..., None, None], result, current_xy)
-        end_max, _, _ = _constraint_max_state(evaluate_planner_fn, result)
-        update = torch.linalg.vector_norm(
-            (result - anchor_xy).flatten(start_dim=-2), dim=-1
-        )
-        dual_norm = torch.linalg.vector_norm(
-            scaled_dual.flatten(start_dim=-2), dim=-1
-        )
-
-    return result, {
-        "trigger": trigger,
-        "start_max": start_max,
-        "end_max": end_max,
-        "outer_used": outer_used,
-        "primal_accepted": accepted_primal,
-        "primal_backtracking": primal_backtracking,
-        "projection_accepted": projection_accepted,
-        "projection_backtracking": projection_backtracking,
-        "projection_requested_step": projection_requested_step,
-        "consistency_l2": final_consistency,
-        "dual_l2": dual_norm,
-        "rho_final": torch.tensor(rho, device=device, dtype=dtype),
-        "archive_feasible": best_feasible_mask,
-        "update_l2": update,
-    }
-
 def apply_dense_curvature_guidance(
     predicted_x0_norm: torch.Tensor,
     *,
@@ -1643,30 +1316,6 @@ def apply_dense_curvature_guidance(
                 config.dense_peak_alpha
                 if peak_alpha is None else float(peak_alpha)
             ),
-        )
-
-
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    def evaluate_execution(
-        execution_xy: torch.Tensor,
-        *,
-        allow_input_gradient: bool,
-    ):
-        # execution_xy already lives after the differentiable execution map;
-        # do not apply execution_residual_head a second time.
-        source = execution_xy if execution_xy.requires_grad else execution_xy.detach()
-        return _dense_loss_per_mode(
-            source,
-            trajectory_spline=trajectory_spline,
-            start_velocity_xy=start_velocity_xy,
-            curvature_limit=config.curvature_limit,
-            topk_fraction=config.dense_topk_fraction,
-            min_segment_m=config.dense_min_segment_m,
-            eps=config.eps,
-            bound_weight=config.dense_bound_weight,
-            peak_weight=config.dense_peak_weight,
-            dkappa_weight=config.dense_dkappa_weight,
-            peak_alpha=config.dense_peak_alpha,
         )
 
     initial_xy = (predicted_x0_norm.detach() * scale_xy).detach()
@@ -2687,36 +2336,6 @@ def apply_dense_curvature_guidance(
         "requested_step_sum": zero_mode,
     }
 
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    split_diag = {
-        "trigger": torch.zeros_like(mode_valid),
-        "start_max": zero_mode,
-        "end_max": zero_mode,
-        "outer_used": zero_mode,
-        "primal_accepted": zero_mode,
-        "primal_backtracking": zero_mode,
-        "projection_accepted": zero_mode,
-        "projection_backtracking": zero_mode,
-        "projection_requested_step": zero_mode,
-        "consistency_l2": zero_mode,
-        "dual_l2": zero_mode,
-        "rho_final": torch.zeros((), device=current_xy.device, dtype=current_xy.dtype),
-        "archive_feasible": torch.zeros_like(mode_valid),
-        "update_l2": zero_mode,
-    }
-
-
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    if bool(allow_polish) and constraint_mode == "split_projection":
-        current_xy, split_diag = _run_execution_split_augmented_projection(
-            current_xy,
-            anchor_xy=constraint_anchor_xy,
-            mode_valid=mode_valid,
-            config=config,
-            execution_points_fn=execution_points,
-            evaluate_planner_fn=evaluate,
-            evaluate_execution_fn=evaluate_execution,
-        )
     if bool(allow_polish) and constraint_mode in {"alm", "hybrid"}:
         current_xy, alm_diag = _run_execution_alm_recovery(
             current_xy,
@@ -2976,23 +2595,6 @@ def apply_dense_curvature_guidance(
             device=current_xy.device, dtype=current_xy.dtype,
         )
 
-
-        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1 diagnostics
-        split_outer_sample = (split_diag["outer_used"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_primal_sample = (split_diag["primal_accepted"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_backtracking_sample = (split_diag["primal_backtracking"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_projection_sample = (split_diag["projection_accepted"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_projection_backtracking_sample = (split_diag["projection_backtracking"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_consistency_sample = (split_diag["consistency_l2"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_dual_sample = (split_diag["dual_l2"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_update_sample = (split_diag["update_l2"] * mode_valid_f).sum(dim=-1) / mode_count
-        split_trigger_count = (split_diag["trigger"].to(current_xy.dtype) * mode_valid_f).sum(dim=-1).clamp_min(1.0)
-        split_archive_fraction = (split_diag["archive_feasible"].to(current_xy.dtype) * mode_valid_f).sum(dim=-1) / split_trigger_count
-        split_rho_sample = torch.full(
-            (batch,), float(split_diag["rho_final"].item()),
-            device=current_xy.device, dtype=current_xy.dtype,
-        )
-
         valid_before_all = valid_before & mode_valid[..., None]
         valid_after_all = valid_after & mode_valid[..., None]
         max_before = torch.where(
@@ -3059,17 +2661,6 @@ def apply_dense_curvature_guidance(
             "projection_iterations_used": projection_iterations_sample,
             "projection_backtracking_reductions": projection_backtracking_sample,
             "projection_requested_step_m": projection_step_sample,
-            # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-            "split_outer_iterations_used": split_outer_sample,
-            "split_primal_iterations_used": split_primal_sample,
-            "split_primal_backtracking_reductions": split_backtracking_sample,
-            "split_projection_iterations_used": split_projection_sample,
-            "split_projection_backtracking_reductions": split_projection_backtracking_sample,
-            "split_consistency_l2_m": split_consistency_sample,
-            "split_dual_l2_m": split_dual_sample,
-            "split_update_l2_m": split_update_sample,
-            "split_archive_feasible_fraction": split_archive_fraction,
-            "split_rho_final": split_rho_sample,
             "bound_loss_before": sample_component("bound_loss", components_before),
             "bound_loss_after": sample_component("bound_loss", components_after),
             "peak_loss_before": sample_component("peak_loss", components_before),

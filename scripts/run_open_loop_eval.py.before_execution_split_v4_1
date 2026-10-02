@@ -261,7 +261,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-peak-recovery-peak-alpha", type=float, default=20.0)
     parser.add_argument("--guidance-dense-peak-recovery-min-peak-improvement", type=float, default=1.0e-6)
     # EXECUTION_CONSTRAINED_GUIDANCE_V4_0
-    parser.add_argument("--guidance-dense-constraint-recovery-mode", choices=["none", "alm", "projection", "hybrid", "split_projection"], default="none")  # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
+    parser.add_argument("--guidance-dense-constraint-recovery-mode", choices=["none", "alm", "projection", "hybrid"], default="none")
     parser.add_argument("--guidance-dense-constraint-recovery-threshold", type=float, default=0.02)
     parser.add_argument("--guidance-dense-constraint-recovery-max-total-move-m", type=float, default=0.50)
     parser.add_argument("--guidance-dense-constraint-recovery-min-improvement", type=float, default=1.0e-7)
@@ -276,16 +276,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-projection-max-step-m", type=float, default=0.15)
     parser.add_argument("--guidance-dense-projection-tightening", type=float, default=0.0)
     parser.add_argument("--guidance-dense-projection-safety-factor", type=float, default=1.05)
-    # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-    parser.add_argument("--guidance-dense-split-outer-iters", type=int, default=4)
-    parser.add_argument("--guidance-dense-split-primal-iters", type=int, default=4)
-    parser.add_argument("--guidance-dense-split-primal-step-m", type=float, default=0.08)
-    parser.add_argument("--guidance-dense-split-rho", type=float, default=5.0)
-    parser.add_argument("--guidance-dense-split-rho-max", type=float, default=40.0)
-    parser.add_argument("--guidance-dense-split-rho-growth", type=float, default=2.0)
-    parser.add_argument("--guidance-dense-split-proximity-weight", type=float, default=0.05)
-    parser.add_argument("--guidance-dense-split-dual-clip-m", type=float, default=0.50)
-    parser.add_argument("--guidance-dense-split-consistency-tol-m", type=float, default=1.0e-3)
     return parser.parse_args()
 
 
@@ -398,16 +388,6 @@ def main() -> int:
         guidance_dense_projection_max_step_m=args.guidance_dense_projection_max_step_m,
         guidance_dense_projection_tightening=args.guidance_dense_projection_tightening,
         guidance_dense_projection_safety_factor=args.guidance_dense_projection_safety_factor,
-        # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-        guidance_dense_split_outer_iters=args.guidance_dense_split_outer_iters,
-        guidance_dense_split_primal_iters=args.guidance_dense_split_primal_iters,
-        guidance_dense_split_primal_step_m=args.guidance_dense_split_primal_step_m,
-        guidance_dense_split_rho=args.guidance_dense_split_rho,
-        guidance_dense_split_rho_max=args.guidance_dense_split_rho_max,
-        guidance_dense_split_rho_growth=args.guidance_dense_split_rho_growth,
-        guidance_dense_split_proximity_weight=args.guidance_dense_split_proximity_weight,
-        guidance_dense_split_dual_clip_m=args.guidance_dense_split_dual_clip_m,
-        guidance_dense_split_consistency_tol_m=args.guidance_dense_split_consistency_tol_m,
     )
     print_summary(summary)
     return 0

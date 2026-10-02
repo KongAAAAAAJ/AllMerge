@@ -985,17 +985,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_projection_iterations_used": (guidance_last.get("projection_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_projection_backtracking_reductions": (guidance_last.get("projection_backtracking_reductions", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_projection_requested_step_m": (guidance_last.get("projection_requested_step_m", zero_diag) if guidance_last is not None else zero_diag),
-            # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-            "guidance_split_outer_iterations_used": (guidance_last.get("split_outer_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_primal_iterations_used": (guidance_last.get("split_primal_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_primal_backtracking_reductions": (guidance_last.get("split_primal_backtracking_reductions", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_projection_iterations_used": (guidance_last.get("split_projection_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_projection_backtracking_reductions": (guidance_last.get("split_projection_backtracking_reductions", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_consistency_l2_m": (guidance_last.get("split_consistency_l2_m", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_dual_l2_m": (guidance_last.get("split_dual_l2_m", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_update_l2_m": (guidance_last.get("split_update_l2_m", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_archive_feasible_fraction": (guidance_last.get("split_archive_feasible_fraction", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_split_rho_final": (guidance_last.get("split_rho_final", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_bound_loss_before": (
                 guidance_last.get("bound_loss_before", zero_diag)
                 if guidance_last is not None else zero_diag
@@ -1222,17 +1211,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_projection_iterations_used": base["guidance_projection_iterations_used"],
             "guidance_projection_backtracking_reductions": base["guidance_projection_backtracking_reductions"],
             "guidance_projection_requested_step_m": base["guidance_projection_requested_step_m"],
-            # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
-            "guidance_split_outer_iterations_used": base["guidance_split_outer_iterations_used"],
-            "guidance_split_primal_iterations_used": base["guidance_split_primal_iterations_used"],
-            "guidance_split_primal_backtracking_reductions": base["guidance_split_primal_backtracking_reductions"],
-            "guidance_split_projection_iterations_used": base["guidance_split_projection_iterations_used"],
-            "guidance_split_projection_backtracking_reductions": base["guidance_split_projection_backtracking_reductions"],
-            "guidance_split_consistency_l2_m": base["guidance_split_consistency_l2_m"],
-            "guidance_split_dual_l2_m": base["guidance_split_dual_l2_m"],
-            "guidance_split_update_l2_m": base["guidance_split_update_l2_m"],
-            "guidance_split_archive_feasible_fraction": base["guidance_split_archive_feasible_fraction"],
-            "guidance_split_rho_final": base["guidance_split_rho_final"],
             "guidance_bound_loss_before": base["guidance_bound_loss_before"],
             "guidance_bound_loss_after": base["guidance_bound_loss_after"],
             "guidance_peak_loss_before": base["guidance_peak_loss_before"],
