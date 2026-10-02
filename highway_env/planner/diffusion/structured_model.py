@@ -317,6 +317,20 @@ class StructuredTrajectoryDenoiser(nn.Module):
             persistent=False,
         )
 
+        # GRU_REFINEMENT_COARSE_GOAL_V4
+        refine_limit_norm = torch.tensor(
+            [
+                float(config.gru_refine_max_x_m) / trajectory_scale_x,
+                float(config.gru_refine_max_y_m) / trajectory_scale_y,
+            ],
+            dtype=torch.float32,
+        )
+        self.register_buffer(
+            "gru_refine_limit_norm",
+            refine_limit_norm,
+            persistent=False,
+        )
+
         trajectory_dim = (
             config.horizon_steps
             * 2
@@ -368,20 +382,43 @@ class StructuredTrajectoryDenoiser(nn.Module):
             ]
         )
 
+        # GRU_REFINEMENT_COARSE_GOAL_V4
+        # The MLP reg_head always remains the diffusion denoiser.  ``gru`` no
+        # longer replaces it; instead a second GRU predicts a bounded local
+        # correction on the already-denoised sparse x0 trajectory.
+        self.reg_head_type = str(config.reg_head_type).lower()
         self.reg_head = nn.Sequential(
-            nn.LayerNorm(
-                config.d_model
-            ),
-            nn.Linear(
-                config.d_model,
-                config.d_ffn,
-            ),
+            nn.LayerNorm(config.d_model),
+            nn.Linear(config.d_model, config.d_ffn),
             nn.GELU(),
-            nn.Linear(
-                config.d_ffn,
-                trajectory_dim,
-            ),
+            nn.Linear(config.d_ffn, trajectory_dim),
         )
+
+        if self.reg_head_type == "gru":
+            self.gru_refine_token_norm = nn.LayerNorm(config.d_model)
+            self.gru_refine_h0 = nn.Linear(config.d_model, config.d_model)
+            self.gru_refine_input = nn.Sequential(
+                nn.Linear(4, config.d_model),
+                nn.GELU(),
+                nn.LayerNorm(config.d_model),
+            )
+            self.gru_refine = nn.GRU(
+                input_size=config.d_model,
+                hidden_size=config.d_model,
+                num_layers=1,
+                batch_first=True,
+            )
+            self.gru_refine_out = nn.Linear(config.d_model, 2)
+            # Identity-preserving initialization: the new model starts exactly
+            # from the stable MLP denoiser and learns refinement gradually.
+            nn.init.zeros_(self.gru_refine_out.weight)
+            nn.init.zeros_(self.gru_refine_out.bias)
+        else:
+            self.gru_refine_token_norm = None
+            self.gru_refine_h0 = None
+            self.gru_refine_input = None
+            self.gru_refine = None
+            self.gru_refine_out = None
 
         self.cls_head = nn.Sequential(
             nn.LayerNorm(
@@ -404,6 +441,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
         timestep: torch.Tensor,
         scene: SceneEncoding,
         *,
+        navigation_point_norm: Optional[torch.Tensor] = None,
         return_mode_tokens: bool = False,
     ):
         batch, modes, steps, dims = (
@@ -442,35 +480,66 @@ class StructuredTrajectoryDenoiser(nn.Module):
                 time_embed,
             )
 
-        residual = self.reg_head(
-            mode_tokens
-        ).reshape(
-            batch,
-            modes,
-            steps,
-            dims,
+        # GRU_REFINEMENT_COARSE_GOAL_V4 -- stage 1: original MLP diffusion denoising.
+        residual = self.reg_head(mode_tokens).reshape(
+            batch, modes, steps, dims
         )
+        residual = torch.tanh(residual)
+        residual = residual * self.residual_limit_norm.to(dtype=residual.dtype)
+        base_x0_norm = noisy_norm + residual
 
-        # Residual semantics remain unchanged:
-        #
-        #     x0_hat = x_t + delta_theta
-        #
-        # The x/y limits are specified in metres in the config and
-        # converted into normalized trajectory coordinates in __init__.
-        residual = torch.tanh(
-            residual
-        )
-
-        residual = (
-            residual
-            * self.residual_limit_norm.to(
-                dtype=residual.dtype,
+        # Stage 2: optional goal-conditioned temporal refinement.  The GRU
+        # reads the MLP sparse trajectory itself as the sequence.  The goal is
+        # repeated only as a 2-D condition; the mode token initializes h0 once.
+        if self.reg_head_type == "gru":
+            if navigation_point_norm is None:
+                raise ValueError(
+                    "navigation_point_norm is required when reg_head_type='gru'"
+                )
+            goal = navigation_point_norm.to(
+                device=mode_tokens.device, dtype=mode_tokens.dtype
             )
-        )
+            if goal.ndim == 2:
+                expected = (batch, 2)
+                if tuple(goal.shape) != expected:
+                    raise ValueError(
+                        "training navigation_point_norm must be [B,2]: "
+                        f"got {tuple(goal.shape)}, expected {expected}"
+                    )
+                goal = goal[:, None, :].expand(-1, modes, -1)
+            elif goal.ndim == 3:
+                expected = (batch, modes, 2)
+                if tuple(goal.shape) != expected:
+                    raise ValueError(
+                        "inference navigation_point_norm must be [B,M,2]: "
+                        f"got {tuple(goal.shape)}, expected {expected}"
+                    )
+            else:
+                raise ValueError(
+                    "navigation_point_norm must be [B,2] or [B,M,2], "
+                    f"got {tuple(goal.shape)}"
+                )
 
-        predicted_x0_norm = (
-            noisy_norm + residual
-        )
+            goal_seq = goal[:, :, None, :].expand(-1, -1, steps, -1)
+            refine_input = torch.cat((base_x0_norm, goal_seq), dim=-1)
+            refine_input = self.gru_refine_input(
+                refine_input.reshape(batch * modes, steps, 4)
+            )
+            h0 = self.gru_refine_h0(
+                self.gru_refine_token_norm(mode_tokens)
+            ).reshape(batch * modes, self.config.d_model).unsqueeze(0)
+            refine_hidden, _ = self.gru_refine(refine_input, h0)
+            refine_residual = self.gru_refine_out(refine_hidden).reshape(
+                batch, modes, steps, dims
+            )
+            refine_residual = torch.tanh(refine_residual)
+            refine_residual = (
+                refine_residual
+                * self.gru_refine_limit_norm.to(dtype=refine_residual.dtype)
+            )
+            predicted_x0_norm = base_x0_norm + refine_residual
+        else:
+            predicted_x0_norm = base_x0_norm
 
         logits = self.cls_head(
             mode_tokens
@@ -583,6 +652,7 @@ class StructuredDiffusionPlanner(nn.Module):
         *,
         generator: Optional[torch.Generator] = None,
         base_noise: Optional[torch.Tensor] = None,
+        navigation_point_norm: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Run the exact base-planner path used by online inference.
 
@@ -599,6 +669,12 @@ class StructuredDiffusionPlanner(nn.Module):
         clean_anchor_norm = self.adapter.normalize_trajectory(
             features["coarse_trajectories"]
         )
+        # GRU_REFINEMENT_COARSE_GOAL_V4: inference defaults to one endpoint per
+        # decision/coarse mode. Supervised training now passes the same
+        # per-mode coarse endpoint explicitly, so train/runtime distributions match.
+        runtime_navigation_point_norm = navigation_point_norm
+        if runtime_navigation_point_norm is None:
+            runtime_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
         batch = int(clean_anchor_norm.shape[0])
         start_t = int(self.config.inference_start_timestep)
         start_timesteps = torch.full(
@@ -656,6 +732,7 @@ class StructuredDiffusionPlanner(nn.Module):
                 sample,
                 t_batch,
                 scene,
+                navigation_point_norm=runtime_navigation_point_norm,
                 return_mode_tokens=True,
             )
             final_x0 = predicted_x0
@@ -833,6 +910,7 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_loss_lambda_p: float,
         dense_loss_weight_mode: str,
         dense_loss_terminal_weight: float,
+        navigation_point_norm: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Train residual head from exactly the runtime base-planner inputs.
 
@@ -867,6 +945,7 @@ class StructuredDiffusionPlanner(nn.Module):
                 base = self._runtime_base_sample(
                     features,
                     base_noise=base_noise.detach(),
+                    navigation_point_norm=navigation_point_norm,
                 )
         finally:
             self.train(was_training)
@@ -1075,11 +1154,17 @@ class StructuredDiffusionPlanner(nn.Module):
             timesteps,
         )
 
+        # GRU_REFINEMENT_COARSE_GOAL_V4: remove the train/inference goal gap.
+        # Every candidate mode uses the endpoint of its own normalized coarse
+        # decision trajectory, exactly matching runtime/GRPO conditioning.
+        # GT trajectory remains supervision only and is never used as a goal input.
+        coarse_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
         predicted_x0_norm, logits = (
             self.denoiser(
                 noisy,
                 timesteps,
                 scene,
+                navigation_point_norm=coarse_navigation_point_norm,
             )
         )
 
@@ -1169,6 +1254,7 @@ class StructuredDiffusionPlanner(nn.Module):
                 dense_loss_lambda_p=float(dense_loss_lambda_p),
                 dense_loss_weight_mode=dense_loss_weight_mode,
                 dense_loss_terminal_weight=float(dense_loss_terminal_weight),
+                navigation_point_norm=coarse_navigation_point_norm,
             )
             dense_loss_raw = dense_aux["dense_loss_raw"]
             dense_loss_weighted = dense_aux["dense_loss_weighted"]

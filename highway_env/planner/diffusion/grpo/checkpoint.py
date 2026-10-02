@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -104,6 +105,11 @@ def save_grpo_checkpoint(
             "optimizer_state_dict": optimizer.state_dict(),
             "step": int(step),
             "grpo_config": vars(config) if hasattr(config, "__dict__") else config,
+            "allmerge_model_config": (
+                asdict(model.config)
+                if hasattr(model, "config") and is_dataclass(model.config)
+                else {}
+            ),
             "metrics": dict(metrics or {}),
         },
         path,

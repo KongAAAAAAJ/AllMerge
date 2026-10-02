@@ -44,12 +44,23 @@ class DiffusionPlannerRuntime:
             device_name
         )
 
-        model_overrides = dict(
-            runtime_config.get(
-                "model",
-                {},
-            )
-        )
+        # GRU_REG_HEAD_COARSE_V2
+        self.checkpoint = runtime_config.get("checkpoint")
+
+        checkpoint_model_config = {}
+        if self.checkpoint:
+            checkpoint_path = Path(self.checkpoint)
+            if checkpoint_path.exists():
+                metadata = torch.load(checkpoint_path, map_location="cpu")
+                if isinstance(metadata, dict):
+                    checkpoint_model_config = dict(
+                        metadata.get("allmerge_model_config")
+                        or metadata.get("model_config")
+                        or {}
+                    )
+
+        model_overrides = dict(checkpoint_model_config)
+        model_overrides.update(dict(runtime_config.get("model", {})))
 
         self.config = (
             build_structured_diffusion_config(
@@ -68,12 +79,6 @@ class DiffusionPlannerRuntime:
                 self.adapter,
             )
             .to(self.device)
-        )
-
-        self.checkpoint = (
-            runtime_config.get(
-                "checkpoint"
-            )
         )
 
         self.strict_checkpoint = bool(
