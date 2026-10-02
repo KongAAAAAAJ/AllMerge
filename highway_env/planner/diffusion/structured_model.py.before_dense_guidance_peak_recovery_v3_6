@@ -932,31 +932,6 @@ class StructuredDiffusionPlanner(nn.Module):
                 guidance_last.get("second_polish_update_l2_m", zero_diag)
                 if guidance_last is not None else zero_diag
             ),
-            # DENSE_GUIDANCE_PEAK_RECOVERY_V3_6
-            "guidance_peak_recovery_trigger_fraction": (
-                guidance_last.get("peak_recovery_trigger_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_recovery_iterations_used": (
-                guidance_last.get("peak_recovery_iterations_used", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_recovery_backtracking_reductions": (
-                guidance_last.get("peak_recovery_backtracking_reductions", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_recovery_update_l2_m": (
-                guidance_last.get("peak_recovery_update_l2_m", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_recovery_mean_max_curvature_drop": (
-                guidance_last.get("peak_recovery_mean_max_curvature_drop", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
-            "guidance_peak_recovery_trust_saturation_fraction": (
-                guidance_last.get("peak_recovery_trust_saturation_fraction", zero_diag)
-                if guidance_last is not None else zero_diag
-            ),
             "guidance_bound_loss_before": (
                 guidance_last.get("bound_loss_before", zero_diag)
                 if guidance_last is not None else zero_diag
@@ -1163,13 +1138,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_second_polish_iterations_used": base["guidance_second_polish_iterations_used"],
             "guidance_second_polish_backtracking_reductions": base["guidance_second_polish_backtracking_reductions"],
             "guidance_second_polish_update_l2_m": base["guidance_second_polish_update_l2_m"],
-            # DENSE_GUIDANCE_PEAK_RECOVERY_V3_6
-            "guidance_peak_recovery_trigger_fraction": base["guidance_peak_recovery_trigger_fraction"],
-            "guidance_peak_recovery_iterations_used": base["guidance_peak_recovery_iterations_used"],
-            "guidance_peak_recovery_backtracking_reductions": base["guidance_peak_recovery_backtracking_reductions"],
-            "guidance_peak_recovery_update_l2_m": base["guidance_peak_recovery_update_l2_m"],
-            "guidance_peak_recovery_mean_max_curvature_drop": base["guidance_peak_recovery_mean_max_curvature_drop"],
-            "guidance_peak_recovery_trust_saturation_fraction": base["guidance_peak_recovery_trust_saturation_fraction"],
             "guidance_bound_loss_before": base["guidance_bound_loss_before"],
             "guidance_bound_loss_after": base["guidance_bound_loss_after"],
             "guidance_peak_loss_before": base["guidance_peak_loss_before"],

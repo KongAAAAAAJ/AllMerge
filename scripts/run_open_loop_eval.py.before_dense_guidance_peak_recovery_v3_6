@@ -250,16 +250,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-post-recovery-second-polish-enabled", action="store_true")
     parser.add_argument("--guidance-dense-post-recovery-second-polish-iters", type=int, default=8)
     parser.add_argument("--guidance-dense-post-recovery-second-polish-step-m", type=float, default=0.10)
-    # DENSE_GUIDANCE_PEAK_RECOVERY_V3_6
-    parser.add_argument("--guidance-dense-peak-recovery-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-peak-recovery-threshold", type=float, default=0.04)
-    parser.add_argument("--guidance-dense-peak-recovery-iters", type=int, default=5)
-    parser.add_argument("--guidance-dense-peak-recovery-step-m", type=float, default=0.05)
-    parser.add_argument("--guidance-dense-peak-recovery-bound-weight", type=float, default=0.50)
-    parser.add_argument("--guidance-dense-peak-recovery-peak-weight", type=float, default=2.00)
-    parser.add_argument("--guidance-dense-peak-recovery-dkappa-weight", type=float, default=0.05)
-    parser.add_argument("--guidance-dense-peak-recovery-peak-alpha", type=float, default=20.0)
-    parser.add_argument("--guidance-dense-peak-recovery-min-peak-improvement", type=float, default=1.0e-6)
     return parser.parse_args()
 
 
@@ -346,16 +336,6 @@ def main() -> int:
         guidance_dense_post_recovery_second_polish_enabled=args.guidance_dense_post_recovery_second_polish_enabled,
         guidance_dense_post_recovery_second_polish_iters=args.guidance_dense_post_recovery_second_polish_iters,
         guidance_dense_post_recovery_second_polish_step_m=args.guidance_dense_post_recovery_second_polish_step_m,
-        # DENSE_GUIDANCE_PEAK_RECOVERY_V3_6
-        guidance_dense_peak_recovery_enabled=args.guidance_dense_peak_recovery_enabled,
-        guidance_dense_peak_recovery_threshold=args.guidance_dense_peak_recovery_threshold,
-        guidance_dense_peak_recovery_iters=args.guidance_dense_peak_recovery_iters,
-        guidance_dense_peak_recovery_step_m=args.guidance_dense_peak_recovery_step_m,
-        guidance_dense_peak_recovery_bound_weight=args.guidance_dense_peak_recovery_bound_weight,
-        guidance_dense_peak_recovery_peak_weight=args.guidance_dense_peak_recovery_peak_weight,
-        guidance_dense_peak_recovery_dkappa_weight=args.guidance_dense_peak_recovery_dkappa_weight,
-        guidance_dense_peak_recovery_peak_alpha=args.guidance_dense_peak_recovery_peak_alpha,
-        guidance_dense_peak_recovery_min_peak_improvement=args.guidance_dense_peak_recovery_min_peak_improvement,
     )
     print_summary(summary)
     return 0
