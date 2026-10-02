@@ -186,14 +186,6 @@ CSV_FIELDS = [
     "guidance_post_recovery_backtracking_reductions",
     "guidance_post_recovery_update_l2_m",
     "guidance_post_recovery_trust_saturation_fraction",
-    # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-    "guidance_post_recovery_mean_tangent_weight",
-    "guidance_post_recovery_mean_trust_limit_m",
-    "guidance_post_recovery_to_polish_fraction",
-    "guidance_second_polish_trigger_fraction",
-    "guidance_second_polish_iterations_used",
-    "guidance_second_polish_backtracking_reductions",
-    "guidance_second_polish_update_l2_m",
 ]
 
 
@@ -576,16 +568,6 @@ def evaluate_open_loop(
     guidance_dense_post_recovery_iters: int = 3,
     guidance_dense_post_recovery_step_m: float = 0.10,
     guidance_dense_post_recovery_max_total_move_m: float = 0.50,
-    # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-    guidance_dense_post_recovery_strategy: str = "normal",
-    guidance_dense_post_recovery_hard_curvature: float = 0.10,
-    guidance_dense_post_recovery_medium_tangent_weight: float = 0.30,
-    guidance_dense_post_recovery_hard_tangent_weight: float = 0.70,
-    guidance_dense_post_recovery_medium_max_total_move_m: float = 0.75,
-    guidance_dense_post_recovery_hard_max_total_move_m: float = 1.00,
-    guidance_dense_post_recovery_second_polish_enabled: bool = False,
-    guidance_dense_post_recovery_second_polish_iters: int = 8,
-    guidance_dense_post_recovery_second_polish_step_m: float = 0.10,
 ) -> dict:
     checkpoint = Path(checkpoint).expanduser().resolve()
     dataset_root = Path(dataset_root).expanduser().resolve()
@@ -661,16 +643,6 @@ def evaluate_open_loop(
             "dense_post_recovery_iters": int(guidance_dense_post_recovery_iters),
             "dense_post_recovery_step_m": float(guidance_dense_post_recovery_step_m),
             "dense_post_recovery_max_total_move_m": float(guidance_dense_post_recovery_max_total_move_m),
-            # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-            "dense_post_recovery_strategy": str(guidance_dense_post_recovery_strategy),
-            "dense_post_recovery_hard_curvature": float(guidance_dense_post_recovery_hard_curvature),
-            "dense_post_recovery_medium_tangent_weight": float(guidance_dense_post_recovery_medium_tangent_weight),
-            "dense_post_recovery_hard_tangent_weight": float(guidance_dense_post_recovery_hard_tangent_weight),
-            "dense_post_recovery_medium_max_total_move_m": float(guidance_dense_post_recovery_medium_max_total_move_m),
-            "dense_post_recovery_hard_max_total_move_m": float(guidance_dense_post_recovery_hard_max_total_move_m),
-            "dense_post_recovery_second_polish_enabled": bool(guidance_dense_post_recovery_second_polish_enabled),
-            "dense_post_recovery_second_polish_iters": int(guidance_dense_post_recovery_second_polish_iters),
-            "dense_post_recovery_second_polish_step_m": float(guidance_dense_post_recovery_second_polish_step_m),
         },
     }
     if checkpoint_model_config:
@@ -1299,14 +1271,6 @@ def evaluate_open_loop(
                         "guidance_post_recovery_backtracking_reductions": _float(output["guidance_post_recovery_backtracking_reductions"], i),
                         "guidance_post_recovery_update_l2_m": _float(output["guidance_post_recovery_update_l2_m"], i),
                         "guidance_post_recovery_trust_saturation_fraction": _float(output["guidance_post_recovery_trust_saturation_fraction"], i),
-                        # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-                        "guidance_post_recovery_mean_tangent_weight": _float(output["guidance_post_recovery_mean_tangent_weight"], i),
-                        "guidance_post_recovery_mean_trust_limit_m": _float(output["guidance_post_recovery_mean_trust_limit_m"], i),
-                        "guidance_post_recovery_to_polish_fraction": _float(output["guidance_post_recovery_to_polish_fraction"], i),
-                        "guidance_second_polish_trigger_fraction": _float(output["guidance_second_polish_trigger_fraction"], i),
-                        "guidance_second_polish_iterations_used": _float(output["guidance_second_polish_iterations_used"], i),
-                        "guidance_second_polish_backtracking_reductions": _float(output["guidance_second_polish_backtracking_reductions"], i),
-                        "guidance_second_polish_update_l2_m": _float(output["guidance_second_polish_update_l2_m"], i),
                         "guidance_bound_loss_before": _float(output["guidance_bound_loss_before"], i),
                         "guidance_bound_loss_after": _float(output["guidance_bound_loss_after"], i),
                         "guidance_peak_loss_before": _float(output["guidance_peak_loss_before"], i),
@@ -1584,23 +1548,6 @@ def evaluate_open_loop(
         "mean_guidance_post_recovery_backtracking_reductions": _mean(rows, "guidance_post_recovery_backtracking_reductions"),
         "mean_guidance_post_recovery_update_l2_m": _mean(rows, "guidance_post_recovery_update_l2_m"),
         "mean_guidance_post_recovery_trust_saturation_fraction": _mean(rows, "guidance_post_recovery_trust_saturation_fraction"),
-        # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-        "guidance_dense_post_recovery_strategy": str(guidance_dense_post_recovery_strategy),
-        "guidance_dense_post_recovery_hard_curvature": float(guidance_dense_post_recovery_hard_curvature),
-        "guidance_dense_post_recovery_medium_tangent_weight": float(guidance_dense_post_recovery_medium_tangent_weight),
-        "guidance_dense_post_recovery_hard_tangent_weight": float(guidance_dense_post_recovery_hard_tangent_weight),
-        "guidance_dense_post_recovery_medium_max_total_move_m": float(guidance_dense_post_recovery_medium_max_total_move_m),
-        "guidance_dense_post_recovery_hard_max_total_move_m": float(guidance_dense_post_recovery_hard_max_total_move_m),
-        "guidance_dense_post_recovery_second_polish_enabled": bool(guidance_dense_post_recovery_second_polish_enabled),
-        "guidance_dense_post_recovery_second_polish_iters": int(guidance_dense_post_recovery_second_polish_iters),
-        "guidance_dense_post_recovery_second_polish_step_m": float(guidance_dense_post_recovery_second_polish_step_m),
-        "mean_guidance_post_recovery_mean_tangent_weight": _mean(rows, "guidance_post_recovery_mean_tangent_weight"),
-        "mean_guidance_post_recovery_mean_trust_limit_m": _mean(rows, "guidance_post_recovery_mean_trust_limit_m"),
-        "mean_guidance_post_recovery_to_polish_fraction": _mean(rows, "guidance_post_recovery_to_polish_fraction"),
-        "mean_guidance_second_polish_trigger_fraction": _mean(rows, "guidance_second_polish_trigger_fraction"),
-        "mean_guidance_second_polish_iterations_used": _mean(rows, "guidance_second_polish_iterations_used"),
-        "mean_guidance_second_polish_backtracking_reductions": _mean(rows, "guidance_second_polish_backtracking_reductions"),
-        "mean_guidance_second_polish_update_l2_m": _mean(rows, "guidance_second_polish_update_l2_m"),
         "mean_guidance_inner_iterations_used": _mean(rows, "guidance_inner_iterations_used"),
         "mean_guidance_backtracking_reductions": _mean(rows, "guidance_backtracking_reductions"),
     }

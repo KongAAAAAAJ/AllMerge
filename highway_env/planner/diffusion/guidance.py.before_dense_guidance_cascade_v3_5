@@ -61,19 +61,6 @@ class SparseCurvatureGuidanceConfig:
     dense_post_recovery_iters: int = 3
     dense_post_recovery_step_m: float = 0.10
     dense_post_recovery_max_total_move_m: float = 0.50
-
-    # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-    # Strategy applies only after the complete F' + G1.x baseline.
-    # normal: C1/F#; adaptive_tangent: G2.2; adaptive_trust: G3.
-    dense_post_recovery_strategy: str = "normal"
-    dense_post_recovery_hard_curvature: float = 0.10
-    dense_post_recovery_medium_tangent_weight: float = 0.30
-    dense_post_recovery_hard_tangent_weight: float = 0.70
-    dense_post_recovery_medium_max_total_move_m: float = 0.75
-    dense_post_recovery_hard_max_total_move_m: float = 1.00
-    dense_post_recovery_second_polish_enabled: bool = False
-    dense_post_recovery_second_polish_iters: int = 8
-    dense_post_recovery_second_polish_step_m: float = 0.10
     eps: float = 1.0e-6
 
     @classmethod
@@ -185,40 +172,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("guidance dense_polish_iters must be >= 1")
         if self.dense_polish_step_m <= 0.0:
             raise ValueError("guidance dense_polish_step_m must be positive")
-        # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-        if self.dense_post_recovery_strategy not in {
-            "normal", "adaptive_tangent", "adaptive_trust"
-        }:
-            raise ValueError(
-                "dense_post_recovery_strategy must be one of: "
-                "normal, adaptive_tangent, adaptive_trust"
-            )
-        if self.dense_post_recovery_hard_curvature <= self.dense_post_recovery_threshold:
-            raise ValueError(
-                "dense_post_recovery_hard_curvature must exceed post-recovery threshold"
-            )
-        if not (0.0 <= self.dense_post_recovery_medium_tangent_weight <= 1.0):
-            raise ValueError("post-recovery medium tangent weight must be in [0,1]")
-        if not (0.0 <= self.dense_post_recovery_hard_tangent_weight <= 1.0):
-            raise ValueError("post-recovery hard tangent weight must be in [0,1]")
-        if (
-            self.dense_post_recovery_hard_tangent_weight
-            < self.dense_post_recovery_medium_tangent_weight
-        ):
-            raise ValueError("post-recovery hard tangent weight must be >= medium")
-        if self.dense_post_recovery_medium_max_total_move_m <= 0.0:
-            raise ValueError("post-recovery medium trust region must be positive")
-        if self.dense_post_recovery_hard_max_total_move_m <= 0.0:
-            raise ValueError("post-recovery hard trust region must be positive")
-        if (
-            self.dense_post_recovery_hard_max_total_move_m
-            < self.dense_post_recovery_medium_max_total_move_m
-        ):
-            raise ValueError("post-recovery hard trust region must be >= medium")
-        if self.dense_post_recovery_second_polish_iters < 1:
-            raise ValueError("post-recovery second polish iters must be >= 1")
-        if self.dense_post_recovery_second_polish_step_m <= 0.0:
-            raise ValueError("post-recovery second polish step must be positive")
         if self.eps <= 0.0:
             raise ValueError("guidance eps must be positive")
         if self.apply_timesteps is not None:
@@ -1262,27 +1215,21 @@ def apply_dense_curvature_guidance(
             if not bool(accepted_this.any().item()):
                 break
 
-    # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-    # Unified post-baseline recovery. The trigger mask is frozen only after
-    # F' + first G1.x polishing has fully completed, so easy/feasible modes
-    # stay untouched. Strategies:
-    #   normal           -> C1/F# optimization-budget recovery
-    #   adaptive_tangent -> G2.2 direction/DOF recovery
-    #   adaptive_trust   -> G3 search-range recovery
-    polish_end_xy = current_xy.clone()
+    # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4
+    # F# runs only after the complete F' + G1.x baseline has finished on the
+    # final reverse step (allow_polish=True). It does not change update DOF or
+    # trust-region size: this stage tests whether extra optimization budget
+    # alone can recover final hard-tail modes.
     post_recovery_start_xy = current_xy.clone()
     post_recovery_triggered = torch.zeros_like(mode_valid)
     post_recovery_accepted = torch.zeros(
         (batch, modes), device=current_xy.device, dtype=current_xy.dtype
     )
     post_recovery_backtracking = torch.zeros_like(post_recovery_accepted)
-    post_recovery_tangent_weight_max = torch.zeros_like(post_recovery_accepted)
-    post_recovery_trust_limit = torch.full_like(
-        post_recovery_accepted,
-        float(config.dense_post_recovery_max_total_move_m),
-    )
 
     if bool(config.dense_post_recovery_enabled) and bool(allow_polish):
+        # V3.4.1 runtime validation keeps compatibility with config classes
+        # that do not implement __post_init__.
         if float(config.dense_post_recovery_threshold) <= float(config.curvature_limit):
             raise ValueError(
                 "dense_post_recovery_threshold must exceed curvature_limit"
@@ -1295,7 +1242,6 @@ def apply_dense_curvature_guidance(
             raise ValueError(
                 "dense_post_recovery_max_total_move_m must be positive"
             )
-
         with torch.no_grad():
             _, recovery_curvature0, recovery_valid0, _ = evaluate(
                 current_xy,
@@ -1306,7 +1252,7 @@ def apply_dense_curvature_guidance(
                 recovery_curvature0.abs(),
                 torch.zeros_like(recovery_curvature0),
             ).amax(dim=-1)
-            # Freeze hard-tail membership from the COMPLETE baseline trajectory.
+            # Freeze the mask from the fully-completed baseline trajectory.
             post_recovery_triggered = (
                 mode_valid
                 & (
@@ -1314,27 +1260,6 @@ def apply_dense_curvature_guidance(
                     > float(config.dense_post_recovery_threshold) + 1.0e-8
                 )
             )
-
-            if config.dense_post_recovery_strategy == "adaptive_trust":
-                medium_limit = torch.full_like(
-                    recovery_max0,
-                    float(config.dense_post_recovery_medium_max_total_move_m),
-                )
-                hard_limit = torch.full_like(
-                    recovery_max0,
-                    float(config.dense_post_recovery_hard_max_total_move_m),
-                )
-                adaptive_limit = torch.where(
-                    recovery_max0
-                    > float(config.dense_post_recovery_hard_curvature),
-                    hard_limit,
-                    medium_limit,
-                )
-                post_recovery_trust_limit = torch.where(
-                    post_recovery_triggered,
-                    adaptive_limit,
-                    post_recovery_trust_limit,
-                )
 
         for _ in range(int(config.dense_post_recovery_iters)):
             with torch.enable_grad():
@@ -1363,78 +1288,25 @@ def apply_dense_curvature_guidance(
                 ).sum()
                 if not objective.requires_grad:
                     break
-                raw_gradient = torch.autograd.grad(
+                gradient = torch.autograd.grad(
                     objective,
                     x_var,
                     create_graph=False,
                     retain_graph=False,
                     allow_unused=False,
                 )[0]
-                raw_gradient = raw_gradient * recovery_window[..., None, None].to(
-                    raw_gradient.dtype
+                gradient = gradient * recovery_window[..., None, None].to(
+                    gradient.dtype
                 )
 
-                gradient = raw_gradient
+                # F# deliberately stays normal-only. G2.2 will later test
+                # tangent freedom as a separate recovery mechanism.
                 if config.dense_normal_projection_enabled:
-                    normal_gradient = _project_gradient_to_sparse_normals(
-                        raw_gradient,
+                    gradient = _project_gradient_to_sparse_normals(
+                        gradient,
                         x_var,
                         eps=config.eps,
                     )
-                    if config.dense_post_recovery_strategy == "adaptive_tangent":
-                        tangent_weight = torch.zeros_like(recovery_max)
-                        medium_mask = (
-                            post_recovery_triggered
-                            & (
-                                recovery_max
-                                > float(config.dense_post_recovery_threshold)
-                            )
-                            & (
-                                recovery_max
-                                <= float(config.dense_post_recovery_hard_curvature)
-                            )
-                        )
-                        hard_mask = (
-                            post_recovery_triggered
-                            & (
-                                recovery_max
-                                > float(config.dense_post_recovery_hard_curvature)
-                            )
-                        )
-                        tangent_weight = torch.where(
-                            medium_mask,
-                            torch.full_like(
-                                tangent_weight,
-                                float(config.dense_post_recovery_medium_tangent_weight),
-                            ),
-                            tangent_weight,
-                        )
-                        tangent_weight = torch.where(
-                            hard_mask,
-                            torch.full_like(
-                                tangent_weight,
-                                float(config.dense_post_recovery_hard_tangent_weight),
-                            ),
-                            tangent_weight,
-                        )
-                        post_recovery_tangent_weight_max = torch.maximum(
-                            post_recovery_tangent_weight_max,
-                            tangent_weight.detach(),
-                        )
-                        adaptive_gradient = _blend_gradient_with_sparse_tangent(
-                            raw_gradient,
-                            x_var,
-                            tangent_weight,
-                            eps=config.eps,
-                        )
-                        gradient = torch.where(
-                            (tangent_weight > 0.0)[..., None, None],
-                            adaptive_gradient,
-                            normal_gradient,
-                        )
-                    else:
-                        gradient = normal_gradient
-
                 if config.preserve_endpoint:
                     gradient = gradient.clone()
                     gradient[..., -1, :] = 0.0
@@ -1471,14 +1343,15 @@ def apply_dense_curvature_guidance(
                     break
 
                 candidate = current_xy - step[..., None, None] * direction.detach()
-                # Every recovery strategy keeps a global trust region relative
-                # to the ORIGINAL diffusion x0. Only G3 changes its radius.
+                # IMPORTANT: clamp against the ORIGINAL diffusion x0, not the
+                # post-baseline trajectory. Thus F# keeps the same 0.50 m
+                # global trust region and only adds optimization iterations.
                 delta = candidate - initial_xy
                 total_move = torch.linalg.vector_norm(
                     delta.flatten(start_dim=-2), dim=-1
                 )
                 trust_scale = (
-                    post_recovery_trust_limit
+                    float(config.dense_post_recovery_max_total_move_m)
                     / total_move.clamp_min(float(config.eps))
                 ).clamp(max=1.0)
                 candidate = initial_xy + delta * trust_scale[..., None, None]
@@ -1529,181 +1402,6 @@ def apply_dense_curvature_guidance(
             if not bool(accepted_this.any().item()):
                 break
 
-    post_recovery_end_xy = current_xy.clone()
-
-    # C1/G2.2/G3 can optionally cascade into a SECOND G1-style polishing pass.
-    # Only modes that were hard-tail after the original baseline AND have now
-    # entered (curvature_limit, post_recovery_threshold] are eligible.
-    second_polish_start_xy = current_xy.clone()
-    second_polish_triggered = torch.zeros_like(mode_valid)
-    second_polish_accepted = torch.zeros_like(post_recovery_accepted)
-    second_polish_backtracking = torch.zeros_like(post_recovery_backtracking)
-
-    if (
-        bool(config.dense_post_recovery_enabled)
-        and bool(config.dense_post_recovery_second_polish_enabled)
-        and bool(allow_polish)
-    ):
-        with torch.no_grad():
-            _, second_curvature0, second_valid0, _ = evaluate(
-                current_xy,
-                allow_input_gradient=False,
-                dkappa_weight=0.0,
-            )
-            second_max0 = torch.where(
-                second_valid0,
-                second_curvature0.abs(),
-                torch.zeros_like(second_curvature0),
-            ).amax(dim=-1)
-            second_polish_triggered = (
-                post_recovery_triggered
-                & (second_max0 > float(config.curvature_limit) + 1.0e-8)
-                & (
-                    second_max0
-                    <= float(config.dense_post_recovery_threshold) + 1.0e-8
-                )
-            )
-
-        for _ in range(int(config.dense_post_recovery_second_polish_iters)):
-            with torch.enable_grad():
-                x_var = current_xy.detach().requires_grad_(True)
-                second_loss, second_curvature, second_valid, second_components = evaluate(
-                    x_var,
-                    allow_input_gradient=bool(
-                        config.dense_residual_gradient_enabled
-                    ),
-                    dkappa_weight=0.0,
-                )
-                second_max = torch.where(
-                    second_valid,
-                    second_curvature.abs(),
-                    torch.zeros_like(second_curvature),
-                ).amax(dim=-1)
-                second_window = (
-                    second_polish_triggered
-                    & (second_max > float(config.curvature_limit) + 1.0e-8)
-                    & (
-                        second_max
-                        <= float(config.dense_post_recovery_threshold) + 1.0e-8
-                    )
-                )
-                objective = (
-                    second_loss * second_window.to(second_loss.dtype)
-                ).sum()
-                if not objective.requires_grad:
-                    break
-                gradient = torch.autograd.grad(
-                    objective,
-                    x_var,
-                    create_graph=False,
-                    retain_graph=False,
-                    allow_unused=False,
-                )[0]
-                gradient = gradient * second_window[..., None, None].to(
-                    gradient.dtype
-                )
-                if config.dense_normal_projection_enabled:
-                    gradient = _project_gradient_to_sparse_normals(
-                        gradient,
-                        x_var,
-                        eps=config.eps,
-                    )
-                if config.preserve_endpoint:
-                    gradient = gradient.clone()
-                    gradient[..., -1, :] = 0.0
-
-                grad_norm = torch.linalg.vector_norm(
-                    gradient.flatten(start_dim=-2), dim=-1
-                )
-                direction = gradient / grad_norm.clamp_min(
-                    float(config.eps)
-                )[..., None, None]
-                active = (
-                    second_window
-                    & (grad_norm > float(config.eps))
-                    & second_components["has_violation"]
-                )
-
-            if not bool(active.any().item()):
-                break
-
-            old_loss = second_loss.detach()
-            old_max = second_max.detach()
-            accepted_this = torch.zeros_like(active)
-            step = torch.full_like(
-                old_loss,
-                float(config.dense_post_recovery_second_polish_step_m),
-            )
-            max_trials = (
-                int(config.dense_backtracking_max_trials)
-                if config.dense_backtracking_enabled else 1
-            )
-
-            for trial in range(max_trials):
-                trial_active = active & ~accepted_this
-                if not bool(trial_active.any().item()):
-                    break
-
-                candidate = current_xy - step[..., None, None] * direction.detach()
-                delta = candidate - initial_xy
-                total_move = torch.linalg.vector_norm(
-                    delta.flatten(start_dim=-2), dim=-1
-                )
-                trust_scale = (
-                    post_recovery_trust_limit
-                    / total_move.clamp_min(float(config.eps))
-                ).clamp(max=1.0)
-                candidate = initial_xy + delta * trust_scale[..., None, None]
-                if config.preserve_endpoint:
-                    candidate = candidate.clone()
-                    candidate[..., -1, :] = initial_xy[..., -1, :]
-
-                with torch.no_grad():
-                    cand_loss, cand_curvature, cand_valid, _ = evaluate(
-                        candidate,
-                        allow_input_gradient=False,
-                        dkappa_weight=0.0,
-                    )
-                    cand_max = torch.where(
-                        cand_valid,
-                        cand_curvature.abs(),
-                        torch.zeros_like(cand_curvature),
-                    ).amax(dim=-1)
-
-                if config.dense_backtracking_enabled:
-                    improved_loss = cand_loss < (old_loss - 1.0e-8)
-                    nonincreasing_peak = cand_max <= (old_max + 1.0e-8)
-                    accept = trial_active & improved_loss & nonincreasing_peak
-                else:
-                    accept = trial_active
-
-                current_xy = torch.where(
-                    accept[..., None, None], candidate, current_xy
-                )
-                accepted_this |= accept
-
-                rejected = trial_active & ~accept
-                if trial + 1 < max_trials:
-                    second_polish_backtracking = (
-                        second_polish_backtracking
-                        + rejected.to(current_xy.dtype)
-                    )
-                    step = torch.where(
-                        rejected,
-                        step * float(config.dense_backtracking_factor),
-                        step,
-                    )
-                    step = step.clamp_min(float(config.dense_min_step_m))
-
-            second_polish_accepted = (
-                second_polish_accepted
-                + accepted_this.to(current_xy.dtype)
-            )
-            if not bool(accepted_this.any().item()):
-                break
-
-    second_polish_end_xy = current_xy.clone()
-
     guided_xy = current_xy.detach()
     with torch.no_grad():
         loss_after, curvature_after, valid_after, components_after = evaluate(
@@ -1748,12 +1446,12 @@ def apply_dense_curvature_guidance(
             polish_backtracking * mode_valid_f
         ).sum(dim=-1) / mode_count
         polish_update_per_mode = torch.linalg.vector_norm(
-            (polish_end_xy - polish_start_xy).flatten(start_dim=-2), dim=-1
+            (guided_xy - polish_start_xy).flatten(start_dim=-2), dim=-1
         )
         polish_update_sample = (
             polish_update_per_mode * mode_valid_f
         ).sum(dim=-1) / mode_count
-        # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4 + V3.5 cascade diagnostics
+        # DENSE_GUIDANCE_FSHARP_POST_RECOVERY_V3_4 diagnostics
         post_recovery_trigger_fraction = (
             post_recovery_triggered.to(current_xy.dtype) * mode_valid_f
         ).sum(dim=-1) / mode_count
@@ -1764,19 +1462,19 @@ def apply_dense_curvature_guidance(
             post_recovery_backtracking * mode_valid_f
         ).sum(dim=-1) / mode_count
         post_recovery_update_per_mode = torch.linalg.vector_norm(
-            (post_recovery_end_xy - post_recovery_start_xy).flatten(start_dim=-2), dim=-1
+            (guided_xy - post_recovery_start_xy).flatten(start_dim=-2), dim=-1
         )
         post_recovery_update_sample = (
             post_recovery_update_per_mode * mode_valid_f
         ).sum(dim=-1) / mode_count
         post_recovery_total_move = torch.linalg.vector_norm(
-            (post_recovery_end_xy - initial_xy).flatten(start_dim=-2), dim=-1
+            (guided_xy - initial_xy).flatten(start_dim=-2), dim=-1
         )
         post_recovery_saturated = (
             post_recovery_triggered
             & (
                 post_recovery_total_move
-                >= post_recovery_trust_limit - 1.0e-4
+                >= float(config.dense_post_recovery_max_total_move_m) - 1.0e-4
             )
         )
         post_recovery_trigger_count = (
@@ -1785,51 +1483,6 @@ def apply_dense_curvature_guidance(
         post_recovery_saturation_sample = (
             post_recovery_saturated.to(current_xy.dtype) * mode_valid_f
         ).sum(dim=-1) / post_recovery_trigger_count
-        post_recovery_tangent_weight_sample = (
-            post_recovery_tangent_weight_max * mode_valid_f
-        ).sum(dim=-1) / post_recovery_trigger_count
-        post_recovery_trust_limit_sample = (
-            post_recovery_trust_limit
-            * post_recovery_triggered.to(current_xy.dtype)
-            * mode_valid_f
-        ).sum(dim=-1) / post_recovery_trigger_count
-
-        _, post_recovery_end_curvature, post_recovery_end_valid, _ = evaluate(
-            post_recovery_end_xy,
-            allow_input_gradient=False,
-        )
-        post_recovery_end_max = torch.where(
-            post_recovery_end_valid,
-            post_recovery_end_curvature.abs(),
-            torch.zeros_like(post_recovery_end_curvature),
-        ).amax(dim=-1)
-        post_recovery_to_polish = (
-            post_recovery_triggered
-            & (post_recovery_end_max > float(config.curvature_limit) + 1.0e-8)
-            & (
-                post_recovery_end_max
-                <= float(config.dense_post_recovery_threshold) + 1.0e-8
-            )
-        )
-        post_recovery_to_polish_sample = (
-            post_recovery_to_polish.to(current_xy.dtype) * mode_valid_f
-        ).sum(dim=-1) / post_recovery_trigger_count
-
-        second_polish_trigger_fraction = (
-            second_polish_triggered.to(current_xy.dtype) * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        second_polish_iterations_sample = (
-            second_polish_accepted * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        second_polish_backtracking_sample = (
-            second_polish_backtracking * mode_valid_f
-        ).sum(dim=-1) / mode_count
-        second_polish_update_per_mode = torch.linalg.vector_norm(
-            (second_polish_end_xy - second_polish_start_xy).flatten(start_dim=-2), dim=-1
-        )
-        second_polish_update_sample = (
-            second_polish_update_per_mode * mode_valid_f
-        ).sum(dim=-1) / mode_count
 
         valid_before_all = valid_before & mode_valid[..., None]
         valid_after_all = valid_after & mode_valid[..., None]
@@ -1869,14 +1522,6 @@ def apply_dense_curvature_guidance(
             "post_recovery_backtracking_reductions": post_recovery_backtracking_sample,
             "post_recovery_update_l2_m": post_recovery_update_sample,
             "post_recovery_trust_saturation_fraction": post_recovery_saturation_sample,
-            # DENSE_GUIDANCE_CASCADE_RECOVERY_V3_5
-            "post_recovery_mean_tangent_weight": post_recovery_tangent_weight_sample,
-            "post_recovery_mean_trust_limit_m": post_recovery_trust_limit_sample,
-            "post_recovery_to_polish_fraction": post_recovery_to_polish_sample,
-            "second_polish_trigger_fraction": second_polish_trigger_fraction,
-            "second_polish_iterations_used": second_polish_iterations_sample,
-            "second_polish_backtracking_reductions": second_polish_backtracking_sample,
-            "second_polish_update_l2_m": second_polish_update_sample,
             "bound_loss_before": sample_component("bound_loss", components_before),
             "bound_loss_after": sample_component("bound_loss", components_after),
             "peak_loss_before": sample_component("peak_loss", components_before),
