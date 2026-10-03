@@ -1,0 +1,37 @@
+{
+  "model": {
+    "prediction_type": "epsilon",
+    "reg_head_type": "gru"
+  },
+  "training": {
+    "dataset_root": "outputs/expert_dataset/allmerge_expert_50k_dense10hz_v2",
+    "output_dir": "outputs/noise_ablation_100step/epsilon",
+    "train_split": "train",
+    "val_split": "val",
+    "batch_size": 64,
+    "num_workers": 8,
+    "persistent_workers": true,
+    "prefetch_factor": 2,
+    "pin_memory": "auto",
+    "max_epochs": 50,
+    "max_steps": 100,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0001,
+    "min_lr": 1e-06,
+    "warmup_epochs": 3,
+    "device": "auto",
+    "precision": "auto",
+    "grad_clip": 5.0,
+    "check_val_every_n_epoch": 1,
+    "log_every_n_steps": 10,
+    "seed": 0,
+    "dense_loss_enabled": false,
+    "dense_loss_lambda_p": 0.0,
+    "dense_loss_type": "smooth_l1",
+    "dense_loss_terminal_only": true,
+    "dense_loss_weight_mode": "terminal_constant",
+    "dense_loss_terminal_timestep": 0,
+    "dense_loss_terminal_weight": 1.0,
+    "dense_loss_dense_dt": 0.1
+  }
+}

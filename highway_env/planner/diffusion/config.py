@@ -95,6 +95,15 @@ class StructuredDiffusionConfig:
     num_train_timesteps: int = 1000
     train_timestep_max: int = 50
 
+    # Denoising target parameterization.
+    #
+    # ``sample`` preserves the historical AllMerge behavior: the network
+    # directly predicts the clean sparse trajectory x0.
+    # ``epsilon`` is the Noise-branch ablation: the network predicts the
+    # Gaussian noise used by q(x_t | x0), and x0 is reconstructed through the
+    # diffusion schedule for runtime trajectory output.
+    prediction_type: str = "sample"
+
     # Truncated test-time diffusion:
     # x_t starts close to the dynamic anchor rather than pure Gaussian noise.
     inference_start_timestep: int = 8
@@ -149,6 +158,23 @@ class StructuredDiffusionConfig:
         if self.inference_start_timestep < 0:
             raise ValueError(
                 "inference_start_timestep must be >= 0"
+            )
+
+        self.prediction_type = str(self.prediction_type).lower()
+        aliases = {
+            "x0": "sample",
+            "x_0": "sample",
+            "noise": "epsilon",
+            "eps": "epsilon",
+        }
+        self.prediction_type = aliases.get(
+            self.prediction_type,
+            self.prediction_type,
+        )
+        if self.prediction_type not in {"sample", "epsilon"}:
+            raise ValueError(
+                "prediction_type must be one of {'sample', 'epsilon'}, "
+                f"got {self.prediction_type!r}"
             )
 
         if self.max_residual_x_m <= 0.0:

@@ -382,10 +382,13 @@ class StructuredTrajectoryDenoiser(nn.Module):
             ]
         )
 
-        # GRU_REFINEMENT_COARSE_GOAL_V4
-        # The MLP reg_head always remains the diffusion denoiser.  ``gru`` no
-        # longer replaces it; instead a second GRU predicts a bounded local
-        # correction on the already-denoised sparse x0 trajectory.
+        # GRU_REFINEMENT_COARSE_GOAL_V4 / NOISE_PREDICTION_ABLATION_V1
+        # ``sample`` keeps the historical AllMerge x0 parameterization.
+        # ``epsilon`` makes the exact same backbone/head predict Gaussian noise
+        # directly.  The recurrent refinement stays enabled in both variants so
+        # the A/B test changes the diffusion target rather than silently removing
+        # model capacity.
+        self.prediction_type = str(config.prediction_type).lower()
         self.reg_head_type = str(config.reg_head_type).lower()
         self.reg_head = nn.Sequential(
             nn.LayerNorm(config.d_model),
@@ -480,13 +483,26 @@ class StructuredTrajectoryDenoiser(nn.Module):
                 time_embed,
             )
 
-        # GRU_REFINEMENT_COARSE_GOAL_V4 -- stage 1: original MLP diffusion denoising.
-        residual = self.reg_head(mode_tokens).reshape(
+        # Stage 1: the final linear layer is shared across parameterizations.
+        # Historical ``sample`` mode interprets it as a bounded correction to
+        # noisy x_t.  ``epsilon`` mode interprets it directly as predicted noise
+        # and intentionally leaves it unbounded, matching standard epsilon
+        # prediction practice.
+        raw_prediction = self.reg_head(mode_tokens).reshape(
             batch, modes, steps, dims
         )
-        residual = torch.tanh(residual)
-        residual = residual * self.residual_limit_norm.to(dtype=residual.dtype)
-        base_x0_norm = noisy_norm + residual
+        if self.prediction_type == "sample":
+            residual = torch.tanh(raw_prediction)
+            residual = residual * self.residual_limit_norm.to(
+                dtype=residual.dtype
+            )
+            base_prediction = noisy_norm + residual
+        elif self.prediction_type == "epsilon":
+            base_prediction = raw_prediction
+        else:  # config.validate() should make this unreachable.
+            raise RuntimeError(
+                f"Unsupported prediction_type={self.prediction_type!r}"
+            )
 
         # Stage 2: optional goal-conditioned temporal refinement.  The GRU
         # reads the MLP sparse trajectory itself as the sequence.  The goal is
@@ -521,7 +537,7 @@ class StructuredTrajectoryDenoiser(nn.Module):
                 )
 
             goal_seq = goal[:, :, None, :].expand(-1, -1, steps, -1)
-            refine_input = torch.cat((base_x0_norm, goal_seq), dim=-1)
+            refine_input = torch.cat((base_prediction, goal_seq), dim=-1)
             refine_input = self.gru_refine_input(
                 refine_input.reshape(batch * modes, steps, 4)
             )
@@ -532,14 +548,18 @@ class StructuredTrajectoryDenoiser(nn.Module):
             refine_residual = self.gru_refine_out(refine_hidden).reshape(
                 batch, modes, steps, dims
             )
-            refine_residual = torch.tanh(refine_residual)
-            refine_residual = (
-                refine_residual
-                * self.gru_refine_limit_norm.to(dtype=refine_residual.dtype)
-            )
-            predicted_x0_norm = base_x0_norm + refine_residual
+            if self.prediction_type == "sample":
+                refine_residual = torch.tanh(refine_residual)
+                refine_residual = (
+                    refine_residual
+                    * self.gru_refine_limit_norm.to(dtype=refine_residual.dtype)
+                )
+            # In epsilon mode the GRU output is an additive noise correction.
+            # It is deliberately unbounded because epsilon is standardized
+            # Gaussian space rather than a physical trajectory displacement.
+            model_prediction = base_prediction + refine_residual
         else:
-            predicted_x0_norm = base_x0_norm
+            model_prediction = base_prediction
 
         logits = self.cls_head(
             mode_tokens
@@ -547,13 +567,13 @@ class StructuredTrajectoryDenoiser(nn.Module):
 
         if return_mode_tokens:
             return (
-                predicted_x0_norm,
+                model_prediction,
                 logits,
                 mode_tokens,
             )
 
         return (
-            predicted_x0_norm,
+            model_prediction,
             logits,
         )
 
@@ -728,13 +748,26 @@ class StructuredDiffusionPlanner(nn.Module):
                 dtype=torch.long,
                 device=sample.device,
             )
-            predicted_x0, logits, mode_tokens = self.denoiser(
+            model_prediction, logits, mode_tokens = self.denoiser(
                 sample,
                 t_batch,
                 scene,
                 navigation_point_norm=runtime_navigation_point_norm,
                 return_mode_tokens=True,
             )
+            if self.config.prediction_type == "sample":
+                predicted_x0 = model_prediction
+            elif self.config.prediction_type == "epsilon":
+                predicted_x0 = self.schedule.predict_x0_from_epsilon(
+                    sample,
+                    model_prediction,
+                    t_batch,
+                )
+            else:
+                raise RuntimeError(
+                    "Unsupported prediction_type="
+                    f"{self.config.prediction_type!r}"
+                )
             final_x0 = predicted_x0
             final_logits = logits
             final_mode_tokens = mode_tokens
@@ -744,12 +777,20 @@ class StructuredDiffusionPlanner(nn.Module):
                 if index + 1 < len(timesteps)
                 else None
             )
-            sample = self.schedule.step_predict_x0(
-                sample,
-                predicted_x0,
-                int(timestep),
-                int(prev_timestep) if prev_timestep is not None else None,
-            )
+            if self.config.prediction_type == "sample":
+                sample = self.schedule.step_predict_x0(
+                    sample,
+                    predicted_x0,
+                    int(timestep),
+                    int(prev_timestep) if prev_timestep is not None else None,
+                )
+            else:
+                sample = self.schedule.step_predict_epsilon(
+                    sample,
+                    model_prediction,
+                    int(timestep),
+                    int(prev_timestep) if prev_timestep is not None else None,
+                )
 
         if final_x0 is None or final_logits is None or final_mode_tokens is None:
             raise RuntimeError("runtime reverse-diffusion chain produced no output")
@@ -1073,12 +1114,25 @@ class StructuredDiffusionPlanner(nn.Module):
             dynamic anchors
             -> diffusion refinement per mode
             -> mode logits
-            -> selected-mode regression + mode classification
+            -> selected-mode diffusion target + mode classification
 
-        As in DiffusionDrive, one expert trajectory is matched to a plan
-        anchor and that same mode supervises both:
-            1. trajectory regression;
+        One expert trajectory is matched to a plan anchor and that same mode
+        supervises both:
+            1. diffusion prediction target;
             2. mode classification.
+
+        prediction_type="sample":
+            preserves the historical AllMerge path exactly: noisy coarse
+            anchors are fed to the denoiser and the selected mode directly
+            regresses expert x0 with SmoothL1.
+
+        prediction_type="epsilon":
+            the selected expert mode follows the standard forward process
+            q(x_t | x0_expert), and the selected mode predicts the actual
+            sampled Gaussian epsilon with MSE. Non-selected modes keep their
+            dynamic anchors as clean samples because no expert target exists
+            for those modes; their epsilon values are not included in the
+            diffusion loss.
 
         F.2 changes ONLY how the target mode is constructed:
 
@@ -1135,6 +1189,10 @@ class StructuredDiffusionPlanner(nn.Module):
             )
         )
 
+        target_norm = self.adapter.normalize_trajectory(
+            target
+        )
+
         batch = anchors.shape[0]
 
         timesteps = torch.randint(
@@ -1146,32 +1204,6 @@ class StructuredDiffusionPlanner(nn.Module):
 
         noise = torch.randn_like(
             clean_anchor_norm
-        )
-
-        noisy = self.schedule.add_noise(
-            clean_anchor_norm,
-            noise,
-            timesteps,
-        )
-
-        # GRU_REFINEMENT_COARSE_GOAL_V4: remove the train/inference goal gap.
-        # Every candidate mode uses the endpoint of its own normalized coarse
-        # decision trajectory, exactly matching runtime/GRPO conditioning.
-        # GT trajectory remains supervision only and is never used as a goal input.
-        coarse_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
-        predicted_x0_norm, logits = (
-            self.denoiser(
-                noisy,
-                timesteps,
-                scene,
-                navigation_point_norm=coarse_navigation_point_norm,
-            )
-        )
-
-        candidates = (
-            self.adapter.denormalize_trajectory(
-                predicted_x0_norm
-            )
         )
 
         gather_index = (
@@ -1189,19 +1221,97 @@ class StructuredDiffusionPlanner(nn.Module):
             )
         )
 
+        if self.config.prediction_type == "epsilon":
+            # NOISE_PREDICTION_ABLATION_V1
+            # The supervised mode must be noised from the expert x0. If we
+            # instead noised the coarse anchor and asked the model to recover
+            # the sampled epsilon, the implied x0 would simply be that anchor
+            # and the planner would receive no expert trajectory supervision.
+            diffusion_clean_norm = clean_anchor_norm.scatter(
+                dim=1,
+                index=gather_index,
+                src=target_norm[:, None, :, :],
+            )
+        else:
+            diffusion_clean_norm = clean_anchor_norm
+
+        noisy = self.schedule.add_noise(
+            diffusion_clean_norm,
+            noise,
+            timesteps,
+        )
+
+        # GRU_REFINEMENT_COARSE_GOAL_V4: remove the train/inference goal gap.
+        # Every candidate mode uses the endpoint of its own normalized coarse
+        # decision trajectory, exactly matching runtime/GRPO conditioning.
+        # GT trajectory remains supervision only and is never used as a goal input.
+        coarse_navigation_point_norm = clean_anchor_norm[:, :, -1, :]
+        model_prediction, logits = (
+            self.denoiser(
+                noisy,
+                timesteps,
+                scene,
+                navigation_point_norm=coarse_navigation_point_norm,
+            )
+        )
+
+        if self.config.prediction_type == "sample":
+            predicted_x0_norm = model_prediction
+            noise_prediction_loss = target.new_zeros(())
+        elif self.config.prediction_type == "epsilon":
+            predicted_epsilon = model_prediction
+            predicted_x0_norm = self.schedule.predict_x0_from_epsilon(
+                noisy,
+                predicted_epsilon,
+                timesteps,
+            )
+            selected_predicted_epsilon = torch.gather(
+                predicted_epsilon,
+                dim=1,
+                index=gather_index,
+            ).squeeze(1)
+            selected_noise = torch.gather(
+                noise,
+                dim=1,
+                index=gather_index,
+            ).squeeze(1)
+            noise_prediction_loss = F.mse_loss(
+                selected_predicted_epsilon,
+                selected_noise,
+            )
+        else:
+            raise RuntimeError(
+                "Unsupported prediction_type="
+                f"{self.config.prediction_type!r}"
+            )
+
+        candidates = (
+            self.adapter.denormalize_trajectory(
+                predicted_x0_norm
+            )
+        )
+
         selected = torch.gather(
             candidates,
             dim=1,
             index=gather_index,
         ).squeeze(1)
 
-        # Preserve the existing AllMerge regression loss so this patch
-        # isolates label correctness rather than changing two variables
-        # simultaneously.
-        regression_loss = F.smooth_l1_loss(
+        # Keep an apples-to-apples x0-space diagnostic for both variants even
+        # though epsilon mode does NOT optimize this term.
+        x0_reconstruction_loss = F.smooth_l1_loss(
             selected,
             target,
         )
+
+        if self.config.prediction_type == "sample":
+            prediction_loss = x0_reconstruction_loss
+        else:
+            prediction_loss = noise_prediction_loss
+
+        # Backward-compatible metric name used by existing trainer/logging.
+        # In epsilon mode this field contains the actual epsilon-MSE objective.
+        regression_loss = prediction_loss
 
         # IMPORTANT:
         # Training uses RAW logits.
@@ -1313,6 +1423,16 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "base_loss":
                 base_loss,
+
+            # NOISE_PREDICTION_ABLATION_V1
+            "prediction_loss":
+                prediction_loss,
+
+            "noise_prediction_loss":
+                noise_prediction_loss,
+
+            "x0_reconstruction_loss":
+                x0_reconstruction_loss,
 
             "trajectory_regression_loss":
                 regression_loss,

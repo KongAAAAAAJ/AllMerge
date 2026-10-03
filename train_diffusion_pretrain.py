@@ -63,6 +63,16 @@ def parse_args():
     parser.add_argument("--init-checkpoint", default=None)
     parser.add_argument("--resume-from-checkpoint", default=None)
     parser.add_argument("--strict-init-checkpoint", type=int, choices=(0, 1), default=1)
+    # NOISE_PREDICTION_ABLATION_V1
+    parser.add_argument(
+        "--prediction-type",
+        choices=("sample", "epsilon"),
+        default=None,
+        help=(
+            "Diffusion target parameterization: historical direct x0/sample "
+            "prediction or Gaussian epsilon/noise prediction."
+        ),
+    )
     parser.add_argument("--limit-train-samples", type=int, default=0)
     parser.add_argument("--limit-val-samples", type=int, default=0)
     parser.add_argument("--overfit-batches", type=float, default=0.0)
@@ -96,6 +106,10 @@ def main() -> int:
     cfg = load_config(args.config)
     model_cfg = dict(cfg.get("model") or {})
     train_cfg = dict(cfg.get("training") or {})
+
+    # NOISE_PREDICTION_ABLATION_V1
+    if args.prediction_type is not None:
+        model_cfg["prediction_type"] = str(args.prediction_type).lower()
 
     # GRU_REFINEMENT_GOAL_V3
     if args.reg_head_type is not None:
@@ -221,6 +235,10 @@ def main() -> int:
         f"cuda={torch.cuda.is_available()}"
     )
     print(f"[pretrain] reg_head_type={model_cfg.get('reg_head_type', 'mlp')}")
+    print(
+        "[pretrain] prediction_type="
+        f"{model_cfg.get('prediction_type', 'sample')}"
+    )
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "

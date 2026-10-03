@@ -59,6 +59,10 @@ def _build_writer(log_dir: str | Path):
 METRIC_KEYS = (
     "loss",
     "base_loss",
+    # NOISE_PREDICTION_ABLATION_V1
+    "prediction_loss",
+    "noise_prediction_loss",
+    "x0_reconstruction_loss",
     "trajectory_regression_loss",
     "trajectory_classification_loss",
     # STAGED_DENSE_SUPERVISION_V1
@@ -135,6 +139,10 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
     values = {
         "loss": output["loss"],
         "base_loss": output["base_loss"],
+        # NOISE_PREDICTION_ABLATION_V1
+        "prediction_loss": output["prediction_loss"],
+        "noise_prediction_loss": output["noise_prediction_loss"],
+        "x0_reconstruction_loss": output["x0_reconstruction_loss"],
         "trajectory_regression_loss": output["trajectory_regression_loss"],
         "trajectory_classification_loss": output["trajectory_classification_loss"],
         # STAGED_DENSE_SUPERVISION_V1
@@ -439,6 +447,21 @@ class DiffusionPretrainer:
                     "train_step/base_loss", values["base_loss"], self.global_step
                 )
                 self.writer.add_scalar(
+                    "train_step/prediction_loss",
+                    values["prediction_loss"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/noise_prediction_loss",
+                    values["noise_prediction_loss"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
+                    "train_step/x0_reconstruction_loss",
+                    values["x0_reconstruction_loss"],
+                    self.global_step,
+                )
+                self.writer.add_scalar(
                     "train_step/trajectory_regression_loss",
                     values["trajectory_regression_loss"],
                     self.global_step,
@@ -581,6 +604,8 @@ class DiffusionPretrainer:
                 summary += (
                     f" val_loss={metrics['val/loss']:.6f} "
                     f"base_val={metrics['val/base_loss']:.6f} "
+                    f"pred_val={metrics['val/prediction_loss']:.6f} "
+                    f"x0_recon={metrics['val/x0_reconstruction_loss']:.6f} "
                     f"mode_match={metrics['val/w1_target_mode_match']:.4f}"
                 )
                 if self.dense_loss_active:

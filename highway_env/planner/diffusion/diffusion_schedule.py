@@ -71,6 +71,62 @@ class TruncatedDDIMSchedule(nn.Module):
             * noise
         )
 
+    def _alpha_for(
+        self,
+        timesteps: torch.Tensor,
+        reference: torch.Tensor,
+    ) -> torch.Tensor:
+        alpha = self.alpha_cumprod[
+            timesteps
+        ].to(
+            dtype=reference.dtype,
+            device=reference.device,
+        )
+
+        while alpha.ndim < reference.ndim:
+            alpha = alpha.unsqueeze(-1)
+
+        return alpha
+
+    def predict_x0_from_epsilon(
+        self,
+        sample: torch.Tensor,
+        predicted_epsilon: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        """Recover clean x0 from an epsilon prediction."""
+        alpha = self._alpha_for(
+            timesteps,
+            sample,
+        )
+        sqrt_alpha = alpha.sqrt().clamp_min(1e-6)
+        sqrt_one_minus_alpha = (
+            1.0 - alpha
+        ).sqrt()
+        return (
+            sample
+            - sqrt_one_minus_alpha * predicted_epsilon
+        ) / sqrt_alpha
+
+    def predict_epsilon_from_x0(
+        self,
+        sample: torch.Tensor,
+        predicted_x0: torch.Tensor,
+        timesteps: torch.Tensor,
+    ) -> torch.Tensor:
+        """Convert an x0 prediction to the equivalent epsilon prediction."""
+        alpha = self._alpha_for(
+            timesteps,
+            sample,
+        )
+        sqrt_one_minus_alpha = (
+            1.0 - alpha
+        ).sqrt().clamp_min(1e-6)
+        return (
+            sample
+            - alpha.sqrt() * predicted_x0
+        ) / sqrt_one_minus_alpha
+
     def step_predict_x0(
         self,
         sample: torch.Tensor,
@@ -120,3 +176,30 @@ class TruncatedDDIMSchedule(nn.Module):
         )
 
         return prev
+
+    def step_predict_epsilon(
+        self,
+        sample: torch.Tensor,
+        predicted_epsilon: torch.Tensor,
+        timestep: int,
+        prev_timestep: Optional[int],
+    ) -> torch.Tensor:
+        """Deterministic DDIM step (eta=0) for epsilon prediction."""
+        t = int(timestep)
+        t_batch = torch.full(
+            (sample.shape[0],),
+            t,
+            dtype=torch.long,
+            device=sample.device,
+        )
+        predicted_x0 = self.predict_x0_from_epsilon(
+            sample,
+            predicted_epsilon,
+            t_batch,
+        )
+        return self.step_predict_x0(
+            sample,
+            predicted_x0,
+            timestep,
+            prev_timestep,
+        )
