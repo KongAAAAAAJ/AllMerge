@@ -113,6 +113,17 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
+    # GRU_REFINEMENT_COARSE_GOAL_V4
+    # ``mlp``: original MLP diffusion denoising head only.
+    # ``gru``: keep the same MLP denoiser, then add a goal-conditioned GRU
+    # sparse-trajectory refinement stage. Supervised training, inference, and
+    # GRPO all use each coarse decision mode's endpoint as the navigation goal.
+    # GRU therefore refines x0 instead of directly predicting the
+    # diffusion residual.
+    reg_head_type: str = "mlp"
+    gru_refine_max_x_m: float = 3.0
+    gru_refine_max_y_m: float = 0.75
+
     # DENSE_RESIDUAL_HEAD_V2
     # A small execution-correction head is trained only by L_dense.
     # Its inputs are stop-gradient diffusion mode features plus the selected
@@ -149,6 +160,17 @@ class StructuredDiffusionConfig:
             raise ValueError(
                 "max_residual_y_m must be positive"
             )
+
+        self.reg_head_type = str(self.reg_head_type).lower()
+        if self.reg_head_type not in {"mlp", "gru"}:
+            raise ValueError(
+                "reg_head_type must be one of {'mlp', 'gru'}, "
+                f"got {self.reg_head_type!r}"
+            )
+        if self.gru_refine_max_x_m <= 0.0:
+            raise ValueError("gru_refine_max_x_m must be positive")
+        if self.gru_refine_max_y_m <= 0.0:
+            raise ValueError("gru_refine_max_y_m must be positive")
 
         # DENSE_RESIDUAL_HEAD_V2
         if self.dense_residual_hidden_dim <= 0:
@@ -189,6 +211,8 @@ def build_structured_diffusion_config(
             raise KeyError(
                 f"Unknown StructuredDiffusionConfig field: {key}"
             )
+        if key == "feature_scales" and isinstance(value, dict):
+            value = FeatureScaleConfig(**value)
         setattr(cfg, key, value)
 
     cfg.validate()

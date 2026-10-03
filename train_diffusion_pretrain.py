@@ -78,6 +78,16 @@ def parse_args():
     # DENSE_RESIDUAL_BOUND_CLI_V1
     parser.add_argument("--dense-residual-max-x-m", type=float, default=None)
     parser.add_argument("--dense-residual-max-y-m", type=float, default=None)
+    # GRU_REFINEMENT_GOAL_V3
+    parser.add_argument("--gru-refine-max-x-m", type=float, default=None)
+    parser.add_argument("--gru-refine-max-y-m", type=float, default=None)
+    # GRU_REFINEMENT_GOAL_V3
+    parser.add_argument(
+        "--reg-head-type",
+        choices=("mlp", "gru"),
+        default=None,
+        help="Ablation: original MLP, or MLP denoising + goal-conditioned GRU refinement.",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +96,18 @@ def main() -> int:
     cfg = load_config(args.config)
     model_cfg = dict(cfg.get("model") or {})
     train_cfg = dict(cfg.get("training") or {})
+
+    # GRU_REFINEMENT_GOAL_V3
+    if args.reg_head_type is not None:
+        model_cfg["reg_head_type"] = str(args.reg_head_type).lower()
+    if args.gru_refine_max_x_m is not None:
+        if float(args.gru_refine_max_x_m) <= 0.0:
+            raise ValueError("--gru-refine-max-x-m must be positive")
+        model_cfg["gru_refine_max_x_m"] = float(args.gru_refine_max_x_m)
+    if args.gru_refine_max_y_m is not None:
+        if float(args.gru_refine_max_y_m) <= 0.0:
+            raise ValueError("--gru-refine-max-y-m must be positive")
+        model_cfg["gru_refine_max_y_m"] = float(args.gru_refine_max_y_m)
 
     # DENSE_RESIDUAL_BOUND_CLI_V1
     if args.dense_residual_max_x_m is not None:
@@ -198,6 +220,7 @@ def main() -> int:
         f"[pretrain] backend=pure_torch torch={torch.__version__} "
         f"cuda={torch.cuda.is_available()}"
     )
+    print(f"[pretrain] reg_head_type={model_cfg.get('reg_head_type', 'mlp')}")
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
