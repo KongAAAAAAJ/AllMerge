@@ -44,11 +44,30 @@ class DiffusionPlannerRuntime:
             device_name
         )
 
-        model_overrides = dict(
-            runtime_config.get(
-                "model",
-                {},
-            )
+        # GRU planner checkpoint config recovery.
+        # Read model architecture from checkpoint BEFORE constructing the model,
+        # so a GRU checkpoint creates a GRU planner rather than the default MLP.
+        self.checkpoint = runtime_config.get("checkpoint")
+
+        checkpoint_model_config = {}
+        if self.checkpoint:
+            checkpoint_path = Path(self.checkpoint)
+            if checkpoint_path.exists():
+                metadata = torch.load(
+                    checkpoint_path,
+                    map_location="cpu",
+                )
+                if isinstance(metadata, dict):
+                    checkpoint_model_config = dict(
+                        metadata.get("allmerge_model_config")
+                        or metadata.get("model_config")
+                        or {}
+                    )
+
+        # Runtime overrides have higher priority than checkpoint metadata.
+        model_overrides = dict(checkpoint_model_config)
+        model_overrides.update(
+            dict(runtime_config.get("model", {}))
         )
 
         self.config = (
@@ -76,12 +95,6 @@ class DiffusionPlannerRuntime:
         )
         self.model.configure_sparse_curvature_guidance(
             self.guidance_config
-        )
-
-        self.checkpoint = (
-            runtime_config.get(
-                "checkpoint"
-            )
         )
 
         self.strict_checkpoint = bool(
