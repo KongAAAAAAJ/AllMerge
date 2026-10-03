@@ -24,11 +24,6 @@ class GRPOConfig:
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
-        "denoiser.gru_refine_token_norm",
-        "denoiser.gru_refine_h0",
-        "denoiser.gru_refine_input",
-        "denoiser.gru_refine",
-        "denoiser.gru_refine_out",
     )
 
 
@@ -208,63 +203,6 @@ class GRPOTrainer:
         )
         return metrics
 
-    @staticmethod
-    def _selected_reward_metrics(
-        current_rewards: torch.Tensor,
-        frozen_rewards: torch.Tensor,
-        current_logits: torch.Tensor,
-        frozen_logits: torch.Tensor,
-        valid_mask: torch.Tensor | None,
-    ) -> Dict[str, float]:
-        if current_rewards.shape != frozen_rewards.shape:
-            raise ValueError("selected reward comparison requires matching shapes")
-        if current_logits.shape != current_rewards.shape:
-            raise ValueError("current logits/rewards shape mismatch")
-        if frozen_logits.shape != frozen_rewards.shape:
-            raise ValueError("frozen logits/rewards shape mismatch")
-
-        cur_logits = current_logits
-        ref_logits = frozen_logits
-        if valid_mask is not None:
-            mask = valid_mask.to(device=cur_logits.device, dtype=torch.bool)
-            expected = (cur_logits.shape[0], cur_logits.shape[2])
-            if tuple(mask.shape) != expected:
-                raise ValueError(
-                    "valid_mode_mask shape mismatch for selected reward"
-                )
-            expanded = mask[:, None, :].expand_as(cur_logits)
-            neg_inf = torch.finfo(cur_logits.dtype).min
-            cur_logits = cur_logits.masked_fill(~expanded, neg_inf)
-            ref_logits = ref_logits.masked_fill(~expanded, neg_inf)
-
-        cur_idx = cur_logits.argmax(dim=-1, keepdim=True)
-        ref_idx = ref_logits.argmax(dim=-1, keepdim=True)
-        cur_selected = current_rewards.gather(-1, cur_idx).squeeze(-1)
-        ref_selected = frozen_rewards.gather(-1, ref_idx).squeeze(-1)
-
-        metrics: Dict[str, float] = {
-            "validation/selected_vehicle_reward_mean": float(
-                cur_selected.mean().detach()
-            ),
-            "validation/selected_pretrain_vehicle_reward_mean": float(
-                ref_selected.mean().detach()
-            ),
-            "validation/selected_vehicle_reward_gain": float(
-                (cur_selected.mean() - ref_selected.mean()).detach()
-            ),
-        }
-        for role in range(cur_selected.shape[0]):
-            metrics[
-                f"validation/selected_vehicle_{role}_reward_gain"
-            ] = float(
-                (
-                    cur_selected[role].mean()
-                    - ref_selected[role].mean()
-                ).detach()
-            )
-        return metrics
-
-
     def paired_validation(
         self,
         trace: DiffusionTrace,
@@ -291,22 +229,13 @@ class GRPOTrainer:
                 - frozen_trace.candidates[..., :2],
                 dim=-1,
             ).mean()
-        metrics = self._paired_reward_metrics(
+        return self._paired_reward_metrics(
             current_rewards,
             frozen_rewards,
             features.get("mode_valid_mask"),
             candidate_delta_m=delta_m,
         )
-        metrics.update(
-            self._selected_reward_metrics(
-                current_rewards,
-                frozen_rewards,
-                trace.logits,
-                frozen_trace.logits,
-                features.get("mode_valid_mask"),
-            )
-        )
-        return metrics
+
     @staticmethod
     def _reference_kl(new_log_prob: torch.Tensor, ref_log_prob: torch.Tensor) -> torch.Tensor:
         # k3 estimator from log-ratio; non-negative and zero when policies match.
@@ -323,13 +252,6 @@ class GRPOTrainer:
         # eval() disables dropout but does not disable gradients.
         self.model.eval()
         self.optimizer.zero_grad(set_to_none=True)
-        trainable_params = [
-            p for p in self.model.parameters()
-            if p.requires_grad
-        ]
-        before_update = [
-            p.detach().clone() for p in trainable_params
-        ]
         new_log_prob = self.sampler.replay(trace)
         objective = grpo_clipped_objective(
             new_log_prob,
@@ -351,16 +273,7 @@ class GRPOTrainer:
             max_norm=self.config.max_grad_norm,
         )
         self.optimizer.step()
-        update_sq = torch.zeros(
-            (), device=trainable_params[0].device
-        )
-        for parameter, before in zip(
-            trainable_params, before_update
-        ):
-            update_sq = update_sq + (
-                parameter.detach() - before
-            ).float().square().sum()
-        parameter_update_norm = torch.sqrt(update_sq)
+
         return {
             "loss": float(loss.detach()),
             "policy_loss": float(objective.policy_loss.detach()),
@@ -368,11 +281,7 @@ class GRPOTrainer:
             "approx_kl": float(objective.approx_kl.detach()),
             "clip_fraction": float(objective.clip_fraction.detach()),
             "ratio_mean": float(objective.ratio_mean.detach()),
-            "ratio_std": float(objective.ratio_std.detach()),
             "grad_norm": float(torch.as_tensor(grad_norm).detach()),
-            "parameter_update_norm": float(
-                parameter_update_norm.detach()
-            ),
         }
 
     def train_step(
@@ -423,5 +332,3 @@ class GRPOTrainer:
         )
         metrics.update(validation_metrics)
         return metrics
-
-# GRPO_FORMAL_METRICS_V3

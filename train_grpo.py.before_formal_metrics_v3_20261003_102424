@@ -250,13 +250,7 @@ def _fixed_state_paired_validation(
     current_rewards = array("validation/paired_group_current_reward_mean")
     frozen_rewards = array("validation/paired_group_frozen_reward_mean")
     candidate_delta = array("validation/paired_candidate_delta_m")
-    selected_gain = array("validation/selected_vehicle_reward_gain")
-    selected_current = array(
-        "validation/selected_vehicle_reward_mean"
-    )
-    selected_frozen = array(
-        "validation/selected_pretrain_vehicle_reward_mean"
-    )
+
     group_size = int(trainer.config.group_size)
     result: Dict[str, float] = {
         "fixed_validation/state_count": float(len(fixed_states)),
@@ -266,79 +260,16 @@ def _fixed_state_paired_validation(
         "fixed_validation/paired_reward_gain_median": float(np.median(gains)),
         "fixed_validation/paired_reward_gain_p05": float(np.quantile(gains, 0.05)),
         "fixed_validation/paired_reward_gain_p95": float(np.quantile(gains, 0.95)),
-        "fixed_validation/positive_fraction": float(np.mean(gains > 1e-6)),
+        "fixed_validation/positive_fraction": float(np.mean(gains > 0.0)),
         "fixed_validation/candidate_delta_m_mean": float(candidate_delta.mean()),
         f"fixed_validation/paired_n{group_size}_reward_gain_mean": float(gains.mean()),
-        "fixed_validation/selected_vehicle_reward_mean": float(selected_current.mean()),
-        "fixed_validation/selected_pretrain_vehicle_reward_mean": float(
-            selected_frozen.mean()
-        ),
-        "fixed_validation/selected_vehicle_reward_gain_mean": float(
-            selected_gain.mean()
-        ),
-        "fixed_validation/selected_vehicle_reward_gain_median": float(
-            np.median(selected_gain)
-        ),
-        "fixed_validation/selected_positive_fraction": float(
-            np.mean(selected_gain > 1e-6)
-        ),
     }
 
-    role_gain_means = []
-
-    selected_role_gain_means = []
-
     for role in range(3):
-
         role_gains = array(f"validation/vehicle_{role}_reward_gain")
-
-        role_mean = float(role_gains.mean())
-
-        result[f"fixed_validation/vehicle_{role}_reward_gain_mean"] = role_mean
-
-        role_gain_means.append(role_mean)
-
-        selected_role_gains = array(
-
-            f"validation/selected_vehicle_{role}_reward_gain"
-
+        result[f"fixed_validation/vehicle_{role}_reward_gain_mean"] = float(
+            role_gains.mean()
         )
-
-        selected_role_mean = float(selected_role_gains.mean())
-
-        result[
-
-            f"fixed_validation/selected_vehicle_{role}_reward_gain_mean"
-
-        ] = selected_role_mean
-
-        selected_role_gain_means.append(selected_role_mean)
-
-
-    result["fixed_validation/worst_vehicle_reward_gain_mean"] = float(
-
-        min(role_gain_means)
-
-    )
-
-    result["fixed_validation/best_vehicle_reward_gain_mean"] = float(
-
-        max(role_gain_means)
-
-    )
-
-    result["fixed_validation/vehicle_reward_gain_spread"] = float(
-
-        max(role_gain_means) - min(role_gain_means)
-
-    )
-
-    result["fixed_validation/worst_selected_vehicle_reward_gain_mean"] = float(
-
-        min(selected_role_gain_means)
-
-    )
-
 
     return result
 
@@ -377,8 +308,6 @@ def _print_fixed_validation(step: int, metrics: Dict[str, float]) -> None:
         f"gain_mean={metrics['fixed_validation/paired_reward_gain_mean']:.5f} "
         f"gain_median={metrics['fixed_validation/paired_reward_gain_median']:.5f} "
         f"positive_fraction={metrics['fixed_validation/positive_fraction']:.3f} "
-        f"selected_gain={metrics['fixed_validation/selected_vehicle_reward_gain_mean']:.5f} "
-        f"worst_role={metrics['fixed_validation/worst_vehicle_reward_gain_mean']:.5f} "
         f"candidate_delta_m={metrics['fixed_validation/candidate_delta_m_mean']:.5f}"
     )
 
@@ -398,18 +327,6 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
         )
 
 
-    selected_gain = abs(
-        float(
-            metrics[
-                "fixed_validation/selected_vehicle_reward_gain_mean"
-            ]
-        )
-    )
-    if selected_gain >= 1e-3:
-        raise RuntimeError(
-            "fixed validation step-0 selected reward gain "
-            f"is not near zero: {selected_gain:.9g}"
-        )
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AllMerge migration-first GRPO trainer")
     parser.add_argument("--checkpoint", required=True, type=Path)
@@ -649,5 +566,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-# GRPO_FORMAL_METRICS_V3
