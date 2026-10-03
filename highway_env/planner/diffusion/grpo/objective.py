@@ -13,6 +13,7 @@ class GRPOObjectiveResult:
     approx_kl: torch.Tensor
     clip_fraction: torch.Tensor
     ratio_mean: torch.Tensor
+    ratio_std: torch.Tensor
 
 
 def group_relative_advantage(
@@ -80,10 +81,18 @@ def grpo_clipped_objective(
     approx_kl = _masked_mean(0.5 * delta.square(), step_mask)
     clip_fraction = _masked_mean((torch.abs(ratio - 1.0) > clip_eps).to(ratio.dtype), step_mask)
     ratio_mean = _masked_mean(ratio, step_mask)
+    ratio_std = torch.sqrt(
+        _masked_mean(
+            (ratio - ratio_mean).square(), step_mask
+        ).clamp_min(0.0)
+    )
     return GRPOObjectiveResult(
         loss=policy_loss,
         policy_loss=policy_loss,
         approx_kl=approx_kl,
         clip_fraction=clip_fraction,
         ratio_mean=ratio_mean,
+        ratio_std=ratio_std,
     )
+
+# GRPO_FORMAL_METRICS_V1
