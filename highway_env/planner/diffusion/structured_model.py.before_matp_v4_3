@@ -1070,9 +1070,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_matp_trust_expansions": (guidance_last.get("matp_trust_expansions", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_matp_archive_feasible_fraction": (guidance_last.get("matp_archive_feasible_fraction", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_matp_trust_saturation_fraction": (guidance_last.get("matp_trust_saturation_fraction", zero_diag) if guidance_last is not None else zero_diag),
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            "guidance_matp_weight_mean": (guidance_last.get("matp_weight_mean", zero_diag) if guidance_last is not None else zero_diag),
-            "guidance_matp_stall_triggers": (guidance_last.get("matp_stall_triggers", zero_diag) if guidance_last is not None else zero_diag),
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "guidance_split_outer_iterations_used": (guidance_last.get("split_outer_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
             "guidance_split_primal_iterations_used": (guidance_last.get("split_primal_iterations_used", zero_diag) if guidance_last is not None else zero_diag),
@@ -1318,9 +1315,6 @@ class StructuredDiffusionPlanner(nn.Module):
             "guidance_matp_trust_expansions": base["guidance_matp_trust_expansions"],
             "guidance_matp_archive_feasible_fraction": base["guidance_matp_archive_feasible_fraction"],
             "guidance_matp_trust_saturation_fraction": base["guidance_matp_trust_saturation_fraction"],
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            "guidance_matp_weight_mean": base["guidance_matp_weight_mean"],
-            "guidance_matp_stall_triggers": base["guidance_matp_stall_triggers"],
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "guidance_split_outer_iterations_used": base["guidance_split_outer_iterations_used"],
             "guidance_split_primal_iterations_used": base["guidance_split_primal_iterations_used"],

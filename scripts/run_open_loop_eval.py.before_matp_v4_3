@@ -293,12 +293,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance-dense-matp-filter-acceptance-enabled", action="store_true")
     parser.add_argument("--guidance-dense-matp-filter-peak-tolerance", type=float, default=2.0e-4)
     parser.add_argument("--guidance-dense-matp-archive-enabled", action="store_true")
-    # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-    parser.add_argument("--guidance-dense-matp-violation-weighting-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-matp-violation-weight-beta", type=float, default=2.0)
-    parser.add_argument("--guidance-dense-matp-residual-trust-enabled", action="store_true")
-    parser.add_argument("--guidance-dense-matp-stall-peak-improvement", type=float, default=2.0e-4)
-    parser.add_argument("--guidance-dense-matp-stall-violation-fraction", type=float, default=0.03)
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     parser.add_argument("--guidance-dense-split-outer-iters", type=int, default=4)
     parser.add_argument("--guidance-dense-split-primal-iters", type=int, default=4)
@@ -438,12 +432,6 @@ def main() -> int:
         guidance_dense_matp_filter_acceptance_enabled=args.guidance_dense_matp_filter_acceptance_enabled,
         guidance_dense_matp_filter_peak_tolerance=args.guidance_dense_matp_filter_peak_tolerance,
         guidance_dense_matp_archive_enabled=args.guidance_dense_matp_archive_enabled,
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        guidance_dense_matp_violation_weighting_enabled=args.guidance_dense_matp_violation_weighting_enabled,
-        guidance_dense_matp_violation_weight_beta=args.guidance_dense_matp_violation_weight_beta,
-        guidance_dense_matp_residual_trust_enabled=args.guidance_dense_matp_residual_trust_enabled,
-        guidance_dense_matp_stall_peak_improvement=args.guidance_dense_matp_stall_peak_improvement,
-        guidance_dense_matp_stall_violation_fraction=args.guidance_dense_matp_stall_violation_fraction,
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
         guidance_dense_split_outer_iters=args.guidance_dense_split_outer_iters,
         guidance_dense_split_primal_iters=args.guidance_dense_split_primal_iters,

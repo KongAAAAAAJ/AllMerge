@@ -123,17 +123,6 @@ class SparseCurvatureGuidanceConfig:
     dense_matp_filter_acceptance_enabled: bool = False
     dense_matp_filter_peak_tolerance: float = 2.0e-4
     dense_matp_archive_enabled: bool = False
-    # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-    # Optional V4.3 mechanisms. Disabled => exact V4.2 MATP behavior.
-    # Violation weighting prioritizes genuinely severe active constraints in
-    # the joint least-squares projection instead of treating all rows equally.
-    dense_matp_violation_weighting_enabled: bool = False
-    dense_matp_violation_weight_beta: float = 2.0
-    # Residual-triggered trust expansion expands only when the current trust
-    # boundary is saturated AND the clipped candidate makes too little progress.
-    dense_matp_residual_trust_enabled: bool = False
-    dense_matp_stall_peak_improvement: float = 2.0e-4
-    dense_matp_stall_violation_fraction: float = 0.03
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     # D: split planning x from execution-domain sparse trajectory z.
     # z is projected to the execution feasible set; x is updated only through
@@ -353,13 +342,6 @@ class SparseCurvatureGuidanceConfig:
             raise ValueError("MATP trust saturation threshold must be in (0,1]")
         if self.dense_matp_filter_peak_tolerance < 0.0:
             raise ValueError("MATP filter peak tolerance must be >= 0")
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        if self.dense_matp_violation_weight_beta < 0.0:
-            raise ValueError("MATP violation weight beta must be >= 0")
-        if self.dense_matp_stall_peak_improvement < 0.0:
-            raise ValueError("MATP stall peak improvement must be >= 0")
-        if not (0.0 <= self.dense_matp_stall_violation_fraction <= 1.0):
-            raise ValueError("MATP stall violation fraction must be in [0,1]")
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
         if self.dense_split_outer_iters < 1 or self.dense_split_primal_iters < 1:
             raise ValueError("split outer/primal iterations must be >= 1")
@@ -1304,10 +1286,6 @@ def _run_multi_active_trust_projection(
     backtracking = torch.zeros_like(accepted_count)
     active_count_sum = torch.zeros_like(accepted_count)
     trust_expansions = torch.zeros_like(accepted_count)
-    # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-    weight_sum = torch.zeros_like(accepted_count)
-    weight_count = torch.zeros_like(accepted_count)
-    stall_triggers = torch.zeros_like(accepted_count)
 
     if bool(config.dense_matp_adaptive_trust_enabled):
         trust_limit = torch.full_like(
@@ -1384,35 +1362,13 @@ def _run_multi_active_trust_projection(
             active_count = row_valid.to(dtype).sum(dim=-1)
             active_count_sum = active_count_sum + active_count
 
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            # Optional violation-weighted joint projection.  A near-active row
-            # keeps weight 1, while the worst positive violation receives
-            # 1+beta. Weighting both J and rhs implements a weighted local
-            # least-squares projection without changing V4.2 when disabled.
-            if bool(config.dense_matp_violation_weighting_enabled):
-                positive_violation = (selected_abs.detach() - target).clamp_min(0.0) * row_valid.to(dtype)
-                vmax = positive_violation.amax(dim=-1, keepdim=True)
-                normalized = torch.where(
-                    vmax > float(config.eps),
-                    positive_violation / vmax.clamp_min(float(config.eps)),
-                    torch.zeros_like(positive_violation),
-                )
-                row_weight = (1.0 + float(config.dense_matp_violation_weight_beta) * normalized) * row_valid.to(dtype)
-            else:
-                row_weight = row_valid.to(dtype)
-            weight_sum = weight_sum + row_weight.sum(dim=-1)
-            weight_count = weight_count + row_valid.to(dtype).sum(dim=-1)
-            sqrt_weight = torch.sqrt(row_weight.clamp_min(0.0))
-            jac_solve = jac * sqrt_weight[..., None]
-            rhs_solve = rhs * sqrt_weight
-
             # Least-norm multi-constraint correction:
-            #   min ||dx||^2  s.t. weighted J dx ~= -weighted rhs
-            gram = jac_solve @ jac_solve.transpose(-1, -2)
+            #   min ||dx||^2  s.t. J dx ~= -rhs
+            gram = jac @ jac.transpose(-1, -2)
             eye = torch.eye(k, device=device, dtype=dtype)
             gram = gram + float(config.dense_matp_regularization) * eye
-            coeff = torch.linalg.solve(gram, rhs_solve.unsqueeze(-1)).squeeze(-1)
-            correction_flat = -(jac_solve.transpose(-1, -2) @ coeff.unsqueeze(-1)).squeeze(-1)
+            coeff = torch.linalg.solve(gram, rhs.unsqueeze(-1)).squeeze(-1)
+            correction_flat = -(jac.transpose(-1, -2) @ coeff.unsqueeze(-1)).squeeze(-1)
             correction = correction_flat.reshape_as(x_var)
             correction = correction * active_mode[..., None, None].to(dtype)
             if config.preserve_endpoint:
@@ -1451,7 +1407,7 @@ def _run_multi_active_trust_projection(
 
             # P3: if the requested total displacement is trust-limited, expand
             # one level before clipping.  P1/P2 keep the fixed 0.50 m budget.
-            if bool(config.dense_matp_adaptive_trust_enabled) and not bool(config.dense_matp_residual_trust_enabled):
+            if bool(config.dense_matp_adaptive_trust_enabled):
                 raw_total = torch.linalg.vector_norm(
                     (candidate_raw - anchor_xy).flatten(start_dim=-2), dim=-1
                 )
@@ -1489,62 +1445,6 @@ def _run_multi_active_trust_projection(
 
             with torch.no_grad():
                 cand_max, cand_sum, cand_count = state_metrics(candidate)
-
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            # Residual-triggered trust: only expand if the requested correction
-            # is trust-limited AND the clipped candidate stalls in both peak
-            # and aggregate violation reduction. This avoids V4.2's eager
-            # expansion on trajectories that are already progressing well.
-            if bool(config.dense_matp_adaptive_trust_enabled) and bool(config.dense_matp_residual_trust_enabled):
-                raw_total = torch.linalg.vector_norm(
-                    (candidate_raw - anchor_xy).flatten(start_dim=-2), dim=-1
-                )
-                saturated_now = trial_active & (
-                    raw_total
-                    >= trust_limit * float(config.dense_matp_trust_saturation_threshold)
-                ) & (trust_limit < float(config.dense_matp_max_trust_m) - 1.0e-8)
-                peak_gain = (old_max_m - cand_max).clamp_min(0.0)
-                violation_gain_fraction = (
-                    (old_sum - cand_sum).clamp_min(0.0)
-                    / old_sum.clamp_min(float(config.eps))
-                )
-                stalled = saturated_now & (
-                    peak_gain < float(config.dense_matp_stall_peak_improvement)
-                ) & (
-                    violation_gain_fraction < float(config.dense_matp_stall_violation_fraction)
-                )
-                if bool(stalled.any().item()):
-                    l2 = float(config.dense_matp_trust_level2_m)
-                    l3 = float(config.dense_matp_trust_level3_m)
-                    l4 = float(config.dense_matp_max_trust_m)
-                    next_trust = torch.where(
-                        trust_limit < l2 - 1.0e-8,
-                        torch.full_like(trust_limit, l2),
-                        torch.where(
-                            trust_limit < l3 - 1.0e-8,
-                            torch.full_like(trust_limit, l3),
-                            torch.full_like(trust_limit, l4),
-                        ),
-                    )
-                    trust_limit = torch.where(stalled, next_trust, trust_limit)
-                    trust_expansions = trust_expansions + stalled.to(dtype)
-                    stall_triggers = stall_triggers + stalled.to(dtype)
-
-                    expanded_scale = (
-                        trust_limit / raw_total.clamp_min(float(config.eps))
-                    ).clamp(max=1.0)
-                    expanded_candidate = anchor_xy + (candidate_raw - anchor_xy) * expanded_scale[..., None, None]
-                    if config.preserve_endpoint:
-                        expanded_candidate = expanded_candidate.clone()
-                        expanded_candidate[..., -1, :] = anchor_xy[..., -1, :]
-                    with torch.no_grad():
-                        exp_max, exp_sum, exp_count = state_metrics(expanded_candidate)
-                    candidate = torch.where(
-                        stalled[..., None, None], expanded_candidate, candidate
-                    )
-                    cand_max = torch.where(stalled, exp_max, cand_max)
-                    cand_sum = torch.where(stalled, exp_sum, cand_sum)
-                    cand_count = torch.where(stalled, exp_count, cand_count)
 
             strict = trial_active & (
                 cand_max
@@ -1636,10 +1536,6 @@ def _run_multi_active_trust_projection(
         "trust_expansions": trust_expansions,
         "archive_feasible": best_feasible_mask,
         "saturation": saturation,
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        "weight_sum": weight_sum,
-        "weight_count": weight_count,
-        "stall_triggers": stall_triggers,
     }
 
 # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
@@ -3120,10 +3016,6 @@ def apply_dense_curvature_guidance(
         "trust_expansions": zero_mode,
         "archive_feasible": torch.zeros_like(mode_valid),
         "saturation": torch.zeros_like(mode_valid),
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        "weight_sum": zero_mode,
-        "weight_count": zero_mode,
-        "stall_triggers": zero_mode,
     }
 
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
@@ -3434,10 +3326,6 @@ def apply_dense_curvature_guidance(
         matp_trigger_count = (matp_diag["trigger"].to(current_xy.dtype) * mode_valid_f).sum(dim=-1).clamp_min(1.0)
         matp_archive_sample = (matp_diag["archive_feasible"].to(current_xy.dtype) * mode_valid_f).sum(dim=-1) / matp_trigger_count
         matp_saturation_sample = (matp_diag["saturation"].to(current_xy.dtype) * mode_valid_f).sum(dim=-1) / matp_trigger_count
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        matp_weight_mode = matp_diag["weight_sum"] / matp_diag["weight_count"].clamp_min(1.0)
-        matp_weight_mean_sample = (matp_weight_mode * mode_valid_f).sum(dim=-1) / mode_count
-        matp_stall_trigger_sample = (matp_diag["stall_triggers"] * mode_valid_f).sum(dim=-1) / mode_count
 
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1 diagnostics
         split_outer_sample = (split_diag["outer_used"] * mode_valid_f).sum(dim=-1) / mode_count
@@ -3529,9 +3417,6 @@ def apply_dense_curvature_guidance(
             "matp_trust_expansions": matp_expansion_sample,
             "matp_archive_feasible_fraction": matp_archive_sample,
             "matp_trust_saturation_fraction": matp_saturation_sample,
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            "matp_weight_mean": matp_weight_mean_sample,
-            "matp_stall_triggers": matp_stall_trigger_sample,
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "split_outer_iterations_used": split_outer_sample,
             "split_primal_iterations_used": split_primal_sample,

@@ -222,9 +222,6 @@ CSV_FIELDS = [
     "guidance_matp_trust_expansions",
     "guidance_matp_archive_feasible_fraction",
     "guidance_matp_trust_saturation_fraction",
-    # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-    "guidance_matp_weight_mean",
-    "guidance_matp_stall_triggers",
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     "guidance_split_outer_iterations_used",
     "guidance_split_primal_iterations_used",
@@ -671,12 +668,6 @@ def evaluate_open_loop(
     guidance_dense_matp_filter_acceptance_enabled: bool = False,
     guidance_dense_matp_filter_peak_tolerance: float = 2.0e-4,
     guidance_dense_matp_archive_enabled: bool = False,
-    # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-    guidance_dense_matp_violation_weighting_enabled: bool = False,
-    guidance_dense_matp_violation_weight_beta: float = 2.0,
-    guidance_dense_matp_residual_trust_enabled: bool = False,
-    guidance_dense_matp_stall_peak_improvement: float = 2.0e-4,
-    guidance_dense_matp_stall_violation_fraction: float = 0.03,
     # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
     guidance_dense_split_outer_iters: int = 4,
     guidance_dense_split_primal_iters: int = 4,
@@ -815,12 +806,6 @@ def evaluate_open_loop(
             "dense_matp_filter_acceptance_enabled": bool(guidance_dense_matp_filter_acceptance_enabled),
             "dense_matp_filter_peak_tolerance": float(guidance_dense_matp_filter_peak_tolerance),
             "dense_matp_archive_enabled": bool(guidance_dense_matp_archive_enabled),
-            # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-            "dense_matp_violation_weighting_enabled": bool(guidance_dense_matp_violation_weighting_enabled),
-            "dense_matp_violation_weight_beta": float(guidance_dense_matp_violation_weight_beta),
-            "dense_matp_residual_trust_enabled": bool(guidance_dense_matp_residual_trust_enabled),
-            "dense_matp_stall_peak_improvement": float(guidance_dense_matp_stall_peak_improvement),
-            "dense_matp_stall_violation_fraction": float(guidance_dense_matp_stall_violation_fraction),
             # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
             "dense_split_outer_iters": int(guidance_dense_split_outer_iters),
             "dense_split_primal_iters": int(guidance_dense_split_primal_iters),
@@ -1495,9 +1480,6 @@ def evaluate_open_loop(
                         "guidance_matp_trust_expansions": _float(output["guidance_matp_trust_expansions"], i),
                         "guidance_matp_archive_feasible_fraction": _float(output["guidance_matp_archive_feasible_fraction"], i),
                         "guidance_matp_trust_saturation_fraction": _float(output["guidance_matp_trust_saturation_fraction"], i),
-                        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-                        "guidance_matp_weight_mean": _float(output["guidance_matp_weight_mean"], i),
-                        "guidance_matp_stall_triggers": _float(output["guidance_matp_stall_triggers"], i),
                         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
                         "guidance_split_outer_iterations_used": _float(output["guidance_split_outer_iterations_used"], i),
                         "guidance_split_primal_iterations_used": _float(output["guidance_split_primal_iterations_used"], i),
@@ -1838,12 +1820,6 @@ def evaluate_open_loop(
         "guidance_dense_matp_tightening": float(guidance_dense_matp_tightening),
         "guidance_dense_matp_adaptive_trust_enabled": bool(guidance_dense_matp_adaptive_trust_enabled),
         "guidance_dense_matp_archive_enabled": bool(guidance_dense_matp_archive_enabled),
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        "guidance_dense_matp_violation_weighting_enabled": bool(guidance_dense_matp_violation_weighting_enabled),
-        "guidance_dense_matp_violation_weight_beta": float(guidance_dense_matp_violation_weight_beta),
-        "guidance_dense_matp_residual_trust_enabled": bool(guidance_dense_matp_residual_trust_enabled),
-        "guidance_dense_matp_stall_peak_improvement": float(guidance_dense_matp_stall_peak_improvement),
-        "guidance_dense_matp_stall_violation_fraction": float(guidance_dense_matp_stall_violation_fraction),
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
         "guidance_dense_split_outer_iters": int(guidance_dense_split_outer_iters),
         "guidance_dense_split_primal_iters": int(guidance_dense_split_primal_iters),
@@ -1881,9 +1857,6 @@ def evaluate_open_loop(
         "mean_guidance_matp_trust_expansions": _mean(rows, "guidance_matp_trust_expansions"),
         "mean_guidance_matp_archive_feasible_fraction": _mean(rows, "guidance_matp_archive_feasible_fraction"),
         "mean_guidance_matp_trust_saturation_fraction": _mean(rows, "guidance_matp_trust_saturation_fraction"),
-        # MATP_PARAMETER_MECHANISM_OPTIMIZATION_V4_3
-        "mean_guidance_matp_weight_mean": _mean(rows, "guidance_matp_weight_mean"),
-        "mean_guidance_matp_stall_triggers": _mean(rows, "guidance_matp_stall_triggers"),
         # EXECUTION_SPLIT_AUGMENTED_PROJECTION_V4_1
         "mean_guidance_split_outer_iterations_used": _mean(rows, "guidance_split_outer_iterations_used"),
         "mean_guidance_split_primal_iterations_used": _mean(rows, "guidance_split_primal_iterations_used"),
