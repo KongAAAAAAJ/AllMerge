@@ -31,7 +31,7 @@ from highway_env.envs.scenarios.curved_lane_change_env import CurvedLaneChangeEn
 from highway_env.envs.scenarios.merge_in_env import MergeInEnv
 from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
 from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChangeEnv
-from highway_env.planner.diffusion.config import build_structured_diffusion_config
+from highway_env.planner.diffusion.config import StructuredDiffusionConfig
 from highway_env.planner.diffusion.grpo.checkpoint import load_pretrained
 from highway_env.planner.diffusion.grpo.reward_adapter import (
     CandidateRewardAdapter,
@@ -518,29 +518,14 @@ def _sample_noise_seed(base_seed: int, scenario_index: int, sample_index: int) -
     return int(base_seed + scenario_index * 100000 + sample_index)
 
 
-# CURVED_ABLATION_CHECKPOINT_CONFIG_V4
-def _checkpoint_model_config(path: Path) -> dict[str, object]:
-    payload = torch.load(path, map_location="cpu")
-    if not isinstance(payload, dict):
-        return {}
-    value = payload.get("model_config") or payload.get("allmerge_model_config") or {}
-    if not isinstance(value, dict):
-        raise TypeError(
-            f"checkpoint model config must be a dict, got {type(value).__name__}"
-        )
-    return dict(value)
-
-
 def _build_model(checkpoint: CheckpointSpec, device: torch.device):
-    stored_model_config = _checkpoint_model_config(checkpoint.path)
-    config = build_structured_diffusion_config(**stored_model_config)
+    config = StructuredDiffusionConfig()
     adapter = PlannerTensorAdapter(config, device)
     model = StructuredDiffusionPlanner(config, adapter).to(device)
     load_info = load_pretrained(model, checkpoint.path, strict=True)
     model.eval()
     model.requires_grad_(False)
     print(f"[checkpoint] name={checkpoint.name} path={checkpoint.path}")
-    print(f"[checkpoint] model_config={stored_model_config}")
     print(f"[checkpoint] strict load: {load_info}")
     return adapter, model
 

@@ -281,93 +281,6 @@ class CrossAttentionBlock(nn.Module):
         return x
 
 
-
-
-# CURVED_ABLATION_V4_SEMANTIC -----------------------------------------------
-def _wrap_angle(value: torch.Tensor) -> torch.Tensor:
-    return torch.atan2(torch.sin(value), torch.cos(value))
-
-
-def _segment_heading(trajectory: torch.Tensor) -> torch.Tensor:
-    delta = trajectory[:, 1:, :] - trajectory[:, :-1, :]
-    return torch.atan2(delta[..., 1], delta[..., 0])
-
-
-def _trajectory_curvature(trajectory: torch.Tensor) -> torch.Tensor:
-    delta = trajectory[:, 1:, :] - trajectory[:, :-1, :]
-    segment_length = torch.linalg.norm(delta, dim=-1).clamp_min(0.25)
-    heading = torch.atan2(delta[..., 1], delta[..., 0])
-    heading_delta = _wrap_angle(heading[:, 1:] - heading[:, :-1])
-    arc = 0.5 * (segment_length[:, 1:] + segment_length[:, :-1])
-    return heading_delta / arc.clamp_min(0.25)
-
-
-def _local_sensitive_loss(
-    selected: torch.Tensor,
-    target: torch.Tensor,
-    *,
-    topk: int,
-) -> torch.Tensor:
-    """Experiment B: emphasize the worst local XY waypoint errors."""
-    point = F.smooth_l1_loss(selected, target, reduction="none").mean(dim=-1)
-    mean_point = point.mean(dim=-1)
-    k = max(1, min(int(topk), int(point.shape[-1])))
-    worst = torch.topk(point, k=k, dim=-1, largest=True).values.mean(dim=-1)
-    return (worst - mean_point).clamp_min(0.0).mean()
-
-
-def _geometry_auxiliary_losses(
-    selected: torch.Tensor,
-    target: torch.Tensor,
-    features: Dict[str, torch.Tensor],
-    *,
-    lane_softmin_temperature_m: float,
-) -> Dict[str, torch.Tensor]:
-    """Experiment C: heading, curvature and differentiable lane feasibility."""
-    pred_heading = _segment_heading(selected)
-    target_heading = _segment_heading(target)
-    heading_delta = _wrap_angle(pred_heading - target_heading)
-    heading_loss = (1.0 - torch.cos(heading_delta)).mean()
-
-    pred_curvature = _trajectory_curvature(selected)
-    target_curvature = _trajectory_curvature(target)
-    curvature_scale = 0.05
-    curvature_loss = F.smooth_l1_loss(
-        pred_curvature / curvature_scale,
-        target_curvature / curvature_scale,
-    )
-
-    maps = features["map_polylines"]
-    valid_poly = features["map_valid_mask"].bool()
-    batch = maps.shape[0]
-    map_xy = maps[..., :2].reshape(batch, -1, 2)
-    map_width = maps[..., 4].reshape(batch, -1).clamp_min(0.5)
-    point_valid = valid_poly[:, :, None].expand(-1, -1, maps.shape[2]).reshape(batch, -1)
-
-    distance = torch.cdist(selected, map_xy)
-    masked_distance = torch.where(
-        point_valid[:, None, :],
-        distance,
-        torch.full_like(distance, 1.0e6),
-    )
-    tau = max(float(lane_softmin_temperature_m), 1e-3)
-    weights = torch.softmax(-masked_distance / tau, dim=-1)
-    nearest_distance = (weights * torch.where(
-        point_valid[:, None, :], distance, torch.zeros_like(distance)
-    )).sum(dim=-1)
-    nearest_width = (weights * map_width[:, None, :]).sum(dim=-1)
-    outside = torch.relu(nearest_distance - 0.5 * nearest_width)
-    lane_feasibility_loss = F.smooth_l1_loss(
-        outside, torch.zeros_like(outside)
-    )
-    return {
-        "heading_loss": heading_loss,
-        "curvature_loss": curvature_loss,
-        "lane_feasibility_loss": lane_feasibility_loss,
-        "lane_outside_mean_m": outside.mean(),
-        "lane_outside_max_m": outside.max(),
-    }
-
 class StructuredTrajectoryDenoiser(nn.Module):
     def __init__(
         self,
@@ -481,40 +394,6 @@ class StructuredTrajectoryDenoiser(nn.Module):
             nn.Linear(config.d_ffn, trajectory_dim),
         )
 
-        # CURVED_ABLATION_V4_SEMANTIC / Experiment A. The existing MLP (and
-        # optional GRU refinement) stay intact; this branch adds an ordered
-        # target-lane-conditioned waypoint residual before residual bounding.
-        self.waypoint_road_conditioning_enabled = bool(
-            config.waypoint_road_conditioning_enabled
-        )
-        if self.waypoint_road_conditioning_enabled:
-            self.waypoint_query_encoder = nn.Sequential(
-                nn.Linear(2, config.d_model),
-                nn.LayerNorm(config.d_model),
-                nn.GELU(),
-            )
-            self.waypoint_embedding = nn.Embedding(
-                config.horizon_steps, config.d_model
-            )
-            self.target_lane_position_embedding = nn.Embedding(
-                config.map_points, config.d_model
-            )
-            self.waypoint_road_norm = nn.LayerNorm(config.d_model)
-            self.waypoint_road_attn = nn.MultiheadAttention(
-                embed_dim=config.d_model,
-                num_heads=config.num_heads,
-                dropout=config.dropout,
-                batch_first=True,
-            )
-            self.waypoint_road_residual_head = nn.Sequential(
-                nn.LayerNorm(config.d_model),
-                nn.Linear(config.d_model, config.d_model),
-                nn.GELU(),
-                nn.Linear(config.d_model, 2),
-            )
-            nn.init.zeros_(self.waypoint_road_residual_head[-1].weight)
-            nn.init.zeros_(self.waypoint_road_residual_head[-1].bias)
-
         if self.reg_head_type == "gru":
             self.gru_refine_token_norm = nn.LayerNorm(config.d_model)
             self.gru_refine_h0 = nn.Linear(config.d_model, config.d_model)
@@ -605,38 +484,6 @@ class StructuredTrajectoryDenoiser(nn.Module):
         residual = self.reg_head(mode_tokens).reshape(
             batch, modes, steps, dims
         )
-
-        if self.waypoint_road_conditioning_enabled:
-            wp_ids = torch.arange(steps, device=noisy_norm.device)
-            query = (
-                self.waypoint_query_encoder(noisy_norm)
-                + mode_tokens[:, :, None, :]
-                + self.waypoint_embedding(wp_ids)[None, None, :, :]
-            )
-            lane_ids = torch.arange(
-                scene.target_lane_point_tokens.shape[1],
-                device=noisy_norm.device,
-            )
-            lane = (
-                scene.target_lane_point_tokens
-                + self.target_lane_position_embedding(lane_ids)[None, :, :]
-            )
-            query_flat = query.reshape(batch * modes, steps, -1)
-            lane_flat = lane[:, None, :, :].expand(
-                -1, modes, -1, -1
-            ).reshape(batch * modes, lane.shape[1], lane.shape[2])
-            road_out, _ = self.waypoint_road_attn(
-                self.waypoint_road_norm(query_flat),
-                lane_flat,
-                lane_flat,
-                need_weights=False,
-            )
-            road_feature = (query_flat + road_out).reshape(
-                batch, modes, steps, -1
-            )
-            residual = residual + float(
-                self.config.waypoint_road_conditioning_scale
-            ) * self.waypoint_road_residual_head(road_feature)
         residual = torch.tanh(residual)
         residual = residual * self.residual_limit_norm.to(dtype=residual.dtype)
         base_x0_norm = noisy_norm + residual
@@ -1217,16 +1064,6 @@ class StructuredDiffusionPlanner(nn.Module):
         dense_loss_terminal_timestep: int = 0,
         dense_loss_weight_mode: str = "terminal_constant",
         dense_loss_terminal_weight: float = 1.0,
-        # CURVED_ABLATION_V4_SEMANTIC / Experiment B
-        local_sensitive_loss_enabled: bool = False,
-        local_sensitive_loss_lambda: float = 0.5,
-        local_sensitive_loss_topk: int = 2,
-        # CURVED_ABLATION_V4_SEMANTIC / Experiment C
-        geometry_aux_loss_enabled: bool = False,
-        heading_loss_lambda: float = 0.2,
-        curvature_loss_lambda: float = 0.1,
-        lane_feasibility_loss_lambda: float = 0.5,
-        lane_softmin_temperature_m: float = 0.5,
     ) -> Dict[str, torch.Tensor]:
         """
         Supervised multimodal pretraining with semantic-constrained
@@ -1361,44 +1198,10 @@ class StructuredDiffusionPlanner(nn.Module):
         # Preserve the existing AllMerge regression loss so this patch
         # isolates label correctness rather than changing two variables
         # simultaneously.
-        trajectory_point_loss = F.smooth_l1_loss(
+        regression_loss = F.smooth_l1_loss(
             selected,
             target,
         )
-        local_sensitive_loss_raw = trajectory_point_loss.new_zeros(())
-        local_sensitive_loss_weighted = trajectory_point_loss.new_zeros(())
-        if bool(local_sensitive_loss_enabled):
-            local_sensitive_loss_raw = _local_sensitive_loss(
-                selected, target, topk=int(local_sensitive_loss_topk)
-            )
-            local_sensitive_loss_weighted = (
-                float(local_sensitive_loss_lambda) * local_sensitive_loss_raw
-            )
-        regression_loss = trajectory_point_loss + local_sensitive_loss_weighted
-
-        heading_loss_raw = trajectory_point_loss.new_zeros(())
-        curvature_loss_raw = trajectory_point_loss.new_zeros(())
-        lane_feasibility_loss_raw = trajectory_point_loss.new_zeros(())
-        geometry_aux_loss_weighted = trajectory_point_loss.new_zeros(())
-        lane_outside_mean_m = trajectory_point_loss.new_zeros(())
-        lane_outside_max_m = trajectory_point_loss.new_zeros(())
-        if bool(geometry_aux_loss_enabled):
-            geometry = _geometry_auxiliary_losses(
-                selected,
-                target,
-                features,
-                lane_softmin_temperature_m=float(lane_softmin_temperature_m),
-            )
-            heading_loss_raw = geometry["heading_loss"]
-            curvature_loss_raw = geometry["curvature_loss"]
-            lane_feasibility_loss_raw = geometry["lane_feasibility_loss"]
-            lane_outside_mean_m = geometry["lane_outside_mean_m"]
-            lane_outside_max_m = geometry["lane_outside_max_m"]
-            geometry_aux_loss_weighted = (
-                float(heading_loss_lambda) * heading_loss_raw
-                + float(curvature_loss_lambda) * curvature_loss_raw
-                + float(lane_feasibility_loss_lambda) * lane_feasibility_loss_raw
-            )
 
         # IMPORTANT:
         # Training uses RAW logits.
@@ -1473,7 +1276,7 @@ class StructuredDiffusionPlanner(nn.Module):
             dense_terminal_fraction = dense_aux["dense_terminal_fraction"]
 
         # DENSE_RESIDUAL_HEAD_V2
-        base_loss = regression_loss + classification_loss + geometry_aux_loss_weighted
+        base_loss = regression_loss + classification_loss
         loss = base_loss + dense_loss_weighted
 
         mode_valid_mask = features[
@@ -1513,33 +1316,6 @@ class StructuredDiffusionPlanner(nn.Module):
 
             "trajectory_regression_loss":
                 regression_loss,
-
-            "trajectory_point_loss":
-                trajectory_point_loss,
-
-            "local_sensitive_loss_raw":
-                local_sensitive_loss_raw,
-
-            "local_sensitive_loss_weighted":
-                local_sensitive_loss_weighted,
-
-            "heading_loss_raw":
-                heading_loss_raw,
-
-            "curvature_loss_raw":
-                curvature_loss_raw,
-
-            "lane_feasibility_loss_raw":
-                lane_feasibility_loss_raw,
-
-            "geometry_aux_loss_weighted":
-                geometry_aux_loss_weighted,
-
-            "lane_outside_mean_m":
-                lane_outside_mean_m,
-
-            "lane_outside_max_m":
-                lane_outside_max_m,
 
             "trajectory_classification_loss":
                 classification_loss,

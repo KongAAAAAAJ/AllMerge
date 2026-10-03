@@ -88,19 +88,6 @@ def parse_args():
         default=None,
         help="Ablation: original MLP, or MLP denoising + goal-conditioned GRU refinement.",
     )
-    # CURVED_ABLATION_V4_SEMANTIC: three mutually-exclusive hypotheses.
-    parser.add_argument(
-        "--curved-experiment",
-        choices=("none", "waypoint_road_conditioning", "local_sensitive_loss", "geometry_aux_loss"),
-        default="none",
-    )
-    parser.add_argument("--waypoint-road-conditioning-scale", type=float, default=1.0)
-    parser.add_argument("--local-sensitive-loss-lambda", type=float, default=0.5)
-    parser.add_argument("--local-sensitive-loss-topk", type=int, default=2)
-    parser.add_argument("--heading-loss-lambda", type=float, default=0.2)
-    parser.add_argument("--curvature-loss-lambda", type=float, default=0.1)
-    parser.add_argument("--lane-feasibility-loss-lambda", type=float, default=0.5)
-    parser.add_argument("--lane-softmin-temperature-m", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -131,14 +118,6 @@ def main() -> int:
         if float(args.dense_residual_max_y_m) <= 0.0:
             raise ValueError("--dense-residual-max-y-m must be positive")
         model_cfg["dense_residual_max_y_m"] = float(args.dense_residual_max_y_m)
-
-    # CURVED_ABLATION_V4_SEMANTIC
-    curved_experiment = str(args.curved_experiment)
-    waypoint_road_conditioning_enabled = curved_experiment == "waypoint_road_conditioning"
-    local_sensitive_loss_enabled = curved_experiment == "local_sensitive_loss"
-    geometry_aux_loss_enabled = curved_experiment == "geometry_aux_loss"
-    model_cfg["waypoint_road_conditioning_enabled"] = waypoint_road_conditioning_enabled
-    model_cfg["waypoint_road_conditioning_scale"] = float(args.waypoint_road_conditioning_scale)
 
     def pick(cli_value, name, default):
         return cli_value if cli_value is not None else train_cfg.get(name, default)
@@ -226,16 +205,6 @@ def main() -> int:
             "dense_loss_dense_dt": dense_loss_dense_dt,
             # DENSE_RESIDUAL_SEPARATE_LR_V1
             "dense_residual_learning_rate": dense_residual_lr,
-            # CURVED_ABLATION_V4_SEMANTIC
-            "curved_experiment": curved_experiment,
-            "local_sensitive_loss_enabled": local_sensitive_loss_enabled,
-            "local_sensitive_loss_lambda": float(args.local_sensitive_loss_lambda),
-            "local_sensitive_loss_topk": int(args.local_sensitive_loss_topk),
-            "geometry_aux_loss_enabled": geometry_aux_loss_enabled,
-            "heading_loss_lambda": float(args.heading_loss_lambda),
-            "curvature_loss_lambda": float(args.curvature_loss_lambda),
-            "lane_feasibility_loss_lambda": float(args.lane_feasibility_loss_lambda),
-            "lane_softmin_temperature_m": float(args.lane_softmin_temperature_m),
         },
     }
     (run_dir / "resolved_config.json").write_text(
@@ -252,11 +221,6 @@ def main() -> int:
         f"cuda={torch.cuda.is_available()}"
     )
     print(f"[pretrain] reg_head_type={model_cfg.get('reg_head_type', 'mlp')}")
-    print(
-        "[pretrain] curved_experiment="
-        f"{curved_experiment} waypoint_road={waypoint_road_conditioning_enabled} "
-        f"local_sensitive={local_sensitive_loss_enabled} geometry_aux={geometry_aux_loss_enabled}"
-    )
     print(
         "[pretrain] dense_supervision="
         f"enabled={dense_loss_enabled} lambda_p={dense_loss_lambda_p:g} "
@@ -290,15 +254,6 @@ def main() -> int:
         dense_loss_terminal_timestep=dense_loss_terminal_timestep,
         dense_loss_terminal_weight=dense_loss_terminal_weight,
         dense_loss_dense_dt=dense_loss_dense_dt,
-        # CURVED_ABLATION_V4_SEMANTIC
-        local_sensitive_loss_enabled=local_sensitive_loss_enabled,
-        local_sensitive_loss_lambda=float(args.local_sensitive_loss_lambda),
-        local_sensitive_loss_topk=int(args.local_sensitive_loss_topk),
-        geometry_aux_loss_enabled=geometry_aux_loss_enabled,
-        heading_loss_lambda=float(args.heading_loss_lambda),
-        curvature_loss_lambda=float(args.curvature_loss_lambda),
-        lane_feasibility_loss_lambda=float(args.lane_feasibility_loss_lambda),
-        lane_softmin_temperature_m=float(args.lane_softmin_temperature_m),
         # DENSE_RESIDUAL_SEPARATE_LR_V1
         dense_residual_learning_rate=dense_residual_lr,
     )

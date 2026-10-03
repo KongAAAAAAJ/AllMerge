@@ -60,15 +60,6 @@ METRIC_KEYS = (
     "loss",
     "base_loss",
     "trajectory_regression_loss",
-    "trajectory_point_loss",
-    "local_sensitive_loss_raw",
-    "local_sensitive_loss_weighted",
-    "heading_loss_raw",
-    "curvature_loss_raw",
-    "lane_feasibility_loss_raw",
-    "geometry_aux_loss_weighted",
-    "lane_outside_mean_m",
-    "lane_outside_max_m",
     "trajectory_classification_loss",
     # STAGED_DENSE_SUPERVISION_V1
     "dense_loss_raw",
@@ -145,15 +136,6 @@ def _metric_values(output: dict, batch: dict) -> Dict[str, float]:
         "loss": output["loss"],
         "base_loss": output["base_loss"],
         "trajectory_regression_loss": output["trajectory_regression_loss"],
-        "trajectory_point_loss": output["trajectory_point_loss"],
-        "local_sensitive_loss_raw": output["local_sensitive_loss_raw"],
-        "local_sensitive_loss_weighted": output["local_sensitive_loss_weighted"],
-        "heading_loss_raw": output["heading_loss_raw"],
-        "curvature_loss_raw": output["curvature_loss_raw"],
-        "lane_feasibility_loss_raw": output["lane_feasibility_loss_raw"],
-        "geometry_aux_loss_weighted": output["geometry_aux_loss_weighted"],
-        "lane_outside_mean_m": output["lane_outside_mean_m"],
-        "lane_outside_max_m": output["lane_outside_max_m"],
         "trajectory_classification_loss": output["trajectory_classification_loss"],
         # STAGED_DENSE_SUPERVISION_V1
         "dense_loss_raw": output["dense_loss_raw"],
@@ -208,15 +190,6 @@ class DiffusionPretrainer:
         dense_loss_terminal_timestep: int = 0,
         dense_loss_terminal_weight: float = 1.0,
         dense_loss_dense_dt: float = 0.1,
-        # CURVED_ABLATION_V4_SEMANTIC
-        local_sensitive_loss_enabled: bool = False,
-        local_sensitive_loss_lambda: float = 0.5,
-        local_sensitive_loss_topk: int = 2,
-        geometry_aux_loss_enabled: bool = False,
-        heading_loss_lambda: float = 0.2,
-        curvature_loss_lambda: float = 0.1,
-        lane_feasibility_loss_lambda: float = 0.5,
-        lane_softmin_temperature_m: float = 0.5,
         # DENSE_RESIDUAL_SEPARATE_LR_V1
         dense_residual_learning_rate: Optional[float] = None,
     ) -> None:
@@ -317,28 +290,6 @@ class DiffusionPretrainer:
             raise ValueError("Stage D only supports dense_loss_weight_mode=terminal_constant")
         if abs(self.dense_loss_dense_dt - 0.1) > 1e-9:
             raise ValueError("Stage D v1 requires dense_loss_dense_dt=0.1")
-
-        # CURVED_ABLATION_V4_SEMANTIC
-        self.local_sensitive_loss_enabled = bool(local_sensitive_loss_enabled)
-        self.local_sensitive_loss_lambda = float(local_sensitive_loss_lambda)
-        self.local_sensitive_loss_topk = int(local_sensitive_loss_topk)
-        self.geometry_aux_loss_enabled = bool(geometry_aux_loss_enabled)
-        self.heading_loss_lambda = float(heading_loss_lambda)
-        self.curvature_loss_lambda = float(curvature_loss_lambda)
-        self.lane_feasibility_loss_lambda = float(lane_feasibility_loss_lambda)
-        self.lane_softmin_temperature_m = float(lane_softmin_temperature_m)
-        if self.local_sensitive_loss_lambda < 0.0:
-            raise ValueError("local_sensitive_loss_lambda must be >= 0")
-        if self.local_sensitive_loss_topk <= 0:
-            raise ValueError("local_sensitive_loss_topk must be positive")
-        if min(
-            self.heading_loss_lambda,
-            self.curvature_loss_lambda,
-            self.lane_feasibility_loss_lambda,
-        ) < 0.0:
-            raise ValueError("geometry auxiliary lambdas must be >= 0")
-        if self.lane_softmin_temperature_m <= 0.0:
-            raise ValueError("lane_softmin_temperature_m must be positive")
 
         if init_checkpoint:
             state_dict, stored_config = load_checkpoint_file(init_checkpoint, map_location="cpu")
@@ -455,14 +406,6 @@ class DiffusionPretrainer:
                         dense_loss_terminal_timestep=self.dense_loss_terminal_timestep,
                         dense_loss_weight_mode=self.dense_loss_weight_mode,
                         dense_loss_terminal_weight=self.dense_loss_terminal_weight,
-                        local_sensitive_loss_enabled=self.local_sensitive_loss_enabled,
-                        local_sensitive_loss_lambda=self.local_sensitive_loss_lambda,
-                        local_sensitive_loss_topk=self.local_sensitive_loss_topk,
-                        geometry_aux_loss_enabled=self.geometry_aux_loss_enabled,
-                        heading_loss_lambda=self.heading_loss_lambda,
-                        curvature_loss_lambda=self.curvature_loss_lambda,
-                        lane_feasibility_loss_lambda=self.lane_feasibility_loss_lambda,
-                        lane_softmin_temperature_m=self.lane_softmin_temperature_m,
                     )
                     loss = output["loss"]
 
@@ -500,22 +443,6 @@ class DiffusionPretrainer:
                     values["trajectory_regression_loss"],
                     self.global_step,
                 )
-                for metric_name in (
-                    "trajectory_point_loss",
-                    "local_sensitive_loss_raw",
-                    "local_sensitive_loss_weighted",
-                    "heading_loss_raw",
-                    "curvature_loss_raw",
-                    "lane_feasibility_loss_raw",
-                    "geometry_aux_loss_weighted",
-                    "lane_outside_mean_m",
-                    "lane_outside_max_m",
-                ):
-                    self.writer.add_scalar(
-                        f"train_step/{metric_name}",
-                        values[metric_name],
-                        self.global_step,
-                    )
                 self.writer.add_scalar(
                     "train_step/trajectory_classification_loss",
                     values["trajectory_classification_loss"],
@@ -668,19 +595,6 @@ class DiffusionPretrainer:
                         f"sat_y={metrics['val/dense_residual_y_saturation_ratio']:.3f} "
                         f"runtime_mode_match={metrics['val/dense_runtime_mode_match']:.3f}"
                     )
-            if self.local_sensitive_loss_enabled:
-                summary += (
-                    f" local_raw={metrics['val/local_sensitive_loss_raw']:.4f} "
-                    f"local_w={metrics['val/local_sensitive_loss_weighted']:.4f}"
-                )
-            if self.geometry_aux_loss_enabled:
-                summary += (
-                    f" head={metrics['val/heading_loss_raw']:.4f} "
-                    f"curv={metrics['val/curvature_loss_raw']:.4f} "
-                    f"lane={metrics['val/lane_feasibility_loss_raw']:.4f} "
-                    f"geo_w={metrics['val/geometry_aux_loss_weighted']:.4f} "
-                    f"outside={metrics['val/lane_outside_mean_m']:.3f}m"
-                )
             summary += f" lr={lr:.3e} step={self.global_step}"
             print(summary)
 

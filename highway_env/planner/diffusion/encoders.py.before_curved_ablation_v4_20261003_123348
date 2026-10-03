@@ -261,9 +261,6 @@ class SceneEncoding:
     map_padding_mask: torch.Tensor
 
     target_token: torch.Tensor
-    # CURVED_ABLATION_V4_SEMANTIC / Experiment A: preserve ordered target-lane
-    # point tokens instead of only the pooled target token.
-    target_lane_point_tokens: torch.Tensor
 
 
 class StructuredSceneEncoder(nn.Module):
@@ -351,13 +348,6 @@ class StructuredSceneEncoder(nn.Module):
             target_lane,
         )
 
-        # CURVED_ABLATION_V4_SEMANTIC / Experiment A
-        # Keep the ordered pointwise lane features for waypoint-level
-        # cross-attention in the denoiser.
-        target_lane_point_tokens = self.map_encoder.point_encoder(
-            target_lane
-        )
-
         return SceneEncoding(
             ego_token=ego_token,
             agent_tokens=agent_tokens,
@@ -373,5 +363,4 @@ class StructuredSceneEncoder(nn.Module):
                 ]
             ),
             target_token=target_token,
-            target_lane_point_tokens=target_lane_point_tokens,
         )

@@ -113,12 +113,6 @@ class StructuredDiffusionConfig:
     max_residual_x_m: float = 20.0
     max_residual_y_m: float = 4.0
 
-    # CURVED_ABLATION_V4_SEMANTIC / Experiment A
-    # Optional waypoint-level road conditioning. Disabled by default so the
-    # existing planner architecture/checkpoints are unchanged unless enabled.
-    waypoint_road_conditioning_enabled: bool = False
-    waypoint_road_conditioning_scale: float = 1.0
-
     # GRU_REFINEMENT_COARSE_GOAL_V4
     # ``mlp``: original MLP diffusion denoising head only.
     # ``gru``: keep the same MLP denoiser, then add a goal-conditioned GRU
@@ -166,9 +160,6 @@ class StructuredDiffusionConfig:
             raise ValueError(
                 "max_residual_y_m must be positive"
             )
-
-        if self.waypoint_road_conditioning_scale < 0.0:
-            raise ValueError("waypoint_road_conditioning_scale must be >= 0")
 
         self.reg_head_type = str(self.reg_head_type).lower()
         if self.reg_head_type not in {"mlp", "gru"}:
