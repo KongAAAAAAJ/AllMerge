@@ -10,8 +10,6 @@ from .objective import group_relative_advantage, grpo_clipped_objective
 from .reward_adapter import w4_to_grpo_rewards
 from .constraints import SUPPORTED_CONSTRAINTS, evaluate_w4_constraints
 from .constraint_strategy import (
-    ActiveConstraintConfig,
-    ActiveConstraintStrategy,
     LagrangianConstraintConfig,
     LagrangianConstraintStrategy,
 )
@@ -35,11 +33,6 @@ class GRPOConfig:
     lagrangian_dual_lr: float = 0.05
     lagrangian_lambda_init: float = 0.0
     lagrangian_lambda_max: float = 20.0
-    active_feasible_fraction: float = 0.50
-    active_cvar_alpha: float = 0.25
-    active_temperature: float = 0.20
-    active_support_gate: bool = False
-    active_support_margin: float = 1e-3
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
@@ -72,9 +65,9 @@ class GRPOTrainer:
         self.config = config or GRPOConfig()
         if self.config.update_epochs < 1:
             raise ValueError("update_epochs must be >= 1")
-        if self.config.constraint_strategy not in {"none", "lagrangian", "hard_worst", "soft_active"}:
+        if self.config.constraint_strategy not in {"none", "lagrangian"}:
             raise ValueError(
-                "constraint_strategy must be one of: none, lagrangian, hard_worst, soft_active"
+                "constraint_strategy must be one of: none, lagrangian"
             )
         if not self.config.constraint_names:
             raise ValueError("constraint_names cannot be empty")
@@ -88,14 +81,6 @@ class GRPOTrainer:
             )
         if self.config.constraint_residual_cap <= 0.0:
             raise ValueError("constraint_residual_cap must be > 0")
-        if not 0.0 <= self.config.active_feasible_fraction <= 1.0:
-            raise ValueError("active_feasible_fraction must be in [0,1]")
-        if not 0.0 < self.config.active_cvar_alpha <= 1.0:
-            raise ValueError("active_cvar_alpha must be in (0,1]")
-        if self.config.active_temperature <= 0.0:
-            raise ValueError("active_temperature must be > 0")
-        if self.config.active_support_margin < 0.0:
-            raise ValueError("active_support_margin must be >= 0")
         self._configure_trainable_parameters()
         parameters = [p for p in self.model.parameters() if p.requires_grad]
         if not parameters:
@@ -125,18 +110,6 @@ class GRPOTrainer:
                     dual_lr=self.config.lagrangian_dual_lr,
                     lambda_init=self.config.lagrangian_lambda_init,
                     lambda_max=self.config.lagrangian_lambda_max,
-                ),
-            )
-        elif self.config.constraint_strategy in {"hard_worst", "soft_active"}:
-            self.constraint_strategy = ActiveConstraintStrategy(
-                tuple(self.config.constraint_names),
-                mode=self.config.constraint_strategy,
-                config=ActiveConstraintConfig(
-                    feasible_fraction=self.config.active_feasible_fraction,
-                    cvar_alpha=self.config.active_cvar_alpha,
-                    temperature=self.config.active_temperature,
-                    support_gate=self.config.active_support_gate,
-                    support_margin=self.config.active_support_margin,
                 ),
             )
 
@@ -552,5 +525,3 @@ class GRPOTrainer:
 # GRPO_FORMAL_METRICS_V3
 
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
-
-# ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC

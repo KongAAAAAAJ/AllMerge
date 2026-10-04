@@ -437,7 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--update-epochs", type=int, default=2)
     parser.add_argument(
         "--constraint-strategy",
-        choices=("none", "lagrangian", "hard_worst", "soft_active"),
+        choices=("none", "lagrangian"),
         default="none",
         help=(
             "multi-constraint GRPO strategy; 'none' preserves the current "
@@ -467,26 +467,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lagrangian-lambda-max", type=float, default=20.0,
         help="upper projection bound for Lagrangian multipliers",
-    )
-    parser.add_argument(
-        "--active-feasible-fraction", type=float, default=0.50,
-        help="current feasible-candidate fraction required to switch restoration to reward mode",
-    )
-    parser.add_argument(
-        "--active-cvar-alpha", type=float, default=0.25,
-        help="upper-tail fraction used for per-constraint group severity",
-    )
-    parser.add_argument(
-        "--active-temperature", type=float, default=0.20,
-        help="soft_active temperature; lower values approach hard worst-constraint selection",
-    )
-    parser.add_argument(
-        "--active-support-gate", action="store_true",
-        help="skip restoration actor updates when no candidate improves on frozen reference violation",
-    )
-    parser.add_argument(
-        "--active-support-margin", type=float, default=1e-3,
-        help="minimum pretrained-relative violation improvement required by support gate",
     )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
@@ -566,11 +546,6 @@ def _build_trainer(args: argparse.Namespace):
             lagrangian_dual_lr=args.lagrangian_dual_lr,
             lagrangian_lambda_init=args.lagrangian_lambda_init,
             lagrangian_lambda_max=args.lagrangian_lambda_max,
-            active_feasible_fraction=args.active_feasible_fraction,
-            active_cvar_alpha=args.active_cvar_alpha,
-            active_temperature=args.active_temperature,
-            active_support_gate=args.active_support_gate,
-            active_support_margin=args.active_support_margin,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
@@ -586,15 +561,6 @@ def _build_trainer(args: argparse.Namespace):
             f"lambda_init={args.lagrangian_lambda_init} "
             f"lambda_max={args.lagrangian_lambda_max} "
             f"residual_cap={args.constraint_residual_cap}"
-        )
-    if args.constraint_strategy in {"hard_worst", "soft_active"}:
-        print(
-            "[grpo] active_constraint "
-            f"feasible_fraction={args.active_feasible_fraction} "
-            f"cvar_alpha={args.active_cvar_alpha} "
-            f"temperature={args.active_temperature} "
-            f"support_gate={args.active_support_gate} "
-            f"support_margin={args.active_support_margin}"
         )
     return adapter, trainer, device
 
@@ -746,5 +712,3 @@ if __name__ == "__main__":
 # GRPO_FORMAL_METRICS_V3
 
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
-
-# ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC

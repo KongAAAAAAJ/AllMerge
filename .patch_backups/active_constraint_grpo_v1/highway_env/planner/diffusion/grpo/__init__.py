@@ -2,10 +2,7 @@
 
 from .checkpoint import load_pretrained, save_grpo_checkpoint
 from .constraints import ConstraintBatch, SUPPORTED_CONSTRAINTS, evaluate_w4_constraints
-from .constraint_strategy import (
-    ActiveConstraintConfig, ActiveConstraintStrategy,
-    LagrangianConstraintConfig, LagrangianConstraintStrategy,
-)
+from .constraint_strategy import LagrangianConstraintConfig, LagrangianConstraintStrategy
 from .objective import GRPOObjectiveResult, group_relative_advantage, grpo_clipped_objective
 from .reward_adapter import CandidateRewardAdapter, fake_progress_reward, resolve_reward_evaluator
 from .rollout_adapter import AllMergeRolloutAdapter
@@ -15,8 +12,6 @@ from .trainer import GRPOConfig, GRPOTrainer
 
 __all__ = [
     "AllMergeRolloutAdapter",
-    "ActiveConstraintConfig",
-    "ActiveConstraintStrategy",
     "CandidateRewardAdapter",
     "ConstraintBatch",
     "DiffusionTrace",
@@ -39,5 +34,3 @@ __all__ = [
 ]
 
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
-
-# ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC
