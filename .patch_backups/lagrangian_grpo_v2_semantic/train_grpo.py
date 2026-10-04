@@ -435,39 +435,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
-    parser.add_argument(
-        "--constraint-strategy",
-        choices=("none", "lagrangian"),
-        default="none",
-        help=(
-            "multi-constraint GRPO strategy; 'none' preserves the current "
-            "reward-only behavior"
-        ),
-    )
-    parser.add_argument(
-        "--constraint-names",
-        default="collision,road,ttc,background_gap,teammate_gap",
-        help=(
-            "comma-separated W4 constraints used by constrained GRPO; "
-            "available: collision,road,ttc,background_gap,teammate_gap"
-        ),
-    )
-    parser.add_argument(
-        "--constraint-residual-cap", type=float, default=5.0,
-        help="cap for normalized signed constraint residuals",
-    )
-    parser.add_argument(
-        "--lagrangian-dual-lr", type=float, default=0.05,
-        help="dual ascent learning rate for Lagrangian constrained GRPO",
-    )
-    parser.add_argument(
-        "--lagrangian-lambda-init", type=float, default=0.0,
-        help="initial multiplier shared by all enabled constraints",
-    )
-    parser.add_argument(
-        "--lagrangian-lambda-max", type=float, default=20.0,
-        help="upper projection bound for Lagrangian multipliers",
-    )
     parser.add_argument("--reward-fn", default="auto", help="module:function or auto")
     parser.add_argument("--fake-reward", action="store_true")
     parser.add_argument(
@@ -526,9 +493,6 @@ def _build_trainer(args: argparse.Namespace):
     print(f"[checkpoint] loaded={args.checkpoint} {load_info}")
 
     evaluator = fake_progress_reward if args.fake_reward else resolve_reward_evaluator(args.reward_fn)
-    constraint_names = tuple(
-        name.strip() for name in str(args.constraint_names).split(",") if name.strip()
-    )
     trainer = GRPOTrainer(
         model,
         CandidateRewardAdapter(evaluator),
@@ -540,28 +504,10 @@ def _build_trainer(args: argparse.Namespace):
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
-            constraint_strategy=args.constraint_strategy,
-            constraint_names=constraint_names,
-            constraint_residual_cap=args.constraint_residual_cap,
-            lagrangian_dual_lr=args.lagrangian_dual_lr,
-            lagrangian_lambda_init=args.lagrangian_lambda_init,
-            lagrangian_lambda_max=args.lagrangian_lambda_max,
         ),
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
-    print(
-        f"[grpo] constraint_strategy={args.constraint_strategy} "
-        f"constraints={constraint_names}"
-    )
-    if args.constraint_strategy == "lagrangian":
-        print(
-            "[grpo] lagrangian "
-            f"dual_lr={args.lagrangian_dual_lr} "
-            f"lambda_init={args.lagrangian_lambda_init} "
-            f"lambda_max={args.lagrangian_lambda_max} "
-            f"residual_cap={args.constraint_residual_cap}"
-        )
     return adapter, trainer, device
 
 
@@ -677,11 +623,6 @@ def main() -> int:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:
         raise SystemExit("--fixed-validation-interval must be >= 1")
-    if args.fake_reward and args.constraint_strategy != "none":
-        raise SystemExit(
-            "constrained GRPO requires the production W4 reward evaluator; "
-            "--fake-reward only supports --constraint-strategy none"
-        )
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -710,5 +651,3 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 # GRPO_FORMAL_METRICS_V3
-
-# LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC

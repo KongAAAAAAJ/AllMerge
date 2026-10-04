@@ -7,12 +7,6 @@ from typing import Any, Dict, Iterable, Tuple
 import torch
 
 from .objective import group_relative_advantage, grpo_clipped_objective
-from .reward_adapter import w4_to_grpo_rewards
-from .constraints import SUPPORTED_CONSTRAINTS, evaluate_w4_constraints
-from .constraint_strategy import (
-    LagrangianConstraintConfig,
-    LagrangianConstraintStrategy,
-)
 from .reward_adapter import CandidateRewardAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
 
@@ -27,12 +21,6 @@ class GRPOConfig:
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
     update_epochs: int = 2
-    constraint_strategy: str = "none"
-    constraint_names: Tuple[str, ...] = SUPPORTED_CONSTRAINTS
-    constraint_residual_cap: float = 5.0
-    lagrangian_dual_lr: float = 0.05
-    lagrangian_lambda_init: float = 0.0
-    lagrangian_lambda_max: float = 20.0
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
@@ -65,22 +53,6 @@ class GRPOTrainer:
         self.config = config or GRPOConfig()
         if self.config.update_epochs < 1:
             raise ValueError("update_epochs must be >= 1")
-        if self.config.constraint_strategy not in {"none", "lagrangian"}:
-            raise ValueError(
-                "constraint_strategy must be one of: none, lagrangian"
-            )
-        if not self.config.constraint_names:
-            raise ValueError("constraint_names cannot be empty")
-        unknown_constraints = sorted(
-            set(self.config.constraint_names) - set(SUPPORTED_CONSTRAINTS)
-        )
-        if unknown_constraints:
-            raise ValueError(
-                f"unsupported constraint_names={unknown_constraints}; "
-                f"supported={SUPPORTED_CONSTRAINTS}"
-            )
-        if self.config.constraint_residual_cap <= 0.0:
-            raise ValueError("constraint_residual_cap must be > 0")
         self._configure_trainable_parameters()
         parameters = [p for p in self.model.parameters() if p.requires_grad]
         if not parameters:
@@ -99,19 +71,6 @@ class GRPOTrainer:
             group_size=self.config.group_size,
             eta=self.config.eta,
         )
-
-        self.constraint_strategy = None
-        if self.config.constraint_strategy == "lagrangian":
-            self.constraint_strategy = LagrangianConstraintStrategy(
-                tuple(self.config.constraint_names),
-                device=parameters[0].device,
-                dtype=parameters[0].dtype,
-                config=LagrangianConstraintConfig(
-                    dual_lr=self.config.lagrangian_dual_lr,
-                    lambda_init=self.config.lagrangian_lambda_init,
-                    lambda_max=self.config.lagrangian_lambda_max,
-                ),
-            )
 
     def _configure_trainable_parameters(self) -> None:
         self.model.requires_grad_(False)
@@ -142,59 +101,22 @@ class GRPOTrainer:
         *,
         context: Any = None,
         generator: torch.Generator | None = None,
-    ) -> tuple[DiffusionTrace, torch.Tensor, torch.Tensor, Dict[str, float]]:
+    ) -> tuple[DiffusionTrace, torch.Tensor, torch.Tensor]:
         # Keep dropout disabled: diffusion transition log-prob must describe all policy stochasticity.
         self.model.eval()
         with torch.no_grad():
             trace = self.sampler.sample(features, generator=generator)
-            strategy_metrics: Dict[str, float] = {}
-            if self.config.constraint_strategy == "none":
-                rewards = self.reward_adapter(
-                    trace.candidates,
-                    features=features,
-                    context=context,
-                )
-                advantages = group_relative_advantage(
-                    rewards,
-                    eps=self.config.advantage_eps,
-                    valid_mask=features.get("mode_valid_mask"),
-                )
-            else:
-                result = self.reward_adapter.evaluate_result(
-                    trace.candidates,
-                    features=features,
-                    context=context,
-                )
-                rewards = w4_to_grpo_rewards(
-                    result.rewards,
-                    device=trace.candidates.device,
-                    dtype=trace.candidates.dtype,
-                )
-                constraints = evaluate_w4_constraints(
-                    result,
-                    context=context,
-                    device=trace.candidates.device,
-                    dtype=trace.candidates.dtype,
-                    names=self.config.constraint_names,
-                    residual_cap=self.config.constraint_residual_cap,
-                )
-                assert self.constraint_strategy is not None
-                effective_rewards, advantages, strategy_metrics = (
-                    self.constraint_strategy.compute(
-                        rewards,
-                        constraints,
-                        valid_mask=features.get("mode_valid_mask"),
-                        advantage_eps=self.config.advantage_eps,
-                        update_dual=True,
-                    )
-                )
-                strategy_metrics["reward/task_reward_mean"] = float(
-                    rewards.mean().detach()
-                )
-                strategy_metrics["reward/effective_reward_mean"] = float(
-                    effective_rewards.mean().detach()
-                )
-        return trace, rewards, advantages, strategy_metrics
+            rewards = self.reward_adapter(
+                trace.candidates,
+                features=features,
+                context=context,
+            )
+            advantages = group_relative_advantage(
+                rewards,
+                eps=self.config.advantage_eps,
+                valid_mask=features.get("mode_valid_mask"),
+            )
+        return trace, rewards, advantages
 
 
     @staticmethod
@@ -476,7 +398,7 @@ class GRPOTrainer:
             if paired_validation
             else None
         )
-        trace, rewards, advantages, strategy_metrics = self.collect(
+        trace, rewards, advantages = self.collect(
             features, context=context, generator=generator
         )
         validation_metrics: Dict[str, float] = {}
@@ -509,19 +431,7 @@ class GRPOTrainer:
             advantage_mean=float(advantages.mean().detach()),
             advantage_std=float(advantages.std(unbiased=False).detach()),
         )
-        metrics.update(strategy_metrics)
         metrics.update(validation_metrics)
         return metrics
 
-
-    def constraint_state_dict(self) -> Dict[str, Any]:
-        if self.constraint_strategy is None:
-            return {"strategy": "none"}
-        return {
-            "strategy": self.config.constraint_strategy,
-            "state": self.constraint_strategy.state_dict(),
-        }
-
 # GRPO_FORMAL_METRICS_V3
-
-# LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
