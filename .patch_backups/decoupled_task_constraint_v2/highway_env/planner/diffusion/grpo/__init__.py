@@ -12,7 +12,6 @@ from .rollout_adapter import AllMergeRolloutAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
 from .scheduler import StochasticDDIMTransition, TransitionResult
 from .trainer import GRPOConfig, GRPOTrainer
-from .task_reward import SUPPORTED_TASK_REWARDS, task_reward_from_w4_result
 
 __all__ = [
     "AllMergeRolloutAdapter",
@@ -28,7 +27,6 @@ __all__ = [
     "LagrangianConstraintStrategy",
     "GroupDiffusionSampler",
     "SUPPORTED_CONSTRAINTS",
-    "SUPPORTED_TASK_REWARDS",
     "StochasticDDIMTransition",
     "TransitionResult",
     "evaluate_w4_constraints",
@@ -38,11 +36,8 @@ __all__ = [
     "load_pretrained",
     "resolve_reward_evaluator",
     "save_grpo_checkpoint",
-    "task_reward_from_w4_result",
 ]
 
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
 
 # ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC
-
-# DECOUPLED_TASK_CONSTRAINT_V2_SEMANTIC

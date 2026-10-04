@@ -17,11 +17,6 @@ from .constraint_strategy import (
 )
 from .reward_adapter import CandidateRewardAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
-from .task_reward import (
-    SUPPORTED_TASK_REWARDS,
-    legacy_w4_reward_from_result,
-    task_reward_from_w4_result,
-)
 
 
 @dataclass
@@ -34,7 +29,6 @@ class GRPOConfig:
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
     update_epochs: int = 2
-    task_reward_type: str = "legacy_w4"
     constraint_strategy: str = "none"
     constraint_names: Tuple[str, ...] = SUPPORTED_CONSTRAINTS
     constraint_residual_cap: float = 5.0
@@ -78,11 +72,6 @@ class GRPOTrainer:
         self.config = config or GRPOConfig()
         if self.config.update_epochs < 1:
             raise ValueError("update_epochs must be >= 1")
-        if self.config.task_reward_type not in SUPPORTED_TASK_REWARDS:
-            raise ValueError(
-                f"unsupported task_reward_type={self.config.task_reward_type!r}; "
-                f"supported={SUPPORTED_TASK_REWARDS}"
-            )
         if self.config.constraint_strategy not in {"none", "lagrangian", "hard_worst", "soft_active"}:
             raise ValueError(
                 "constraint_strategy must be one of: none, lagrangian, hard_worst, soft_active"
@@ -174,29 +163,6 @@ class GRPOTrainer:
         self.reference_model.eval()
         self.reference_model.requires_grad_(False)
 
-    def score_candidates(
-        self,
-        candidates: torch.Tensor,
-        *,
-        features: Dict[str, torch.Tensor],
-        context: Any,
-    ) -> torch.Tensor:
-        """Score candidates with the configured task objective."""
-        if self.config.task_reward_type == "legacy_w4":
-            return self.reward_adapter(
-                candidates, features=features, context=context
-            )
-        result = self.reward_adapter.evaluate_result(
-            candidates, features=features, context=context
-        )
-        return task_reward_from_w4_result(
-            result,
-            context=context,
-            device=candidates.device,
-            dtype=candidates.dtype,
-            reward_type=self.config.task_reward_type,
-        )
-
     def collect(
         self,
         features: Dict[str, torch.Tensor],
@@ -209,18 +175,12 @@ class GRPOTrainer:
         with torch.no_grad():
             trace = self.sampler.sample(features, generator=generator)
             strategy_metrics: Dict[str, float] = {}
-            needs_full_result = (
-                self.config.constraint_strategy != "none"
-                or self.config.task_reward_type != "legacy_w4"
-            )
-            if not needs_full_result:
+            if self.config.constraint_strategy == "none":
                 rewards = self.reward_adapter(
                     trace.candidates,
                     features=features,
                     context=context,
                 )
-                legacy_rewards = rewards
-                effective_rewards = rewards
                 advantages = group_relative_advantage(
                     rewards,
                     eps=self.config.advantage_eps,
@@ -232,54 +192,37 @@ class GRPOTrainer:
                     features=features,
                     context=context,
                 )
-                rewards = task_reward_from_w4_result(
+                rewards = w4_to_grpo_rewards(
+                    result.rewards,
+                    device=trace.candidates.device,
+                    dtype=trace.candidates.dtype,
+                )
+                constraints = evaluate_w4_constraints(
                     result,
                     context=context,
                     device=trace.candidates.device,
                     dtype=trace.candidates.dtype,
-                    reward_type=self.config.task_reward_type,
+                    names=self.config.constraint_names,
+                    residual_cap=self.config.constraint_residual_cap,
                 )
-                legacy_rewards = legacy_w4_reward_from_result(
-                    result,
-                    device=trace.candidates.device,
-                    dtype=trace.candidates.dtype,
-                )
-                if self.config.constraint_strategy == "none":
-                    effective_rewards = rewards
-                    advantages = group_relative_advantage(
+                assert self.constraint_strategy is not None
+                effective_rewards, advantages, strategy_metrics = (
+                    self.constraint_strategy.compute(
                         rewards,
-                        eps=self.config.advantage_eps,
+                        constraints,
                         valid_mask=features.get("mode_valid_mask"),
+                        advantage_eps=self.config.advantage_eps,
+                        update_dual=True,
                     )
-                else:
-                    constraints = evaluate_w4_constraints(
-                        result,
-                        context=context,
-                        device=trace.candidates.device,
-                        dtype=trace.candidates.dtype,
-                        names=self.config.constraint_names,
-                        residual_cap=self.config.constraint_residual_cap,
-                    )
-                    assert self.constraint_strategy is not None
-                    effective_rewards, advantages, strategy_metrics = (
-                        self.constraint_strategy.compute(
-                            rewards,
-                            constraints,
-                            valid_mask=features.get("mode_valid_mask"),
-                            advantage_eps=self.config.advantage_eps,
-                            update_dual=True,
-                        )
-                    )
-            strategy_metrics["reward/task_reward_mean"] = float(
-                rewards.mean().detach()
-            )
-            strategy_metrics["reward/legacy_w4_reward_mean"] = float(
-                legacy_rewards.mean().detach()
-            )
-            strategy_metrics["reward/effective_reward_mean"] = float(
-                effective_rewards.mean().detach()
-            )
+                )
+                strategy_metrics["reward/task_reward_mean"] = float(
+                    rewards.mean().detach()
+                )
+                strategy_metrics["reward/effective_reward_mean"] = float(
+                    effective_rewards.mean().detach()
+                )
         return trace, rewards, advantages, strategy_metrics
+
 
     @staticmethod
     def _clone_generator(
@@ -436,14 +379,14 @@ class GRPOTrainer:
         context: Any,
         generator: torch.Generator,
     ) -> Dict[str, float]:
-        """Same-noise current-vs-frozen task and constraint comparison."""
+        """Same-noise current-vs-frozen reward comparison on one live state."""
         self.reference_model.eval()
         with torch.no_grad():
             frozen_trace = self.reference_sampler.sample(
                 features,
                 generator=generator,
             )
-            frozen_rewards = self.score_candidates(
+            frozen_rewards = self.reward_adapter(
                 frozen_trace.candidates,
                 features=features,
                 context=context,
@@ -453,35 +396,6 @@ class GRPOTrainer:
                 - frozen_trace.candidates[..., :2],
                 dim=-1,
             ).mean()
-
-            # Constraint diagnostics are intentionally independent of task reward.
-            current_result = self.reward_adapter.evaluate_result(
-                trace.candidates,
-                features=features,
-                context=context,
-            )
-            frozen_result = self.reward_adapter.evaluate_result(
-                frozen_trace.candidates,
-                features=features,
-                context=context,
-            )
-            current_constraints = evaluate_w4_constraints(
-                current_result,
-                context=context,
-                device=trace.candidates.device,
-                dtype=trace.candidates.dtype,
-                names=self.config.constraint_names,
-                residual_cap=self.config.constraint_residual_cap,
-            )
-            frozen_constraints = evaluate_w4_constraints(
-                frozen_result,
-                context=context,
-                device=frozen_trace.candidates.device,
-                dtype=frozen_trace.candidates.dtype,
-                names=self.config.constraint_names,
-                residual_cap=self.config.constraint_residual_cap,
-            )
-
         metrics = self._paired_reward_metrics(
             current_rewards,
             frozen_rewards,
@@ -497,54 +411,7 @@ class GRPOTrainer:
                 features.get("mode_valid_mask"),
             )
         )
-
-        valid_mask = features.get("mode_valid_mask")
-        if valid_mask is None:
-            valid = torch.ones(
-                current_constraints.violation.shape[0],
-                current_constraints.violation.shape[2],
-                dtype=torch.bool,
-                device=current_constraints.violation.device,
-            )
-        else:
-            valid = valid_mask.to(
-                device=current_constraints.violation.device,
-                dtype=torch.bool,
-            )
-        expanded = valid[:, None, :, None].expand_as(current_constraints.violation)
-        denom = expanded.to(current_constraints.violation.dtype).sum().clamp_min(1.0)
-
-        def masked_mean(x: torch.Tensor) -> torch.Tensor:
-            if x.ndim == 3:
-                m = valid[:, None, :].expand_as(x)
-            elif x.ndim == 4:
-                m = expanded
-            else:
-                raise ValueError("constraint validation tensor must be rank 3 or 4")
-            return (x * m.to(x.dtype)).sum() / m.to(x.dtype).sum().clamp_min(1.0)
-
-        cur_feasible = masked_mean(current_constraints.feasible_mask.to(current_rewards.dtype))
-        ref_feasible = masked_mean(frozen_constraints.feasible_mask.to(current_rewards.dtype))
-        cur_max = masked_mean(current_constraints.violation.amax(dim=-1))
-        ref_max = masked_mean(frozen_constraints.violation.amax(dim=-1))
-        metrics.update(
-            {
-                "validation/current_constraint_feasible_fraction": float(cur_feasible.detach()),
-                "validation/frozen_constraint_feasible_fraction": float(ref_feasible.detach()),
-                "validation/constraint_feasible_fraction_gain": float((cur_feasible-ref_feasible).detach()),
-                "validation/current_constraint_max_violation_mean": float(cur_max.detach()),
-                "validation/frozen_constraint_max_violation_mean": float(ref_max.detach()),
-                "validation/constraint_max_violation_change": float((cur_max-ref_max).detach()),
-            }
-        )
-        for j, name in enumerate(current_constraints.names):
-            cur_v = masked_mean(current_constraints.violation[..., j])
-            ref_v = masked_mean(frozen_constraints.violation[..., j])
-            metrics[f"validation/current_constraint_{name}_violation_mean"] = float(cur_v.detach())
-            metrics[f"validation/frozen_constraint_{name}_violation_mean"] = float(ref_v.detach())
-            metrics[f"validation/constraint_{name}_violation_change"] = float((cur_v-ref_v).detach())
         return metrics
-
     @staticmethod
     def _reference_kl(new_log_prob: torch.Tensor, ref_log_prob: torch.Tensor) -> torch.Tensor:
         # k3 estimator from log-ratio; non-negative and zero when policies match.
@@ -687,5 +554,3 @@ class GRPOTrainer:
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
 
 # ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC
-
-# DECOUPLED_TASK_CONSTRAINT_V2_SEMANTIC

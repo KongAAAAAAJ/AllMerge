@@ -226,7 +226,7 @@ def _fixed_state_paired_validation(
                 features,
                 generator=current_generator,
             )
-            current_rewards = trainer.score_candidates(
+            current_rewards = trainer.reward_adapter(
                 current_trace.candidates,
                 features=features,
                 context=context,
@@ -287,28 +287,6 @@ def _fixed_state_paired_validation(
     role_gain_means = []
 
     selected_role_gain_means = []
-
-    constraint_keys = [
-        "validation/current_constraint_feasible_fraction",
-        "validation/frozen_constraint_feasible_fraction",
-        "validation/constraint_feasible_fraction_gain",
-        "validation/current_constraint_max_violation_mean",
-        "validation/frozen_constraint_max_violation_mean",
-        "validation/constraint_max_violation_change",
-    ]
-    for name in trainer.config.constraint_names:
-        constraint_keys.extend(
-            [
-                f"validation/current_constraint_{name}_violation_mean",
-                f"validation/frozen_constraint_{name}_violation_mean",
-                f"validation/constraint_{name}_violation_change",
-            ]
-        )
-    for key in constraint_keys:
-        values = array(key)
-        suffix = key.removeprefix("validation/")
-        result[f"fixed_validation/{suffix}_mean"] = float(values.mean())
-
 
     for role in range(3):
 
@@ -458,15 +436,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--update-epochs", type=int, default=2)
     parser.add_argument(
-        "--task-reward-type",
-        choices=("legacy_w4", "progress_comfort"),
-        default="legacy_w4",
-        help=(
-            "task objective; progress_comfort removes collision/road/TTC/gap "
-            "terms so safety is handled only by constraints"
-        ),
-    )
-    parser.add_argument(
         "--constraint-strategy",
         choices=("none", "lagrangian", "hard_worst", "soft_active"),
         default="none",
@@ -591,7 +560,6 @@ def _build_trainer(args: argparse.Namespace):
             kl_coef=args.kl_coef,
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
-            task_reward_type=args.task_reward_type,
             constraint_strategy=args.constraint_strategy,
             constraint_names=constraint_names,
             constraint_residual_cap=args.constraint_residual_cap,
@@ -607,7 +575,6 @@ def _build_trainer(args: argparse.Namespace):
     )
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
-    print(f"[grpo] task_reward_type={args.task_reward_type}")
     print(
         f"[grpo] constraint_strategy={args.constraint_strategy} "
         f"constraints={constraint_names}"
@@ -749,10 +716,6 @@ def main() -> int:
             "constrained GRPO requires the production W4 reward evaluator; "
             "--fake-reward only supports --constraint-strategy none"
         )
-    if args.fake_reward and args.task_reward_type != "legacy_w4":
-        raise SystemExit(
-            "--task-reward-type progress_comfort requires the production W4 evaluator"
-        )
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -785,5 +748,3 @@ if __name__ == "__main__":
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC
 
 # ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC
-
-# DECOUPLED_TASK_CONSTRAINT_V2_SEMANTIC
