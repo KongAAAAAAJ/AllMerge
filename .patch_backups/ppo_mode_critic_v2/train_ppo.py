@@ -435,7 +435,7 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
             f"is not near zero: {selected_gain:.9g}"
         )
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="AllMerge PPO V2 mode-conditioned value trainer")
+    parser = argparse.ArgumentParser(description="AllMerge PPO value-baseline trainer")
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument(
         "--dataset-shard",
@@ -771,7 +771,7 @@ def main() -> int:
     torch.manual_seed(args.seed)
     if args.constraint_strategy != "none":
         raise SystemExit(
-            "PPO V2 only supports --constraint-strategy none; first isolate "
+            "PPO V1 only supports --constraint-strategy none; first isolate "
             "value-baseline PPO vs group-relative GRPO."
         )
     if torch.cuda.is_available():
