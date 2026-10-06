@@ -108,13 +108,25 @@ class GRPOTrainer:
         if self.config.active_support_margin < 0.0:
             raise ValueError("active_support_margin must be >= 0")
         self._configure_trainable_parameters()
-        parameters = [p for p in self.model.parameters() if p.requires_grad]
+        parameters = tuple(p for p in self.model.parameters() if p.requires_grad)
         if not parameters:
             raise RuntimeError("GRPO has no trainable parameters after freezing")
+        self._trainable_parameters = parameters
         self.optimizer = torch.optim.AdamW(parameters, lr=self.config.learning_rate)
 
         self.reference_model = copy.deepcopy(self.model).eval()
         self.reference_model.requires_grad_(False)
+        self._model_gru_modules = tuple(
+            module for module in self.model.modules()
+            if isinstance(module, torch.nn.GRU)
+        )
+        self._reference_gru_modules = tuple(
+            module for module in self.reference_model.modules()
+            if isinstance(module, torch.nn.GRU)
+        )
+        self._flatten_gru_parameters(self._model_gru_modules)
+        self._flatten_gru_parameters(self._reference_gru_modules)
+        # GRPO_SPEED_V1_ZERO_SEMANTIC_20261005
         self.sampler = GroupDiffusionSampler(
             self.model,
             group_size=self.config.group_size,
@@ -164,15 +176,21 @@ class GRPOTrainer:
                 f"{self.config.trainable_prefixes}. Check current StructuredDiffusionPlanner names."
             )
 
+    @staticmethod
+    def _flatten_gru_parameters(modules: Iterable[torch.nn.GRU]) -> None:
+        for module in modules:
+            module.flatten_parameters()
+
     @property
     def trainable_parameter_count(self) -> int:
-        return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        return sum(p.numel() for p in self._trainable_parameters)
 
     def refresh_reference(self) -> None:
         """Explicit reference refresh; never called implicitly during an update."""
         self.reference_model.load_state_dict(self.model.state_dict())
         self.reference_model.eval()
         self.reference_model.requires_grad_(False)
+        self._flatten_gru_parameters(self._reference_gru_modules)
 
     def score_candidates(
         self,
@@ -557,6 +575,7 @@ class GRPOTrainer:
         advantages: torch.Tensor,
         *,
         valid_mask: torch.Tensor | None = None,
+        reference_log_prob: torch.Tensor | None = None,
     ) -> Dict[str, float]:
         # Keep the full planner in eval mode so Transformer/MLP dropout
         # stays disabled and diffusion replay remains deterministic.
@@ -565,16 +584,12 @@ class GRPOTrainer:
         # training mode. The refinement GRU has num_layers=1 and no
         # internal dropout, so enabling train mode only for nn.GRU
         # preserves deterministic replay semantics.
-        for module in self.model.modules():
-            if isinstance(module, torch.nn.GRU):
-                module.train()
-                module.flatten_parameters()
+        for module in self._model_gru_modules:
+            module.train()
+            module.flatten_parameters()
         # GRPO_CUDNN_GRU_BACKWARD_FIX_V1
         self.optimizer.zero_grad(set_to_none=True)
-        trainable_params = [
-            p for p in self.model.parameters()
-            if p.requires_grad
-        ]
+        trainable_params = self._trainable_parameters
         before_update = [
             p.detach().clone() for p in trainable_params
         ]
@@ -587,15 +602,20 @@ class GRPOTrainer:
             valid_mask=valid_mask,
         )
 
-        with torch.no_grad():
-            ref_log_prob = self.sampler.replay(trace, model=self.reference_model)
+        if reference_log_prob is None:
+            with torch.no_grad():
+                ref_log_prob = self.sampler.replay(
+                    trace, model=self.reference_model
+                )
+        else:
+            ref_log_prob = reference_log_prob
         ref_kl = self._reference_kl(new_log_prob, ref_log_prob)
         loss = objective.policy_loss + self.config.kl_coef * ref_kl
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite GRPO loss")
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
-            [p for p in self.model.parameters() if p.requires_grad],
+            self._trainable_parameters,
             max_norm=self.config.max_grad_norm,
         )
         self.optimizer.step()
@@ -649,6 +669,15 @@ class GRPOTrainer:
                 context=context,
                 generator=paired_generator,
             )
+        reference_log_prob = None
+        if self.config.update_epochs > 1:
+            self.reference_model.eval()
+            self._flatten_gru_parameters(self._reference_gru_modules)
+            with torch.no_grad():
+                reference_log_prob = self.sampler.replay(
+                    trace, model=self.reference_model
+                )
+
         update_metrics = []
         for _ in range(self.config.update_epochs):
             update_metrics.append(
@@ -656,6 +685,7 @@ class GRPOTrainer:
                     trace,
                     advantages,
                     valid_mask=features.get("mode_valid_mask"),
+                    reference_log_prob=reference_log_prob,
                 )
             )
         metrics = dict(update_metrics[-1])
