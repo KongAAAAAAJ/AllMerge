@@ -130,68 +130,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
         denom = mask.sum().clamp_min(1)
         return (value * mask.to(value.dtype)).sum() / denom
 
-    # SAFEMPO_DIFF_KL_ANATOMY_DIAG_V1_20261007
-    @staticmethod
-    def _masked_bgm_mean(
-        value: torch.Tensor,
-        valid_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        # value [B,G,M]
-        if value.ndim != 3:
-            raise ValueError("SafeMPO diagnostic BGM tensor must be [B,G,M]")
-        if valid_mask is None:
-            return value.mean()
-        mask = valid_mask[:, None, :].to(device=value.device, dtype=torch.bool)
-        mask = mask.expand_as(value)
-        denom = mask.sum().clamp_min(1)
-        return (value * mask.to(value.dtype)).sum() / denom
-
-    @classmethod
-    def _masked_bgm_rms(
-        cls,
-        value: torch.Tensor,
-        valid_mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        return torch.sqrt(
-            cls._masked_bgm_mean(value.float().square(), valid_mask).clamp_min(0.0)
-        )
-
-    @staticmethod
-    def _gradient_pair_metrics(
-        loss_a: torch.Tensor,
-        loss_b: torch.Tensor,
-        params,
-        *,
-        weight_b: float,
-    ):
-        # Diagnostic-only autograd. autograd.grad does not populate parameter .grad.
-        grads_a = torch.autograd.grad(
-            loss_a, params, retain_graph=True, allow_unused=True
-        )
-        grads_b = torch.autograd.grad(
-            loss_b, params, retain_graph=True, allow_unused=True
-        )
-        device = params[0].device
-        sq_a = torch.zeros((), device=device, dtype=torch.float32)
-        sq_b = torch.zeros((), device=device, dtype=torch.float32)
-        dot = torch.zeros((), device=device, dtype=torch.float32)
-        for ga, gb in zip(grads_a, grads_b):
-            if ga is not None:
-                sq_a = sq_a + ga.detach().float().square().sum()
-            if gb is not None:
-                sq_b = sq_b + gb.detach().float().square().sum()
-            if ga is not None and gb is not None:
-                dot = dot + (ga.detach().float() * gb.detach().float()).sum()
-        norm_a = torch.sqrt(sq_a.clamp_min(0.0))
-        norm_b = torch.sqrt(sq_b.clamp_min(0.0))
-        denom = (norm_a * norm_b).clamp_min(1e-20)
-        cosine = torch.where(
-            (norm_a > 0.0) & (norm_b > 0.0), dot / denom, torch.zeros_like(dot)
-        )
-        weighted_b = abs(float(weight_b)) * norm_b
-        ratio = norm_a / weighted_b.clamp_min(1e-20)
-        return norm_a, norm_b, weighted_b, cosine, ratio
-
     def collect_safempo(
         self,
         features: Dict[str, torch.Tensor],
@@ -317,46 +255,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
         else:
             ref_log_prob = reference_log_prob
         ref_kl = self._reference_kl(new_log_prob, ref_log_prob)
-
-        # SAFEMPO_DIFF_KL_ANATOMY_DIAG_V1_20261007: diagnostic-only KL anatomy. None of these tensors enters loss.
-        # z_g = sum_t log(pi_theta/pi_old) is the full sampled reverse-chain
-        # trajectory log-ratio. q/p categorical distillation is invariant to a
-        # per-(B,M) common shift of z across G, so we explicitly measure that
-        # null-space component and the within-group relative component.
-        z = trajectory_log_ratio
-        z_mean = self._masked_bgm_mean(z, valid_mask)
-        z_centered_global = z - z_mean
-        z_std = self._masked_bgm_rms(z_centered_global, valid_mask)
-        z_group_mean = z.mean(dim=1)  # [B,M], exact softmax common-shift component
-        z_group_mean_abs = self._masked_vm_mean(z_group_mean.abs(), valid_mask)
-        z_within = z - z_group_mean[:, None, :]
-        z_within_rms = self._masked_bgm_rms(z_within, valid_mask)
-
-        # Samples are drawn from pi_old. For z=log(pi_new/pi_old),
-        # E_old[exp(z)-1-z] is the non-negative k3 estimator of KL(pi_old||pi_new)
-        # at the full trajectory/reverse-chain level.
-        local_chain_k3_tensor = torch.exp(z) - 1.0 - z
-        local_chain_kl = self._masked_bgm_mean(local_chain_k3_tensor, valid_mask)
-
-        # The frozen anchor is not the proposal distribution for this trace, so
-        # this is deliberately labeled a proxy rather than an exact anchor KL.
-        anchor_z = (new_log_prob - ref_log_prob).sum(dim=2)
-        anchor_chain_k3_proxy = self._masked_bgm_mean(
-            torch.exp(anchor_z) - 1.0 - anchor_z, valid_mask
-        )
-        anchor_z_mean = self._masked_bgm_mean(anchor_z, valid_mask)
-        anchor_z_group_mean = anchor_z.mean(dim=1)
-        anchor_z_group_mean_abs = self._masked_vm_mean(
-            anchor_z_group_mean.abs(), valid_mask
-        )
-
-        distill_grad_norm, anchor_grad_norm, weighted_anchor_grad_norm, \
-            distill_anchor_grad_cosine, distill_to_weighted_anchor_grad_ratio = \
-            self._gradient_pair_metrics(
-                distill_kl, ref_kl, trainable_params,
-                weight_b=float(self.config.kl_coef),
-            )
-
         loss = distill_kl + float(self.config.kl_coef) * ref_kl
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite SafeMPO-Diff loss")
@@ -415,22 +313,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
             "safempo/distill_kl": float(distill_kl.detach()),
             "safempo/student_old_particle_kl": float(student_old_kl.detach()),
             "safempo/student_target_l1": float(target_l1.detach()),
-            # SAFEMPO_DIFF_KL_ANATOMY_DIAG_V1_20261007: zero-semantic diagnostic fields.
-            "safempo_diag/local_chain_kl_old_new": float(local_chain_kl.detach()),
-            "safempo_diag/particle_log_ratio_mean": float(z_mean.detach()),
-            "safempo_diag/particle_log_ratio_std": float(z_std.detach()),
-            "safempo_diag/group_common_shift_abs": float(z_group_mean_abs.detach()),
-            "safempo_diag/within_group_log_ratio_rms": float(z_within_rms.detach()),
-            "safempo_diag/anchor_chain_k3_proxy": float(anchor_chain_k3_proxy.detach()),
-            "safempo_diag/anchor_log_ratio_mean": float(anchor_z_mean.detach()),
-            "safempo_diag/anchor_group_common_shift_abs": float(anchor_z_group_mean_abs.detach()),
-            "safempo_diag/distill_grad_norm": float(distill_grad_norm.detach()),
-            "safempo_diag/anchor_grad_norm": float(anchor_grad_norm.detach()),
-            "safempo_diag/weighted_anchor_grad_norm": float(weighted_anchor_grad_norm.detach()),
-            "safempo_diag/distill_anchor_grad_cosine": float(distill_anchor_grad_cosine.detach()),
-            "safempo_diag/distill_to_weighted_anchor_grad_ratio": float(
-                distill_to_weighted_anchor_grad_ratio.detach()
-            ),
         }
 
     def train_step(
@@ -480,28 +362,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
             )
 
         metrics = dict(update_metrics[-1])
-        # SAFEMPO_DIFF_KL_ANATOMY_DIAG_V1_20261007: expose inner M-step anatomy without altering updates.
-        diag_keys = (
-            "safempo_diag/local_chain_kl_old_new",
-            "safempo_diag/particle_log_ratio_mean",
-            "safempo_diag/group_common_shift_abs",
-            "safempo_diag/within_group_log_ratio_rms",
-            "safempo_diag/distill_grad_norm",
-            "safempo_diag/weighted_anchor_grad_norm",
-            "safempo_diag/distill_anchor_grad_cosine",
-        )
-        for epoch_index, epoch_metrics in enumerate(update_metrics, start=1):
-            for key in diag_keys:
-                short = key.removeprefix("safempo_diag/")
-                metrics[f"safempo_diag/epoch{epoch_index}_{short}"] = float(
-                    epoch_metrics[key]
-                )
-        metrics["safempo_diag/local_chain_kl_max"] = max(
-            float(m["safempo_diag/local_chain_kl_old_new"]) for m in update_metrics
-        )
-        metrics["safempo_diag/group_common_shift_abs_max"] = max(
-            float(m["safempo_diag/group_common_shift_abs"]) for m in update_metrics
-        )
         metrics.update(
             update_epochs=float(self.config.update_epochs),
             epoch1_ratio_mean=float(update_metrics[0]["ratio_mean"]),
