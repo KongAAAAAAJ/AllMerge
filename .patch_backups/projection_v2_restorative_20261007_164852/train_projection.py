@@ -438,7 +438,7 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
             f"is not near zero: {selected_gain:.9g}"
         )
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="AllMerge restorative-projection constrained GRPO trainer")
+    parser = argparse.ArgumentParser(description="AllMerge projection-based constrained GRPO trainer")
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument(
         "--dataset-shard",
@@ -466,14 +466,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--projection-q-low", type=float, default=0.05)
     parser.add_argument("--projection-q-high", type=float, default=0.95)
     parser.add_argument("--projection-active-threshold", type=float, default=0.0)
-    parser.add_argument("--projection-passes", type=int, default=16)
-    parser.add_argument("--projection-tolerance", type=float, default=1e-6)
-    parser.add_argument("--projection-restoration-strength", type=float, default=0.25)
-    parser.add_argument("--projection-restoration-scale-beta", type=float, default=0.95)
-    parser.add_argument("--projection-restoration-scale-floor", type=float, default=0.10)
-    parser.add_argument("--projection-restoration-pressure-clip", type=float, default=1.0)
-    parser.add_argument("--projection-margin-backoff-factor", type=float, default=0.5)
-    parser.add_argument("--projection-margin-backoff-steps", type=int, default=4)
+    parser.add_argument("--projection-passes", type=int, default=8)
+    parser.add_argument("--projection-tolerance", type=float, default=1e-7)
     parser.add_argument(
         "--task-reward-type",
         choices=("legacy_w4", "progress_comfort"),
@@ -614,12 +608,6 @@ def _build_trainer(args: argparse.Namespace):
             projection_active_threshold=args.projection_active_threshold,
             projection_passes=args.projection_passes,
             projection_tolerance=args.projection_tolerance,
-            projection_restoration_strength=args.projection_restoration_strength,
-            projection_restoration_scale_beta=args.projection_restoration_scale_beta,
-            projection_restoration_scale_floor=args.projection_restoration_scale_floor,
-            projection_restoration_pressure_clip=args.projection_restoration_pressure_clip,
-            projection_margin_backoff_factor=args.projection_margin_backoff_factor,
-            projection_margin_backoff_steps=args.projection_margin_backoff_steps,
             task_reward_type=args.task_reward_type,
             constraint_strategy=args.constraint_strategy,
             constraint_names=constraint_names,
@@ -638,10 +626,9 @@ def _build_trainer(args: argparse.Namespace):
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
     print(f"[grpo] task_reward_type={args.task_reward_type}")
     print(
-        "[projection] V2 restorative "
-        f"strength={args.projection_restoration_strength} "
-        f"passes={args.projection_passes} "
-        f"backoff={args.projection_margin_backoff_factor}x{args.projection_margin_backoff_steps} "
+        "[projection] V1.3 latest-code aligned " 
+        f"passes={args.projection_passes} " 
+        f"active_threshold={args.projection_active_threshold} " 
         f"Q={args.projection_q_low:.2f}/{args.projection_q_high:.2f}"
     )
     print(
