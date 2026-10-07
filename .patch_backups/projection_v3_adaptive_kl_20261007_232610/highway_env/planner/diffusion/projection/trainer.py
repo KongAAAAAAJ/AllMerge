@@ -2,7 +2,6 @@ from __future__ import annotations
 
 # GRPO_PROJECTION_V2_RESTORATIVE_20261007
 # GRPO_PROJECTION_V2_1_DYKSTRA_RESCUE_20261007
-# GRPO_PROJECTION_V3_ADAPTIVE_KL_20261007
 
 from dataclasses import dataclass
 from typing import Dict
@@ -32,12 +31,6 @@ class ProjectionConfig(GRPOConfig):
     projection_restoration_pressure_clip: float = 1.0
     projection_margin_backoff_factor: float = 0.5
     projection_margin_backoff_steps: int = 4
-    projection_reference_kl_mode: str = "fixed"
-    projection_reference_kl_target: float = 0.15
-    projection_reference_kl_beta_min: float = 0.005
-    projection_reference_kl_beta_max: float = 0.5
-    projection_reference_kl_adapt_factor: float = 1.5
-    projection_reference_kl_window: int = 10
 
     def validate_projection(self) -> None:
         if not 0.0 <= self.projection_advantage_beta < 1.0:
@@ -62,37 +55,6 @@ class ProjectionConfig(GRPOConfig):
             raise ValueError("projection_margin_backoff_factor must be in (0,1)")
         if self.projection_margin_backoff_steps < 0:
             raise ValueError("projection_margin_backoff_steps must be >= 0")
-        mode = str(self.projection_reference_kl_mode).lower()
-        if mode not in {"fixed", "adaptive"}:
-            raise ValueError(
-                "projection_reference_kl_mode must be 'fixed' or 'adaptive'"
-            )
-        self.projection_reference_kl_mode = mode
-        if self.projection_reference_kl_target <= 0.0:
-            raise ValueError("projection_reference_kl_target must be > 0")
-        if self.projection_reference_kl_beta_min <= 0.0:
-            raise ValueError("projection_reference_kl_beta_min must be > 0")
-        if (
-            self.projection_reference_kl_beta_max
-            < self.projection_reference_kl_beta_min
-        ):
-            raise ValueError(
-                "projection_reference_kl_beta_max must be >= beta_min"
-            )
-        if self.projection_reference_kl_adapt_factor <= 1.0:
-            raise ValueError(
-                "projection_reference_kl_adapt_factor must be > 1"
-            )
-        if self.projection_reference_kl_window < 1:
-            raise ValueError("projection_reference_kl_window must be >= 1")
-        if mode == "adaptive" and not (
-            self.projection_reference_kl_beta_min
-            <= float(self.kl_coef)
-            <= self.projection_reference_kl_beta_max
-        ):
-            raise ValueError(
-                "kl_coef is beta_init and must lie inside adaptive beta bounds"
-            )
 
 
 class _PerChannelQClipScaler:
@@ -248,90 +210,10 @@ class ProjectionTrainer(GRPOTrainer):
             None for _ in self.config.constraint_names
         ]
         self._projection_epoch_stats: list[dict[str, float]] = []
-        self._projection_reference_kl_beta = float(self.config.kl_coef)
-        self._projection_reference_kl_history: list[float] = []
 
     @staticmethod
     def _ema(old: float | None, new: float, beta: float) -> float:
         return float(new) if old is None else float(beta * old + (1.0 - beta) * new)
-
-    def _projection_reference_kl_beta_for_loss(self) -> float:
-        if self.config.projection_reference_kl_mode == "fixed":
-            return float(self.config.kl_coef)
-        return float(self._projection_reference_kl_beta)
-
-    def _projection_reference_kl_control(
-        self,
-        reference_kl: float,
-    ) -> tuple[float, int]:
-        value = float(reference_kl)
-        self._projection_reference_kl_history.append(value)
-        window = int(self.config.projection_reference_kl_window)
-        if len(self._projection_reference_kl_history) > window:
-            self._projection_reference_kl_history = (
-                self._projection_reference_kl_history[-window:]
-            )
-        rolling = float(
-            sum(self._projection_reference_kl_history)
-            / len(self._projection_reference_kl_history)
-        )
-
-        if (
-            self.config.projection_reference_kl_mode != "adaptive"
-            or len(self._projection_reference_kl_history) < window
-        ):
-            return rolling, 0
-
-        target = float(self.config.projection_reference_kl_target)
-        factor = float(self.config.projection_reference_kl_adapt_factor)
-        old_beta = float(self._projection_reference_kl_beta)
-        new_beta = old_beta
-
-        if rolling > target * factor:
-            new_beta = min(
-                old_beta * factor,
-                float(self.config.projection_reference_kl_beta_max),
-            )
-        elif rolling < target / factor:
-            new_beta = max(
-                old_beta / factor,
-                float(self.config.projection_reference_kl_beta_min),
-            )
-
-        self._projection_reference_kl_beta = float(new_beta)
-        if new_beta > old_beta:
-            return rolling, 1
-        if new_beta < old_beta:
-            return rolling, -1
-        return rolling, 0
-
-    def train_step(self, *args, **kwargs) -> Dict[str, float]:
-        # Freeze one beta across all replay/update epochs of this train step.
-        beta_used = self._projection_reference_kl_beta_for_loss()
-        metrics = super().train_step(*args, **kwargs)
-
-        reference_kl = float(metrics["reference_kl"])
-        rolling, event = self._projection_reference_kl_control(reference_kl)
-
-        target = float(self.config.projection_reference_kl_target)
-        factor = float(self.config.projection_reference_kl_adapt_factor)
-        metrics.update(
-            {
-                "diagnostics/reference_kl_beta_used": float(beta_used),
-                "diagnostics/reference_kl_beta": float(
-                    self._projection_reference_kl_beta_for_loss()
-                ),
-                "diagnostics/reference_kl_target": target,
-                "diagnostics/reference_kl_lower": target / factor,
-                "diagnostics/reference_kl_upper": target * factor,
-                "diagnostics/reference_kl_rolling_mean": float(rolling),
-                "diagnostics/reference_kl_window_count": float(
-                    len(self._projection_reference_kl_history)
-                ),
-                "diagnostics/reference_kl_adapt_event": float(event),
-            }
-        )
-        return metrics
 
     @staticmethod
     def _expanded_mask(
@@ -868,9 +750,8 @@ class ProjectionTrainer(GRPOTrainer):
         self._require_finite("reference_log_prob", ref_log_prob)
 
         ref_kl = self._reference_kl(new_log_prob, ref_log_prob)
-        reference_kl_beta_used = self._projection_reference_kl_beta_for_loss()
         preferred_loss = (
-            task_objective.policy_loss + reference_kl_beta_used * ref_kl
+            task_objective.policy_loss + float(self.config.kl_coef) * ref_kl
         )
         if not bool(torch.isfinite(preferred_loss)):
             raise FloatingPointError("non-finite preferred task+KL loss")
@@ -1013,7 +894,6 @@ class ProjectionTrainer(GRPOTrainer):
             "loss": float(preferred_loss.detach().cpu()),
             "policy_loss": float(task_objective.policy_loss.detach().cpu()),
             "reference_kl": float(ref_kl.detach().cpu()),
-            "projection/reference_kl_beta_used": float(reference_kl_beta_used),
             "approx_kl": float(task_objective.approx_kl.detach().cpu()),
             "clip_fraction": float(task_objective.clip_fraction.detach().cpu()),
             "ratio_mean": float(task_objective.ratio_mean.detach().cpu()),
@@ -1097,16 +977,6 @@ class ProjectionTrainer(GRPOTrainer):
             "strategy": "projection_v2_restorative",
             "constraint_names": tuple(self.config.constraint_names),
             "restoration_scale_ema": tuple(self._projection_restoration_scale_ema),
-            "reference_kl_controller": {
-                "mode": self.config.projection_reference_kl_mode,
-                "beta": float(self._projection_reference_kl_beta),
-                "target": self.config.projection_reference_kl_target,
-                "beta_min": self.config.projection_reference_kl_beta_min,
-                "beta_max": self.config.projection_reference_kl_beta_max,
-                "adapt_factor": self.config.projection_reference_kl_adapt_factor,
-                "window": self.config.projection_reference_kl_window,
-                "history": tuple(self._projection_reference_kl_history),
-            },
             "projection": {
                 "advantage_beta": self.config.projection_advantage_beta,
                 "q_low": self.config.projection_q_low,
