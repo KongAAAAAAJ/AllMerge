@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # GRPO_PROJECTION_V2_RESTORATIVE_20261007
-# GRPO_PROJECTION_V2_1_DYKSTRA_RESCUE_20261007
 
 from dataclasses import dataclass
 from typing import Dict
@@ -327,7 +326,6 @@ class ProjectionTrainer(GRPOTrainer):
         margins: list[float],
         *,
         radius: float,
-        max_passes: int | None = None,
     ) -> tuple[torch.Tensor, Dict[str, float]]:
         if len(normals) != len(margins):
             raise ValueError("normal/margin count mismatch")
@@ -343,13 +341,7 @@ class ProjectionTrainer(GRPOTrainer):
         passes_used = 0
         converged = False
 
-        pass_limit = int(
-            self.config.projection_passes if max_passes is None else max_passes
-        )
-        if pass_limit <= 0:
-            raise ValueError("Dykstra max_passes must be positive")
-
-        for pass_index in range(pass_limit):
+        for pass_index in range(int(self.config.projection_passes)):
             for index, (normal, margin) in enumerate(zip(normals, margins)):
                 y = x + corrections[index]
                 dot = torch.dot(normal, y)
@@ -430,8 +422,6 @@ class ProjectionTrainer(GRPOTrainer):
                 "min_margin_residual_after": 0.0,
                 "projected_grad_norm": float(preferred.norm().detach().cpu()),
                 "hard_feasible": 1.0,
-                "solver_rescue_passes": 0.0,
-                "exact_zero_fallback": 0.0,
             }, normals, []
 
         radius = float(self.config.max_grad_norm)
@@ -444,7 +434,6 @@ class ProjectionTrainer(GRPOTrainer):
         factor = float(self.config.projection_margin_backoff_factor)
         attempts = int(self.config.projection_margin_backoff_steps)
         selected = None
-        exact_zero_fallback = False
 
         for backoff_count in range(attempts + 1):
             margin_scale = factor ** backoff_count
@@ -467,64 +456,19 @@ class ProjectionTrainer(GRPOTrainer):
                 break
 
         if selected is None:
-            # Numerical-rescue stage. A narrow feasible intersection can need
-            # many more cyclic Dykstra passes than the normal fast path.
-            # Retry the smallest positive margin using a larger pass budget
-            # before dropping the restoration margin.
-            rescue_passes = max(128, int(self.config.projection_passes) * 8)
-            margin_scale = factor ** attempts
-            margins = [margin_scale * value for value in base_margins]
-            candidate, diag = self._dykstra_shifted_halfspaces_ball_once(
-                preferred,
-                normals,
-                margins,
-                radius=radius,
-                max_passes=rescue_passes,
-            )
-            if bool(diag["converged"]):
-                selected = (
-                    candidate,
-                    diag,
-                    margins,
-                    margin_scale,
-                    attempts,
-                    False,
-                )
-
-        if selected is None:
-            # Guaranteed-feasible zero-margin fallback. Retry the same
-            # zero-margin mathematical problem with the larger numerical
-            # pass budget.
+            # Guaranteed-feasible fallback: zero-margin cone contains g=0.
             margins = [0.0 for _ in base_margins]
             candidate, diag = self._dykstra_shifted_halfspaces_ball_once(
                 preferred,
                 normals,
                 margins,
                 radius=radius,
-                max_passes=rescue_passes,
             )
             if not bool(diag["converged"]):
-                # The zero-margin cone and the L2 ball both contain g=0.
-                # If cyclic Dykstra still misses tolerance because of nearly
-                # opposing normals, use that analytically exact feasible point.
-                # It remains explicitly logged as a zero-margin fallback.
-                candidate = torch.zeros_like(preferred)
-                diag = {
-                    "passes_used": float(rescue_passes),
-                    "converged": 1.0,
-                    "min_margin_residual_after": 0.0,
-                    "norm_after": 0.0,
-                    "ball_excess_after": 0.0,
-                }
-                exact_zero_fallback = True
-            selected = (
-                candidate,
-                diag,
-                margins,
-                0.0,
-                attempts + 1,
-                True,
-            )
+                raise RuntimeError(
+                    "Dykstra failed even for the guaranteed-feasible zero-margin cone"
+                )
+            selected = (candidate, diag, margins, 0.0, attempts + 1, True)
 
         x, diag, margins, margin_scale, backoff_count, fallback = selected
         before_residuals = [
@@ -556,14 +500,6 @@ class ProjectionTrainer(GRPOTrainer):
             "min_margin_residual_after": min(after_residuals),
             "projected_grad_norm": float(x.norm().detach().cpu()),
             "hard_feasible": float(violated_after == 0),
-            "solver_rescue_passes": float(
-                max(
-                    0.0,
-                    float(diag["passes_used"])
-                    - float(self.config.projection_passes),
-                )
-            ),
-            "exact_zero_fallback": float(exact_zero_fallback),
         }
         return x, result, normals, margins
 
@@ -884,8 +820,6 @@ class ProjectionTrainer(GRPOTrainer):
             "margin_scale_used": float(proj_diag["margin_scale_used"]),
             "min_margin_residual_after": float(proj_diag["min_margin_residual_after"]),
             "fallback_zero_margin": float(proj_diag["fallback_zero_margin"]),
-            "solver_rescue_passes": float(proj_diag["solver_rescue_passes"]),
-            "exact_zero_fallback": float(proj_diag["exact_zero_fallback"]),
         }
         self._projection_epoch_stats.append(epoch_stat)
         stats = self._projection_epoch_stats
@@ -931,12 +865,6 @@ class ProjectionTrainer(GRPOTrainer):
                 proj_diag["min_margin_residual_after"]
             ),
             "projection/hard_feasible": float(proj_diag["hard_feasible"]),
-            "projection/solver_rescue_passes": float(
-                proj_diag["solver_rescue_passes"]
-            ),
-            "projection/exact_zero_fallback": float(
-                proj_diag["exact_zero_fallback"]
-            ),
             "projection/collect_update_count": float(len(stats)),
             "projection/collect_correction_epoch_count": float(
                 sum(s["correction_ratio"] > 1e-7 for s in stats)
@@ -961,12 +889,6 @@ class ProjectionTrainer(GRPOTrainer):
             ),
             "projection/collect_any_zero_margin_fallback": float(
                 any(s["fallback_zero_margin"] > 0.5 for s in stats)
-            ),
-            "projection/collect_any_solver_rescue": float(
-                any(s["solver_rescue_passes"] > 0.5 for s in stats)
-            ),
-            "projection/collect_any_exact_zero_fallback": float(
-                any(s["exact_zero_fallback"] > 0.5 for s in stats)
             ),
         }
         metrics.update(gradient_metrics)
