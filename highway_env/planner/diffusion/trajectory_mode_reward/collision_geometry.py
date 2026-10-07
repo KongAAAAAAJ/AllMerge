@@ -180,3 +180,103 @@ def obb_overlap_series(
         )
 
     return bool(np.any(~separated))
+
+# GRPO_SPEED_V2B_BATCH_GEOMETRY_20261007
+
+def _broadcast_pose_batch(values: np.ndarray, groups: int) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim == 2 and array.shape[1] == 3:
+        return np.broadcast_to(array[None], (groups, *array.shape))
+    if array.ndim == 3 and array.shape[0] == groups and array.shape[2] == 3:
+        return array
+    raise ValueError("OBB batch trajectories must be [N,3] or [G,N,3]")
+
+
+def shared_corridor_gap_series_batch(
+    first: np.ndarray,
+    first_dimensions: tuple[float, float],
+    second: np.ndarray,
+    second_dimensions: tuple[float, float],
+    *,
+    no_risk_gap_m: float,
+) -> np.ndarray:
+    """G-batched equivalent of shared_corridor_gap_series."""
+    first_values = np.asarray(first, dtype=np.float64)
+    if first_values.ndim != 3 or first_values.shape[2] != 3 or not np.isfinite(first_values).all():
+        raise ValueError("first OBB trajectories must be finite [G,N,3]")
+    second_values = _broadcast_pose_batch(second, first_values.shape[0])
+    if second_values.shape != first_values.shape or not np.isfinite(second_values).all():
+        raise ValueError("OBB batch trajectories must have matching shapes")
+    first_size = np.asarray(first_dimensions, dtype=np.float64)
+    second_size = np.asarray(second_dimensions, dtype=np.float64)
+    if (
+        first_size.shape != (2,) or second_size.shape != (2,)
+        or not np.isfinite(first_size).all() or not np.isfinite(second_size).all()
+        or np.any(first_size <= 0.0) or np.any(second_size <= 0.0)
+    ):
+        raise ValueError("OBB dimensions must be positive finite (length,width)")
+    sentinel = float(no_risk_gap_m)
+    if not np.isfinite(sentinel) or sentinel <= 0.0:
+        raise ValueError("no_risk_gap_m must be positive and finite")
+    forward = np.stack((np.cos(first_values[..., 2]), np.sin(first_values[..., 2])), axis=-1)
+    lateral_axis = np.stack((-forward[..., 1], forward[..., 0]), axis=-1)
+    delta = second_values[..., :2] - first_values[..., :2]
+    longitudinal = np.abs(np.sum(delta * forward, axis=-1))
+    lateral = np.abs(np.sum(delta * lateral_axis, axis=-1))
+    relative_heading = second_values[..., 2] - first_values[..., 2]
+    cosine = np.abs(np.cos(relative_heading))
+    sine = np.abs(np.sin(relative_heading))
+    first_longitudinal_support = 0.5 * first_size[0]
+    first_lateral_support = 0.5 * first_size[1]
+    second_longitudinal_support = 0.5 * second_size[0] * cosine + 0.5 * second_size[1] * sine
+    second_lateral_support = 0.5 * second_size[0] * sine + 0.5 * second_size[1] * cosine
+    same_corridor = lateral <= first_lateral_support + second_lateral_support + 1e-6
+    bumper = longitudinal - first_longitudinal_support - second_longitudinal_support
+    return np.ascontiguousarray(np.where(same_corridor, bumper, sentinel), dtype=np.float64)
+
+
+def obb_overlap_series_batch(
+    first: np.ndarray,
+    first_dimensions: tuple[float, float],
+    second: np.ndarray,
+    second_dimensions: tuple[float, float],
+    margin_m,
+) -> np.ndarray:
+    """Return [G] flags for synchronized batched OBB trajectories."""
+    first_values = np.asarray(first, dtype=np.float64)
+    if first_values.ndim != 3 or first_values.shape[2] != 3:
+        raise ValueError("first OBB trajectories must be [G,N,3]")
+    second_values = _broadcast_pose_batch(second, first_values.shape[0])
+    if second_values.shape != first_values.shape:
+        raise ValueError("OBB batch trajectories must have matching shapes")
+    groups, steps, _ = first_values.shape
+    margins = np.asarray(margin_m, dtype=np.float64)
+    if margins.ndim == 0:
+        margins = np.full((groups, steps, 2), float(margins), dtype=np.float64)
+    elif margins.shape == (steps,):
+        margins = np.broadcast_to(margins[None, :, None], (groups, steps, 2))
+    elif margins.shape == (groups, steps):
+        margins = np.repeat(margins[..., None], 2, axis=-1)
+    elif margins.shape == (steps, 2):
+        margins = np.broadcast_to(margins[None], (groups, steps, 2))
+    if margins.shape != (groups, steps, 2) or np.any(margins < 0.0):
+        raise ValueError("OBB batch margin has invalid shape/value")
+    first_half = np.asarray(first_dimensions, dtype=np.float64)[None, None, :] * 0.5 + margins
+    second_half = np.asarray(second_dimensions, dtype=np.float64)[None, None, :] * 0.5 + margins
+    first_long = np.stack((np.cos(first_values[..., 2]), np.sin(first_values[..., 2])), axis=-1)
+    first_lat = np.stack((-first_long[..., 1], first_long[..., 0]), axis=-1)
+    second_long = np.stack((np.cos(second_values[..., 2]), np.sin(second_values[..., 2])), axis=-1)
+    second_lat = np.stack((-second_long[..., 1], second_long[..., 0]), axis=-1)
+    delta = second_values[..., :2] - first_values[..., :2]
+    separated = np.zeros((groups, steps), dtype=np.bool_)
+    for axis in (first_long, first_lat, second_long, second_lat):
+        first_radius = (
+            first_half[..., 0] * np.abs(np.sum(first_long * axis, axis=-1))
+            + first_half[..., 1] * np.abs(np.sum(first_lat * axis, axis=-1))
+        )
+        second_radius = (
+            second_half[..., 0] * np.abs(np.sum(second_long * axis, axis=-1))
+            + second_half[..., 1] * np.abs(np.sum(second_lat * axis, axis=-1))
+        )
+        separated |= np.abs(np.sum(delta * axis, axis=-1)) > first_radius + second_radius
+    return np.any(~separated, axis=1)
