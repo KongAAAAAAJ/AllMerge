@@ -70,20 +70,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--safempo-dual-maxiter", type=int, default=128)
     p.add_argument("--safempo-dual-ftol", type=float, default=1e-9)
 
-    # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007: independent M-step switches.
-    p.add_argument("--safempo-local-trust-enabled", action="store_true")
-    p.add_argument("--safempo-local-kl-target", type=float, default=0.01)
-    p.add_argument("--safempo-local-dual-init", type=float, default=0.0)
-    p.add_argument("--safempo-local-dual-lr", type=float, default=25.0)
-    p.add_argument("--safempo-local-dual-min", type=float, default=0.0)
-    p.add_argument("--safempo-local-dual-max", type=float, default=10.0)
-    p.add_argument("--safempo-global-anchor-enabled", action="store_true")
-    p.add_argument("--safempo-global-kl-target", type=float, default=0.15)
-    p.add_argument("--safempo-global-dual-init", type=float, default=0.05)
-    p.add_argument("--safempo-global-dual-lr", type=float, default=2.0)
-    p.add_argument("--safempo-global-dual-min", type=float, default=0.05)
-    p.add_argument("--safempo-global-dual-max", type=float, default=5.0)
-
     p.add_argument("--fixed-validation-states", type=int, default=0)
     p.add_argument("--fixed-validation-interval", type=int, default=10)
     p.add_argument("--fixed-validation-seed-offset", type=int, default=10000)
@@ -144,19 +130,6 @@ def _build_trainer(args: argparse.Namespace):
             safempo_active_range_eps=args.safempo_active_range_eps,
             safempo_dual_maxiter=args.safempo_dual_maxiter,
             safempo_dual_ftol=args.safempo_dual_ftol,
-            # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-            safempo_local_trust_enabled=args.safempo_local_trust_enabled,
-            safempo_local_kl_target=args.safempo_local_kl_target,
-            safempo_local_dual_init=args.safempo_local_dual_init,
-            safempo_local_dual_lr=args.safempo_local_dual_lr,
-            safempo_local_dual_min=args.safempo_local_dual_min,
-            safempo_local_dual_max=args.safempo_local_dual_max,
-            safempo_global_anchor_enabled=args.safempo_global_anchor_enabled,
-            safempo_global_kl_target=args.safempo_global_kl_target,
-            safempo_global_dual_init=args.safempo_global_dual_init,
-            safempo_global_dual_lr=args.safempo_global_dual_lr,
-            safempo_global_dual_min=args.safempo_global_dual_min,
-            safempo_global_dual_max=args.safempo_global_dual_max,
         ),
     )
     print(f"[safempo-diff] trainable_params={trainer.trainable_parameter_count:,}")
@@ -179,15 +152,6 @@ def _build_trainer(args: argparse.Namespace):
         "[safempo-diff] M-step=KL(q*||p_theta,G) with "
         "p_theta=softmax(sum_reverse_steps(logp_new-logp_old)); "
         "PPO clip is not used"
-    )
-    # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-    print(
-        "[safempo-diff-v1.1] local_trust="
-        f"{int(args.safempo_local_trust_enabled)} target={args.safempo_local_kl_target:g} "
-        f"dual_init={args.safempo_local_dual_init:g} dual_lr={args.safempo_local_dual_lr:g}; "
-        "adaptive_global_anchor="
-        f"{int(args.safempo_global_anchor_enabled)} target={args.safempo_global_kl_target:g} "
-        f"dual_init={args.safempo_global_dual_init:g} dual_lr={args.safempo_global_dual_lr:g}"
     )
     return adapter, trainer, device
 

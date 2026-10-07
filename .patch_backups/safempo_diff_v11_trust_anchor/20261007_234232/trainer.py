@@ -32,21 +32,6 @@ class SafeMPODiffConfig(GRPOConfig):
     safempo_dual_maxiter: int = 128
     safempo_dual_ftol: float = 1e-9
 
-    # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007: independently switchable M-step stabilizers.
-    safempo_local_trust_enabled: bool = False
-    safempo_local_kl_target: float = 0.01
-    safempo_local_dual_init: float = 0.0
-    safempo_local_dual_lr: float = 25.0
-    safempo_local_dual_min: float = 0.0
-    safempo_local_dual_max: float = 10.0
-
-    safempo_global_anchor_enabled: bool = False
-    safempo_global_kl_target: float = 0.15
-    safempo_global_dual_init: float = 0.05
-    safempo_global_dual_lr: float = 2.0
-    safempo_global_dual_min: float = 0.05
-    safempo_global_dual_max: float = 5.0
-
 
 class SafeMPODiffTrainer(GRPOTrainer):
     """SafeMPO-Diff policy trainer.
@@ -81,17 +66,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
             )
         super().__init__(*args, config=cfg, **kwargs)
         self.config: SafeMPODiffConfig
-        # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-        if self.config.safempo_local_kl_target <= 0.0:
-            raise ValueError("safempo_local_kl_target must be > 0")
-        if self.config.safempo_global_kl_target <= 0.0:
-            raise ValueError("safempo_global_kl_target must be > 0")
-        if not (self.config.safempo_local_dual_min <= self.config.safempo_local_dual_init <= self.config.safempo_local_dual_max):
-            raise ValueError("local trust dual init must lie inside [min,max]")
-        if not (self.config.safempo_global_dual_min <= self.config.safempo_global_dual_init <= self.config.safempo_global_dual_max):
-            raise ValueError("global anchor dual init must lie inside [min,max]")
-        self._safempo_local_dual = float(self.config.safempo_local_dual_init)
-        self._safempo_global_dual = float(self.config.safempo_global_dual_init)
         self.target_builder = SafeMPOTargetBuilder(
             self.config.constraint_names,
             config=SafeMPOTargetConfig(
@@ -217,19 +191,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
         weighted_b = abs(float(weight_b)) * norm_b
         ratio = norm_a / weighted_b.clamp_min(1e-20)
         return norm_a, norm_b, weighted_b, cosine, ratio
-
-    # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-    @staticmethod
-    def _projected_dual_update(
-        current: float,
-        observed: float,
-        target: float,
-        dual_lr: float,
-        lower: float,
-        upper: float,
-    ) -> float:
-        value = float(current) + float(dual_lr) * (float(observed) - float(target))
-        return max(float(lower), min(float(upper), value))
 
     def collect_safempo(
         self,
@@ -389,30 +350,14 @@ class SafeMPODiffTrainer(GRPOTrainer):
             anchor_z_group_mean.abs(), valid_mask
         )
 
-        # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007: coefficients are fixed across one outer SafeMPO step.
-        local_trust_coef = (
-            float(self._safempo_local_dual)
-            if self.config.safempo_local_trust_enabled
-            else 0.0
-        )
-        global_anchor_coef = (
-            float(self._safempo_global_dual)
-            if self.config.safempo_global_anchor_enabled
-            else float(self.config.kl_coef)
-        )
-
         distill_grad_norm, anchor_grad_norm, weighted_anchor_grad_norm, \
             distill_anchor_grad_cosine, distill_to_weighted_anchor_grad_ratio = \
             self._gradient_pair_metrics(
                 distill_kl, ref_kl, trainable_params,
-                weight_b=global_anchor_coef,
+                weight_b=float(self.config.kl_coef),
             )
 
-        loss = (
-            distill_kl
-            + local_trust_coef * local_chain_kl
-            + global_anchor_coef * ref_kl
-        )
+        loss = distill_kl + float(self.config.kl_coef) * ref_kl
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite SafeMPO-Diff loss")
 
@@ -470,13 +415,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
             "safempo/distill_kl": float(distill_kl.detach()),
             "safempo/student_old_particle_kl": float(student_old_kl.detach()),
             "safempo/student_target_l1": float(target_l1.detach()),
-            # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-            "safempo_v11/local_trust_enabled": float(self.config.safempo_local_trust_enabled),
-            "safempo_v11/global_anchor_enabled": float(self.config.safempo_global_anchor_enabled),
-            "safempo_v11/local_trust_coef": float(local_trust_coef),
-            "safempo_v11/global_anchor_coef": float(global_anchor_coef),
-            "safempo_v11/local_trust_penalty": float((local_trust_coef * local_chain_kl).detach()),
-            "safempo_v11/global_anchor_penalty": float((global_anchor_coef * ref_kl).detach()),
             # SAFEMPO_DIFF_KL_ANATOMY_DIAG_V1_20261007: zero-semantic diagnostic fields.
             "safempo_diag/local_chain_kl_old_new": float(local_chain_kl.detach()),
             "safempo_diag/particle_log_ratio_mean": float(z_mean.detach()),
@@ -575,48 +513,13 @@ class SafeMPODiffTrainer(GRPOTrainer):
             advantage_mean=0.0,
             advantage_std=0.0,
         )
-        # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007: projected dual ascent once per outer SafeMPO step, using
-        # the strongest KL observed over the inner M-step epochs.
-        observed_local_kl = max(
-            float(m["safempo_diag/local_chain_kl_old_new"]) for m in update_metrics
-        )
-        observed_global_kl = max(float(m["reference_kl"]) for m in update_metrics)
-        local_before = float(self._safempo_local_dual)
-        global_before = float(self._safempo_global_dual)
-        if self.config.safempo_local_trust_enabled:
-            self._safempo_local_dual = self._projected_dual_update(
-                local_before, observed_local_kl, self.config.safempo_local_kl_target,
-                self.config.safempo_local_dual_lr, self.config.safempo_local_dual_min,
-                self.config.safempo_local_dual_max,
-            )
-        if self.config.safempo_global_anchor_enabled:
-            self._safempo_global_dual = self._projected_dual_update(
-                global_before, observed_global_kl, self.config.safempo_global_kl_target,
-                self.config.safempo_global_dual_lr, self.config.safempo_global_dual_min,
-                self.config.safempo_global_dual_max,
-            )
-        metrics.update({
-            "safempo_v11/observed_local_kl_max": observed_local_kl,
-            "safempo_v11/observed_global_kl_max": observed_global_kl,
-            "safempo_v11/local_kl_target": float(self.config.safempo_local_kl_target),
-            "safempo_v11/global_kl_target": float(self.config.safempo_global_kl_target),
-            "safempo_v11/local_dual_before": local_before,
-            "safempo_v11/local_dual_after": float(self._safempo_local_dual),
-            "safempo_v11/global_dual_before": global_before,
-            "safempo_v11/global_dual_after": float(self._safempo_global_dual),
-            "safempo_v11/local_kl_excess": observed_local_kl - float(self.config.safempo_local_kl_target),
-            "safempo_v11/global_kl_excess": observed_global_kl - float(self.config.safempo_global_kl_target),
-        })
         metrics.update(safempo_metrics)
         metrics.update(validation_metrics)
         return metrics
 
     def constraint_state_dict(self) -> Dict[str, Any]:
         return {
-            "strategy": "safempo_diff_v1_1",
+            "strategy": "safempo_diff_v1",
             "last_lambda": self.target_builder._last_lambda.copy(),
             "last_nu": float(self.target_builder._last_nu),
-            # SAFEMPO_DIFF_V11_TRUST_ANCHOR_20261007
-            "local_trust_dual": float(self._safempo_local_dual),
-            "global_anchor_dual": float(self._safempo_global_dual),
         }
