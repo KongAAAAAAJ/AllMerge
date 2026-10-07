@@ -1,3 +1,4 @@
+# GRPO_5000STEP_SUPPORT_20261008
 # BASELINE_CONVERGENCE_500STEP_ENTRY_V1_20261007
 from __future__ import annotations
 
@@ -454,7 +455,7 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100, 500))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100, 500, 5000))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)

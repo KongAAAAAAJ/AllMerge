@@ -1,3 +1,4 @@
+# GRPO_5000STEP_SUPPORT_20261008
 from __future__ import annotations
 
 import argparse
@@ -31,7 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint", required=True, type=Path)
     p.add_argument("--scenario", choices=tuple(SCENARIOS), default="curved")
     p.add_argument("--group-action", type=int, default=3)
-    p.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100, 500))
+    p.add_argument("--steps", type=int, default=3, choices=(3, 10, 30, 100, 500, 5000))
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--group-size", type=int, default=48)
     p.add_argument("--lr", type=float, default=5e-7)
