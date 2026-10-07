@@ -14,8 +14,6 @@ from .constraint_strategy import (
     ActiveConstraintStrategy,
     LagrangianConstraintConfig,
     LagrangianConstraintStrategy,
-    NormalizedLagrangianConstraintConfig,
-    NormalizedLagrangianConstraintStrategy,
 )
 from .reward_adapter import CandidateRewardAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
@@ -142,11 +140,11 @@ class GRPOTrainer:
 
         self.constraint_strategy = None
         if self.config.constraint_strategy == "lagrangian":
-            self.constraint_strategy = NormalizedLagrangianConstraintStrategy(
+            self.constraint_strategy = LagrangianConstraintStrategy(
                 tuple(self.config.constraint_names),
                 device=parameters[0].device,
                 dtype=parameters[0].dtype,
-                config=NormalizedLagrangianConstraintConfig(
+                config=LagrangianConstraintConfig(
                     dual_lr=self.config.lagrangian_dual_lr,
                     lambda_init=self.config.lagrangian_lambda_init,
                     lambda_max=self.config.lagrangian_lambda_max,
@@ -721,5 +719,3 @@ class GRPOTrainer:
 # ACTIVE_CONSTRAINT_GRPO_V1_SEMANTIC
 
 # DECOUPLED_TASK_CONSTRAINT_V2_SEMANTIC
-
-# NORMALIZED_LAGRANGIAN_V3_20261007
