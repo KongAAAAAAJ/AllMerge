@@ -115,14 +115,7 @@ class RoadBoundaryField:
         ab=b-a
         u=((pts[:,None,:]-a)*ab).sum(-1)/(ab.square().sum(-1).clamp_min(1e-12))
         nearest=a+u.clamp(0.,1.)[:,:,None]*ab
-        # Smooth the Euclidean norm at a point exactly touching the road border.
-        # Numerical degeneracy can otherwise occur on an active nearest-segment
-        # branch in GPU float32 backpropagation. The subtraction keeps distance
-        # exactly zero at contact and the distortion under ~0.1 mm elsewhere.
-        delta=pts[:,None,:]-nearest
-        eps_m=1.0e-4
-        distances=torch.sqrt(delta.square().sum(-1)+eps_m**2)-eps_m
-        dist=distances.amin(dim=1)
+        dist=torch.linalg.vector_norm(pts[:,None,:]-nearest,dim=-1).amin(dim=1)
         inside=torch.as_tensor(self._inside_numpy(query),device=pts.device,dtype=torch.bool)
         margin=torch.where(inside,dist,-dist)
         return margin.reshape(orig_shape)
@@ -151,12 +144,7 @@ class RoadBoundaryField:
         dense=knots[:,ii,:]+alpha[None,:,None]*(knots[:,ii+1,:]-knots[:,ii,:])
         delta=torch.diff(dense,dim=1,prepend=torch.zeros_like(dense[:,:1,:]))
         valid=(torch.linalg.vector_norm(delta,dim=-1)>1e-6)
-        # torch.atan2(0, 0) has an undefined derivative. Replacing its
-        # arguments *before* atan2 is essential: forward-filling the heading
-        # later does not necessarily prevent NaNs in backward on CUDA.
-        safe_dx=torch.where(valid,delta[:,:,0],torch.ones_like(delta[:,:,0]))
-        safe_dy=torch.where(valid,delta[:,:,1],torch.zeros_like(delta[:,:,1]))
-        yaw_raw=torch.atan2(safe_dy,safe_dx)
+        yaw_raw=torch.atan2(delta[:,:,1],delta[:,:,0])
         ids=torch.arange(len(target),device=device)[None,:].expand(len(xy),-1)
         last=torch.cummax(torch.where(valid,ids,torch.zeros_like(ids)),dim=1).values
         yaw=torch.gather(yaw_raw,1,last)

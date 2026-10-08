@@ -530,8 +530,6 @@ def main():
             'old_flag_union_in':sum(x['legacy_offroad_guided']==1 and x['union_offroad_guided']==0 for x in a),
             'old_in_union_out':sum(x['legacy_offroad_guided']==0 and x['union_offroad_guided']==1 for x in a),
             'curvature_native_analytic_abs_diff_mean':safe_mean([abs(x['native_matp_curvature_guided']-x['analytic_curvature_guided']) for x in a if np.isfinite(x['native_matp_curvature_guided'])])}
-    summary['road_gradient_fallback_counts']=dict(getattr(proxy,'gradient_fallback_counts',{}))
-    print('[road-gradient-diagnostics]',summary['road_gradient_fallback_counts'],flush=True)
     summary['configuration']={k:(str(v) if isinstance(v,Path) else v) for k,v in vars(args).items()}
     summary['source_provenance']={
         'current_task_reward_sha256':hashlib.sha256((ROOT/'highway_env/planner/diffusion/grpo/task_reward.py').read_bytes()).hexdigest(),

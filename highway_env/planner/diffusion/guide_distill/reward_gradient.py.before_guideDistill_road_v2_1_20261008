@@ -114,77 +114,17 @@ class DifferentiableTaskReward:
              'max_abs_curvature':curvature.abs().amax(dim=1)}
         return out
 
-    def _road_finite_difference(self,xy,*,step_m=1e-3):
-        """Fallback ONLY for failing samples in the road/combined objective.
-
-        This is a central finite difference of the actual probe road reward;
-        no W4 reward semantics or gradient values are silently substituted.
-        Expensive, so it is used only after analytic autograd is non-finite.
-        """
-        with torch.no_grad():
-            n=len(xy)
-            out=torch.empty_like(xy)
-            for t in range(xy.shape[1]):
-                for c in range(xy.shape[2]):
-                    xp=xy.detach().clone();xm=xy.detach().clone()
-                    xp[:,t,c]+=step_m;xm[:,t,c]-=step_m
-                    plus=self.road_field.components(xp,self.role_pose,self.config)['road']
-                    minus=self.road_field.components(xm,self.role_pose,self.config)['road']
-                    out[:,t,c]=(plus-minus)/(2.*step_m)
-            return out
-
-    def _repair_gradient(self,xy,name,grad):
-        bad=~torch.isfinite(grad.flatten(start_dim=1)).all(dim=1)
-        if not bool(bad.any()):return grad
-        if name not in ('road','balanced'):
-            raise FloatingPointError(f'Non-finite guidance gradient {name}; '
-                                     f'bad samples={bad.nonzero().flatten().tolist()}')
-        damaged=xy.detach()[bad]
-        road_grad=self._road_finite_difference(damaged)
-        if name=='balanced':
-            # The native task component must remain analytically differentiable.
-            with torch.enable_grad():
-                x_native=damaged.clone().requires_grad_(True)
-                score=self.components(x_native)['native_balanced']
-                native_grad=torch.autograd.grad(score.sum(),x_native)[0]
-            road_grad=native_grad+self.balanced_road_weight*road_grad
-        if not bool(torch.isfinite(road_grad).all()):
-            raise FloatingPointError(f'Non-finite guidance gradient {name} '
-                                     'persists after finite-difference road fallback')
-        grad=grad.clone()
-        grad[bad]=road_grad.detach()
-        if not hasattr(self,'gradient_fallback_counts'):
-            self.gradient_fallback_counts={}
-        self.gradient_fallback_counts[name]=self.gradient_fallback_counts.get(name,0)+int(bad.sum())
-        print(f'[road-gradient-fallback] direction={name} '
-              f'samples={int(bad.sum())} total={self.gradient_fallback_counts[name]} '
-              '(finite-difference road term only)',flush=True)
-        return grad
-
-    def gradient_of(self,xy,name):
-        if self.road_field is None:raise RuntimeError('Road field was not bound for road-guidance gradients')
-        if name not in DIRECTIONS:raise KeyError(name)
-        with torch.enable_grad():
-            x=xy.detach().clone().requires_grad_(True)
-            score=self.components(x)[name]
-            if not bool(torch.isfinite(score).all()):
-                raise FloatingPointError(f'Non-finite guidance score {name}; stop before optimization')
-            grad=torch.autograd.grad(score.sum(),x)[0].detach()
-            grad=self._repair_gradient(x,name,grad)
-            return grad.detach()
-
     def gradients(self,xy):
         if self.road_field is None:raise RuntimeError('Road field was not bound for road-guidance gradients')
-        with torch.enable_grad():
-            x=xy.detach().clone().requires_grad_(True)
-            values=self.components(x)
-            result={}
-            for i,name in enumerate(DIRECTIONS):
-                if not bool(torch.isfinite(values[name]).all()):
-                    raise FloatingPointError(f'Non-finite guidance score {name}')
-                grad=torch.autograd.grad(values[name].sum(),x,retain_graph=i<len(DIRECTIONS)-1)[0].detach()
-                result[name]=self._repair_gradient(x,name,grad).detach()
-            return result
+        x=xy.detach().clone().requires_grad_(True)
+        values=self.components(x)
+        result={}
+        for i,name in enumerate(DIRECTIONS):
+            grad=torch.autograd.grad(values[name].sum(),x,retain_graph=i<len(DIRECTIONS)-1)[0]
+            if not torch.isfinite(grad).all():
+                raise FloatingPointError(f'Non-finite guidance gradient {name}')
+            result[name]=grad.detach()
+        return result
 
     def validate_against_production(self,xy,result,*,role:int,mode:int,tol:float=.002):
         values=self.components(xy.detach())

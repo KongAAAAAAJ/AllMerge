@@ -32,10 +32,7 @@ def guide_all(xy, scorer, *, iters=8, step_m=0.12, trust_rms_m=0.75,
         for _ in range(iters):
             x=current.detach().requires_grad_(True)
             score=scorer.components(x)[name]
-            # Use the same numeric recovery routine as the initial probe;
-            # avoid calculating the expensive road field a second time.
             grad=torch.autograd.grad(score.sum(),x)[0].detach()
-            grad=scorer._repair_gradient(x,name,grad)
             norm=torch.linalg.vector_norm(grad.flatten(start_dim=1),dim=-1)
             unit=grad/norm.clamp_min(1e-9)[:,None,None]
             best=current.clone()
