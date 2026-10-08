@@ -448,7 +448,7 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100))
+    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100, 5000))
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
