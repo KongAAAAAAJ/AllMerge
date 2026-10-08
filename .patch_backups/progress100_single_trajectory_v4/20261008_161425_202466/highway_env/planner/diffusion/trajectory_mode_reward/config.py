@@ -52,9 +52,9 @@ class TrajectoryModeRewardConfig:
     task_progress_weight: float = 1.0
     task_comfort_weight: float = 10.0
     task_kinematic_weight: float = 1.0
-    smooth_curvature_tv_scale: float = 0.04
-    smooth_lateral_jerk_scale: float = 4.0
-    smooth_sparse_curvature_tv_scale: float = 0.02
+    smooth_curvature_tv_scale: float = 0.5
+    smooth_lateral_jerk_scale: float = 12.0
+    smooth_sparse_curvature_tv_scale: float = 0.5
     kinematic_wheelbase_m: float = 3.8
     kinematic_max_curvature: float = 0.04
     kinematic_max_steer_rate: float = 0.20
