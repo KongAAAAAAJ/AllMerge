@@ -298,23 +298,15 @@ def render_paired_gallery(gallery: list[dict[str, Any]], output_dir: str | Path)
                        color=line.get_color(), zorder=5)
         ax.scatter([0], [0], s=36, marker="x", color="black", label="Ego")
         displacement = np.linalg.norm(record["rl"] - record["pre"], axis=-1)
-        reward_pre = float(record.get("pretrain_reward", np.nan))
-        reward_rl = float(record.get("rl_reward", np.nan))
-        reward_delta = reward_rl - reward_pre
-        title_line1 = (f"{record['scenario']} | state {record['state_index']:02d} "
-                       f"| veh {record['role']} | mode {record['mode']} | g{record['group_idx']} "
-                       f"| Δmax {displacement.max():.3f}m")
-        title_line2 = f"Rpre {reward_pre:.4f} | Rrl {reward_rl:.4f} | ΔR {reward_delta:+.4f}"
-        ax.set_title(f"{title_line1}\n{title_line2}", fontsize=9)
-        ax.set(xlabel="x (m)", ylabel="y (m)")
+        ax.set(title=(f"{record['scenario']} | state {record['state_index']:02d} "
+                      f"| veh {record['role']} | mode {record['mode']} | g{record['group_idx']} "
+                      f"| Δmax {displacement.max():.3f}m"),
+               xlabel="x (m)", ylabel="y (m)")
         ax.set_aspect("equal", adjustable="datalim")
         ax.grid(alpha=0.19)
         ax.legend(fontsize=7, loc="best")
         manifest.append({**{k: record[k] for k in
                          ("state_index", "scenario", "env_seed", "noise_seed", "role", "mode", "group_idx")},
-                         "pretrain_reward": reward_pre,
-                         "rl_reward": reward_rl,
-                         "reward_delta": reward_delta,
                          "mean_point_displacement_m": float(displacement.mean()),
                          "max_point_displacement_m": float(displacement.max())})
     fig.suptitle("Pretrain vs RL: random 9 paired trajectories (same scene, noise, mode, group)",
