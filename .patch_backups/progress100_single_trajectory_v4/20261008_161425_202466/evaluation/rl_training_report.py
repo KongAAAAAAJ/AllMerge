@@ -440,7 +440,6 @@ def evaluate_paired_trajectories(
                 trace_pre = sampler_pre.sample(features, generator=generator_pre)
                 trace_rl = sampler_rl.sample(features, generator=generator_rl)
                 results = {}
-                task_rewards_by_policy = {}
                 for policy, trace in (("pretrain", trace_pre), ("rl", trace_rl)):
                     result = reward_adapter.evaluate_result(
                         trace.candidates, features=features, context=context,
@@ -467,7 +466,6 @@ def evaluate_paired_trajectories(
                     if task.shape != mask.shape:
                         raise RuntimeError(f"Unexpected reward/mask shapes: {task.shape} vs {mask.shape}")
                     reward_pair[policy].append(float(task[mask].mean().item()))
-                    task_rewards_by_policy[policy] = task
                     results[policy] = trace
 
                 row = {"state_index": index, "scenario": env_name,
@@ -492,11 +490,6 @@ def evaluate_paired_trajectories(
                     rl = results["rl"].candidates[role, group_idx, selected_mode].cpu().numpy()
                     gallery.append({**row, "role": role, "mode": selected_mode,
                                     "group_idx": group_idx, "pre": pre, "rl": rl})
-                    # Override state-average rewards in gallery ONLY; keep paired_eval_per_state.csv unchanged.
-                    gallery[-1]["pretrain_reward"] = float(
-                        task_rewards_by_policy["pretrain"][role, group_idx, selected_mode].item())
-                    gallery[-1]["rl_reward"] = float(
-                        task_rewards_by_policy["rl"][role, group_idx, selected_mode].item())
         finally:
             env.close()
 

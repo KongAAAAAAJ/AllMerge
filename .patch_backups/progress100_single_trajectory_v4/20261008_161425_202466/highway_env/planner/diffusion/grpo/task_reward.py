@@ -71,7 +71,7 @@ def task_reward_from_w4_result(
 
     config = _context_reward_config(context)
     progress = _component_to_grpo(
-        result.components["task_progress_score"], device=device, dtype=dtype
+        result.components["progress_score"], device=device, dtype=dtype
     )
     smoothness = _component_to_grpo(
         result.components["smoothness_penalty"], device=device, dtype=dtype

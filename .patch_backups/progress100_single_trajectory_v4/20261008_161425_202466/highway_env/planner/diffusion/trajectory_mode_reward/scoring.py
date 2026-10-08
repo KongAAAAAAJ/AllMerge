@@ -62,13 +62,6 @@ class CounterfactualScoringMixin:
             0.0,
             1.0,
         ).astype(np.float64, copy=False)
-
-        # Task-only progress normalization; legacy_w4 keeps progress_norm_m=30.
-        task_progress_score = np.clip(
-            target_trajectories[:, -1, 0] / self.config.task_progress_norm_m,
-            0.0,
-            1.0,
-        ).astype(np.float64, copy=False)
 
         road_margin = road_margin_series_batch(
             world, road, self.config, tracking_aware=True
@@ -245,7 +238,6 @@ class CounterfactualScoringMixin:
             "clearance_violation": clearance_violation,
             "components": {
                 "progress_score": progress_score.astype(np.float32),
-                "task_progress_score": task_progress_score.astype(np.float32),
                 "gap_penalty": gap_penalty.astype(np.float32),
                 "ttc_penalty": ttc_penalty.astype(np.float32),
                 "road_penalty": road_penalty.astype(np.float32),

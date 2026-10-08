@@ -13,7 +13,6 @@ from .constants import NUM_MODES, NUM_VEHICLES
 
 _COMPONENT_NAMES = (
     "progress_score",
-    "task_progress_score",
     "gap_penalty",
     "ttc_penalty",
     "road_penalty",

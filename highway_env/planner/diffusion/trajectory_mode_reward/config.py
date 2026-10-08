@@ -49,7 +49,8 @@ class TrajectoryModeRewardConfig:
     ttc_weight: float = 0.5
     road_weight: float = 0.5
     comfort_weight: float = 0.0225
-    task_progress_weight: float = 1.0
+    task_progress_weight: float = 1.0
+    task_progress_norm_m: float = 100.0
     task_comfort_weight: float = 10.0
     task_kinematic_weight: float = 1.0
     smooth_curvature_tv_scale: float = 0.04
@@ -94,6 +95,7 @@ class TrajectoryModeRewardConfig:
             "road_margin_warning_m",
             "road_margin_softness_m",
             "road_outside_scale_m",
+            "task_progress_norm_m",
             "progress_norm_m",
             "no_risk_gap_m",
             "no_risk_ttc_s",
