@@ -25,6 +25,9 @@ from .risk import (
 )
 
 
+from .motion_quality import spline_motion_quality
+
+
 class CounterfactualScoringMixin:
     # GRPO_SPEED_V2B_BATCH_GEOMETRY_20261007
     def _score_target_group(
@@ -225,6 +228,8 @@ class CounterfactualScoringMixin:
             - self.config.collision_penalty * collision.astype(np.float64)
         )
         unsafe = collision | out_of_drivable | clearance_violation
+        motion_quality = spline_motion_quality(target_trajectories, self.config)
+
         return {
             "rewards": rewards.astype(np.float32),
             "unsafe": unsafe,
@@ -236,7 +241,14 @@ class CounterfactualScoringMixin:
                 "gap_penalty": gap_penalty.astype(np.float32),
                 "ttc_penalty": ttc_penalty.astype(np.float32),
                 "road_penalty": road_penalty.astype(np.float32),
-                "comfort_penalty": comfort_penalty.astype(np.float32),
+                "comfort_penalty": comfort_penalty.astype(np.float32),
+                "smoothness_penalty": motion_quality["smoothness_penalty"],
+                "smoothness_curvature_tv": motion_quality["smoothness_curvature_tv"],
+                "smoothness_lateral_jerk": motion_quality["smoothness_lateral_jerk"],
+                "smoothness_sparse_kink": motion_quality["smoothness_sparse_kink"],
+                "kinematic_score": motion_quality["kinematic_score"],
+                "kinematic_excess": motion_quality["kinematic_excess"],
+
                 "minimum_background_gap_m": minimum_background_gap.astype(np.float32),
                 "minimum_teammate_gap_m": minimum_teammate_gap.astype(np.float32),
                 "minimum_road_margin_m": minimum_road_margin.astype(np.float32),

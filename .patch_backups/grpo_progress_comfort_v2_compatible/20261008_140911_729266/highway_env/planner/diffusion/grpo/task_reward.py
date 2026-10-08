@@ -73,16 +73,12 @@ def task_reward_from_w4_result(
     progress = _component_to_grpo(
         result.components["progress_score"], device=device, dtype=dtype
     )
-    smoothness = _component_to_grpo(
-        result.components["smoothness_penalty"], device=device, dtype=dtype
-    )
-    kinematic = _component_to_grpo(
-        result.components["kinematic_score"], device=device, dtype=dtype
+    comfort = _component_to_grpo(
+        result.components["comfort_penalty"], device=device, dtype=dtype
     )
     return (
-        float(config.task_progress_weight) * progress
-        - float(config.task_comfort_weight) * smoothness
-        + float(config.task_kinematic_weight) * kinematic
+        float(config.progress_weight) * progress
+        - float(config.comfort_weight) * comfort
     )
 
 

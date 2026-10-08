@@ -49,16 +49,6 @@ class TrajectoryModeRewardConfig:
     ttc_weight: float = 0.5
     road_weight: float = 0.5
     comfort_weight: float = 0.0225
-    task_progress_weight: float = 1.0
-    task_comfort_weight: float = 10.0
-    task_kinematic_weight: float = 1.0
-    smooth_curvature_tv_scale: float = 0.04
-    smooth_lateral_jerk_scale: float = 4.0
-    smooth_sparse_curvature_tv_scale: float = 0.02
-    kinematic_wheelbase_m: float = 3.8
-    kinematic_max_curvature: float = 0.04
-    kinematic_max_steer_rate: float = 0.20
-    kinematic_max_lateral_acc: float = 2.5
     collision_penalty: float = 5.0
     # ROAD_REWARD_V2: out_of_drivable remains a diagnostic/unsafe flag.
     # The fixed reward cliff is disabled; continuous road_penalty carries severity.
@@ -97,13 +87,6 @@ class TrajectoryModeRewardConfig:
             "progress_norm_m",
             "no_risk_gap_m",
             "no_risk_ttc_s",
-            'smooth_curvature_tv_scale',
-            'smooth_lateral_jerk_scale',
-            'smooth_sparse_curvature_tv_scale',
-            'kinematic_wheelbase_m',
-            'kinematic_max_curvature',
-            'kinematic_max_steer_rate',
-            'kinematic_max_lateral_acc',
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -139,9 +122,6 @@ class TrajectoryModeRewardConfig:
             "out_of_drivable_penalty",
             "temporal_max_weight",
             "temporal_mean_weight",
-            'task_progress_weight',
-            'task_comfort_weight',
-            'task_kinematic_weight',
         )
         for name in nonnegative:
             value = float(getattr(self, name))
