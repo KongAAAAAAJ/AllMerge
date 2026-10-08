@@ -15,7 +15,7 @@ from highway_env.planner.diffusion.trajectory_mode_reward.config import Trajecto
 from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
 from highway_env.planner.diffusion.trajectory_spline import ClampedCubicTrajectorySpline
 
-DIRECTIONS = ('comfort', 'balanced', 'curvature_aux', 'road')
+DIRECTIONS = ('progress', 'comfort', 'balanced', 'curvature_aux')
 
 
 def _get_semantics(config):
@@ -32,16 +32,6 @@ def _get_semantics(config):
 class DifferentiableTaskReward:
     config: TrajectoryModeRewardConfig
     device: torch.device
-    road_field: object | None = None
-    role_pose: object | None = None
-    balanced_road_weight: float = 0.25
-
-    def bind_road(self, road_field, role_pose, *, balanced_road_weight=0.25):
-        self.road_field = road_field
-        self.role_pose = role_pose
-        self.balanced_road_weight = float(balanced_road_weight)
-        self.semantics['road_boundary_reward']='signed outer road union footprint margin (probe-only)'
-        self.semantics['balanced_road_weight']=self.balanced_road_weight
 
     def __post_init__(self):
         self.semantics = _get_semantics(self.config)
@@ -90,13 +80,7 @@ class DifferentiableTaskReward:
                  +.5*torch.mean(torch.abs(yaw_rate),dim=1)).clamp(0.,1.)
         progress=(xy[:,-1,0]/float(cfg.progress_norm_m)).clamp(0.,1.)
         wp=float(cfg.progress_weight);wc=float(cfg.comfort_weight)
-        native_balanced=wp*progress-wc*comfort
-        if self.road_field is None:
-            # Keep production reward parity independent of exploration additions.
-            road=torch.zeros_like(native_balanced)
-        else:
-            road=self.road_field.components(xy,self.role_pose,cfg)['road']
-        balanced=native_balanced+self.balanced_road_weight*road
+        balanced=wp*progress-wc*comfort
 
         # Geometry exploration ONLY, not part of task progress_comfort reward.
         init_v=torch.stack((xy[:,0,0].clamp_min(0.)/float(cfg.trajectory_dt_s),
@@ -108,14 +92,13 @@ class DifferentiableTaskReward:
         curvature=cross/speed_c.pow(3)
         curvature_aux=-(curvature.square().mean(dim=1)
                         +torch.relu(curvature.abs()-.02).square().mean(dim=1))
-        out={'comfort':-wc*comfort,'balanced':balanced,'road':road,'native_balanced':native_balanced,
+        out={'progress':wp*progress,'comfort':-wc*comfort,'balanced':balanced,
              'curvature_aux':curvature_aux,'raw_progress':progress,
              'comfort_penalty':comfort,
              'max_abs_curvature':curvature.abs().amax(dim=1)}
         return out
 
     def gradients(self,xy):
-        if self.road_field is None:raise RuntimeError('Road field was not bound for road-guidance gradients')
         x=xy.detach().clone().requires_grad_(True)
         values=self.components(x)
         result={}
@@ -141,7 +124,7 @@ class DifferentiableTaskReward:
         native=task_reward_from_w4_result(result,context={'config':self.config},
                                          device=xy.device,dtype=xy.dtype,
                                          reward_type='progress_comfort')[role,:,mode]
-        diffs['task_reward']=float((native-values['native_balanced'].detach()).abs().max())
+        diffs['task_reward']=float((native-values['balanced'].detach()).abs().max())
         if not all(np.isfinite(x) for x in diffs.values()) or max(diffs.values())>tol:
             raise RuntimeError('CURRENT REWARD PARITY FAILED '+str(diffs)+'; aborting before guidance.')
         return diffs
