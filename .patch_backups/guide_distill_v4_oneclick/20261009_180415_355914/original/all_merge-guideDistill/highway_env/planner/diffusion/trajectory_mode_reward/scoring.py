@@ -60,12 +60,6 @@ class CounterfactualScoringMixin:
             1.0,
         ).astype(np.float64, copy=False)
 
-        # The signed road-union reward is also used by the differentiable Guide.
-        # The old W4 road penalty/constraints are preserved as distinct metrics.
-        from .road_union_reward import production_road_reward
-        road_boundary_reward = production_road_reward(
-            target_trajectories, poses[target_role], road, self.config
-        )
         road_margin = road_margin_series_batch(
             world, road, self.config, tracking_aware=True
         )
@@ -243,7 +237,6 @@ class CounterfactualScoringMixin:
                 "ttc_penalty": ttc_penalty.astype(np.float32),
                 "road_penalty": road_penalty.astype(np.float32),
                 "comfort_penalty": comfort_penalty.astype(np.float32),
-                "road_boundary_reward": road_boundary_reward.astype(np.float32),
                 "minimum_background_gap_m": minimum_background_gap.astype(np.float32),
                 "minimum_teammate_gap_m": minimum_teammate_gap.astype(np.float32),
                 "minimum_road_margin_m": minimum_road_margin.astype(np.float32),

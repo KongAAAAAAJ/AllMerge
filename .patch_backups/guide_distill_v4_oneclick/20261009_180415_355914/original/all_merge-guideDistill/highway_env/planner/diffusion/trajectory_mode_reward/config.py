@@ -42,7 +42,7 @@ class TrajectoryModeRewardConfig:
     tracking_lateral_margin_m: float = 0.0
     tracking_heading_margin_rad: float = 0.0
 
-    progress_norm_m: float = 100.0
+    progress_norm_m: float = 30.0
 
     progress_weight: float = 0.47
     gap_weight: float = 1.185
@@ -59,12 +59,6 @@ class TrajectoryModeRewardConfig:
 
     no_risk_gap_m: float = 1.0e6
     no_risk_ttc_s: float = 1.0e6
-
-    # Existing progress_comfort objective: signed road-union margin term.
-    # Kept last to preserve positional compatibility of prior config fields.
-    task_progress_weight: float = 0.20
-    task_comfort_weight: float = 0.10
-    task_road_weight: float = 0.40
 
     def __post_init__(self) -> None:
         if (
@@ -124,9 +118,6 @@ class TrajectoryModeRewardConfig:
             "ttc_weight",
             "road_weight",
             "comfort_weight",
-            "task_progress_weight",
-            "task_comfort_weight",
-            "task_road_weight",
             "collision_penalty",
             "out_of_drivable_penalty",
             "temporal_max_weight",

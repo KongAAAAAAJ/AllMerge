@@ -61,7 +61,47 @@ def _dense_local_trajectories(
             "trajectories must be finite [G,3,8,2]"
         )
 
-    return _dense_local_trajectories_batch(values, config)
+    source_times = (
+        np.arange(1, HORIZON_STEPS + 1, dtype=np.float64)
+        * config.trajectory_dt_s
+    )
+    target_times = np.arange(
+        0.0,
+        source_times[-1] + 0.5 * config.interpolation_dt_s,
+        config.interpolation_dt_s,
+        dtype=np.float64,
+    )
+    source_with_origin = np.concatenate(([0.0], source_times))
+
+    dense = np.empty(
+        (values.shape[0], NUM_VEHICLES, len(target_times), 3),
+        dtype=np.float64,
+    )
+    for group in range(values.shape[0]):
+        for role in range(NUM_VEHICLES):
+            trajectory = values[group, role]
+            xy_with_origin = np.concatenate(
+                (
+                    np.zeros((1, 2), dtype=np.float64),
+                    trajectory,
+                ),
+                axis=0,
+            )
+            dense_xy = np.column_stack(
+                [
+                    np.interp(
+                        target_times,
+                        source_with_origin,
+                        xy_with_origin[:, axis],
+                    )
+                    for axis in range(2)
+                ]
+            )
+            dense[group, role, :, :2] = dense_xy
+            dense[group, role, :, 2] = _heading_from_xy(
+                dense_xy
+            )
+    return dense, target_times
 
 
 def local_to_world(
@@ -246,16 +286,30 @@ def _dense_local_trajectories_batch(
         or not np.isfinite(values).all()
     ):
         raise TrajectoryModeRewardError("trajectories must be finite [G,3,8,2]")
-    # Use the SAME clamped cubic spline as Reward Guidance and MATP W1.
-    from .spline_dense import evaluate_dense_spline, headings_from_dense
-    import torch
-    xy=torch.as_tensor(values,dtype=torch.float64)
-    with torch.no_grad():
-        dense_xy,_,_=evaluate_dense_spline(xy,config)
-        dense_heading=headings_from_dense(dense_xy)
-    dense=np.concatenate((dense_xy.numpy(),dense_heading.unsqueeze(-1).numpy()),axis=-1)
-    target_times=np.arange(dense.shape[-2],dtype=np.float64)*config.interpolation_dt_s
-    return dense,target_times
+    source_times = np.arange(1, HORIZON_STEPS + 1, dtype=np.float64) * config.trajectory_dt_s
+    target_times = np.arange(
+        0.0,
+        source_times[-1] + 0.5 * config.interpolation_dt_s,
+        config.interpolation_dt_s,
+        dtype=np.float64,
+    )
+    source = np.concatenate(([0.0], source_times))
+    values_with_origin = np.concatenate(
+        (np.zeros((values.shape[0], NUM_VEHICLES, 1, 2), dtype=np.float64), values),
+        axis=2,
+    )
+    left = np.searchsorted(source, target_times, side="right") - 1
+    left = np.clip(left, 0, len(source) - 2)
+    right = left + 1
+    denom = source[right] - source[left]
+    alpha = (target_times - source[left]) / denom
+    xy0 = values_with_origin[:, :, left, :]
+    xy1 = values_with_origin[:, :, right, :]
+    dense_xy = xy0 + alpha[None, None, :, None] * (xy1 - xy0)
+    dense = np.empty((*dense_xy.shape[:-1], 3), dtype=np.float64)
+    dense[..., :2] = dense_xy
+    dense[..., 2] = _heading_from_xy_batch(dense_xy)
+    return dense, target_times
 
 
 def _footprint_corners_batch(

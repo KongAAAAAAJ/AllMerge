@@ -1,0 +1,44 @@
+--- LOCAL/all_merge-guideDistill/tests/test_guide_distill_probe.py
++++ V4/all_merge-guideDistill/tests/test_guide_distill_probe.py
+@@ -4,7 +4,7 @@
+ import numpy as np
+ import torch
+ from highway_env.planner.diffusion.guide_distill.reward_gradient import DifferentiableTaskReward, DIRECTIONS
+-from highway_env.planner.diffusion.guide_distill.exploration import guide_all, gradient_cosine
++from highway_env.planner.diffusion.guide_distill.exploration import guide_all
+ from highway_env.planner.diffusion.trajectory_mode_reward.config import TrajectoryModeRewardConfig
+ from highway_env.planner.diffusion.guide_distill.road_boundary import RoadBoundaryField
+ from types import SimpleNamespace
+@@ -30,24 +30,23 @@
+ 
+     def test_current_components(self):
+         v=self.proxy.components(self.xy)
+-        self.assertTrue(torch.allclose(v['native_balanced'],float(self.cfg.progress_weight)*v['raw_progress']-
+-                                         float(self.cfg.comfort_weight)*v['comfort_penalty'],atol=1e-8))
+-        self.assertNotIn('progress',DIRECTIONS)
+-        self.assertIn('road',DIRECTIONS)
++        self.assertTrue(torch.allclose(v['native_balanced'],float(self.cfg.task_progress_weight)*v['raw_progress']-
++                                         float(self.cfg.task_comfort_weight)*v['comfort_penalty'],atol=1e-8))
++        self.assertEqual(DIRECTIONS,('balanced',))
+ 
+     def test_gradients_and_bounded_guidance(self):
+         grads=self.proxy.gradients(self.xy)
+         self.assertEqual(set(grads),set(DIRECTIONS))
+-        cs=gradient_cosine(grads)
+-        self.assertEqual(tuple(cs.shape),(3,4,4))
++        self.assertEqual(set(grads), {"balanced"})
+         guided,_=guide_all(self.xy,self.proxy,iters=2,step_m=.1,trust_rms_m=.5,max_point_move_m=.3)
+         for key,arr in guided.items():
+             self.assertTrue(torch.isfinite(arr).all())
+             self.assertLessEqual(float(torch.linalg.vector_norm(arr-self.xy,dim=-1).max()),.30002)
+             self.assertGreaterEqual(float((self.proxy.components(arr)[key]-self.proxy.components(self.xy)[key]).min()),-1e-5)
+ 
+-    def test_zero_gradient_is_nan_cosine(self):
+-        z={key:torch.zeros_like(self.xy) for key in DIRECTIONS}
+-        self.assertTrue(torch.isnan(gradient_cosine(z)).all())
++    def test_removed_directions_are_rejected(self):
++        for name in ("comfort", "road", "curvature_aux", "progress"):
++            with self.assertRaises(KeyError):
++                self.proxy.gradient_of(self.xy,name)
+ 
+ if __name__=='__main__':unittest.main()

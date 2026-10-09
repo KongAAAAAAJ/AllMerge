@@ -56,12 +56,11 @@ def task_reward_from_w4_result(
 
     legacy_w4 preserves the historical reward exactly.
 
-    progress_comfort uses the unified 10Hz spline objective:
-      task_progress_weight * progress_score - task_comfort_weight * comfort_penalty
-      + task_road_weight * road_boundary_reward
+    progress_comfort keeps only efficiency and smoothness:
+      progress_weight * progress_score - comfort_weight * comfort_penalty
 
-    Road BOUNDARY continuous reward is part of progress_comfort; collision,
-    TTC and vehicle gap remain hard constraint / safety signals.
+    collision / road / TTC / background-gap / teammate-gap are deliberately
+    excluded and are handled only by the shared ConstraintEvaluator.
     """
     if reward_type not in SUPPORTED_TASK_REWARDS:
         raise ValueError(
@@ -77,15 +76,9 @@ def task_reward_from_w4_result(
     comfort = _component_to_grpo(
         result.components["comfort_penalty"], device=device, dtype=dtype
     )
-    if "road_boundary_reward" not in result.components:
-        raise RuntimeError("Current progress_comfort scorer missing road_boundary_reward")
-    road = _component_to_grpo(
-        result.components["road_boundary_reward"], device=device, dtype=dtype
-    )
     return (
-        float(config.task_progress_weight) * progress
-        - float(config.task_comfort_weight) * comfort
-        + float(config.task_road_weight) * road
+        float(config.progress_weight) * progress
+        - float(config.comfort_weight) * comfort
     )
 
 

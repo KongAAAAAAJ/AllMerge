@@ -17,7 +17,6 @@ _COMPONENT_NAMES = (
     "ttc_penalty",
     "road_penalty",
     "comfort_penalty",
-    "road_boundary_reward",
     "minimum_background_gap_m",
     "minimum_teammate_gap_m",
     "minimum_road_margin_m",

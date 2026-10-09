@@ -1,0 +1,96 @@
+{
+  "target_root": "D:\\KONG_Files\\AllMerge",
+  "version": "reward_aligned_unified_v4",
+  "files": [
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/grpo/task_reward.py",
+      "existed": true,
+      "old_sha256": "43cd1217fd6f3417ebb92a37f510f4fea48682066cbe640f07c9a7368ac4ae27",
+      "new_sha256": "f017ddfc8bebe8f4409414dc35e4ee6a485aa9044cab07fb2ec6f14b28f31ba2"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/guide_distill/exploration.py",
+      "existed": true,
+      "old_sha256": "9d51ab5f67ddee9be6275e46feb46cc179c4cea257a2881d3ccd6360721ec1b6",
+      "new_sha256": "8b1d2c99b9670bdd01678a0f68508b2f7fc6a666e9de9d8f4b90e7d4a1d15456"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/guide_distill/reward_gradient.py",
+      "existed": true,
+      "old_sha256": "524b6950355741ec8bdccc81bb4ecdad15dc141c4f47c8a516b73fe72a6fc51d",
+      "new_sha256": "0810255c65f857b4e5bb1a0a03c3c853ed19aab8df39f21f5ab88cd2ccbdb92b"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/guide_distill/road_boundary.py",
+      "existed": true,
+      "old_sha256": "89eb139ff3480a867c4cd8b57fccd560ce517cc3ee07e94495381821177b4148",
+      "new_sha256": "6eea7790871734f1810a54da10b7371095e1614a1a5b4fb8b65271bba6f4373a"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/trajectory_mode_reward/config.py",
+      "existed": true,
+      "old_sha256": "8899ff127fe7ecb2ea983f5431d38b6a97b96455f379cb09f07e920118d04ddd",
+      "new_sha256": "376f4c26a3bde1ee92eca85f72e7b86f5cd0e15540dbc50371fb76266f551792"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/trajectory_mode_reward/geometry.py",
+      "existed": true,
+      "old_sha256": "a41cdca71242cab218ccb531ab916dfdcd34e9b6cf7399c7ba2ce18e05ee859c",
+      "new_sha256": "27b7fe0cca8399c00d6976cc01ef875a35888114d5b4c617f6291c68b3b9950d"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/trajectory_mode_reward/road_union_reward.py",
+      "existed": false,
+      "old_sha256": null,
+      "new_sha256": "6a660236e6dbb1cb9f08d6ce0e5616387625b708edcd41c9ad50a4be2eb21800"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/trajectory_mode_reward/scoring.py",
+      "existed": true,
+      "old_sha256": "8fb95acbcb4d7778428644e624768c3b397c6c7fefe0057d1233fec88e08004e",
+      "new_sha256": "c96f37702dd65fa05b4be2a2f9da1a3a448065a54003513d1c984ef3b66460e8"
+    },
+    {
+      "path": "all_merge-guideDistill/highway_env/planner/diffusion/trajectory_mode_reward/spline_dense.py",
+      "existed": false,
+      "old_sha256": null,
+      "new_sha256": "053ba717df2b674827f438515f79f43906547477aafda8b70176f49a66a92c74"
+    },
+    {
+      "path": "all_merge-guideDistill/scripts/run_multi_guidance_probe.py",
+      "existed": true,
+      "old_sha256": "13fdbd58415d763c5e192b5a706d0766361f5aa6348457b5d73b6e34ac7d2ba4",
+      "new_sha256": "c42a39ea39e1f0bdc6f0e57e26de9d94d8ea92ffc66b28e30051960f6da9c77b"
+    },
+    {
+      "path": "all_merge-guideDistill/tests/test_guide_distill_probe.py",
+      "existed": true,
+      "old_sha256": "75453bd30d437249d4f7b030e3942d13ee986f483f610d45dc227c1b9935ee61",
+      "new_sha256": "b06e8a9ea711c5bc7242ed4cdf8fbe985c64d3028b0c852c600c057da25a9206"
+    },
+    {
+      "path": "all_merge-guideDistill/tests/test_guide_distill_reward_alignment_v3.py",
+      "existed": false,
+      "old_sha256": null,
+      "new_sha256": "388d04163d0d81b33b27dfd87d31fd0ae630a81cf44abefb87bcc437ef6019c1"
+    },
+    {
+      "path": "all_merge-guideDistill/tests/test_guide_distill_road_stability_v2_1.py",
+      "existed": true,
+      "old_sha256": "4fcaf5bfe7f6fde40d11d4c315979b5bf3c99c1a6a84ea8a13a88450079f631b",
+      "new_sha256": "66137a3f19b76a5a8cf18dbc3ab82a49a74e90cc359038de435e49aae552bb0b"
+    },
+    {
+      "path": "all_merge-guideDistill/tests/test_guide_distill_unified_v4.py",
+      "existed": false,
+      "old_sha256": null,
+      "new_sha256": "7cee9c7800d0358121fb42db41dbb75a9bb2cb93f496c5bd41758152ba5b2b57"
+    },
+    {
+      "path": "run_guide_distill_unified_probe_v4_20261009.bat",
+      "existed": false,
+      "old_sha256": null,
+      "new_sha256": "622f749d8189040475e0322364368170c9eed099439ac40405538dedcc9afe62"
+    }
+  ]
+}

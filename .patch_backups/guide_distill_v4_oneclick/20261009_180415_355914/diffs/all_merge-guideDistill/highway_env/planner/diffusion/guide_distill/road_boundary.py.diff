@@ -1,0 +1,41 @@
+--- LOCAL/all_merge-guideDistill/highway_env/planner/diffusion/guide_distill/road_boundary.py
++++ V4/all_merge-guideDistill/highway_env/planner/diffusion/guide_distill/road_boundary.py
+@@ -136,32 +136,16 @@
+         return inside+outside
+ 
+     def dense_world_footprint_margins(self,xy:torch.Tensor,pose,config,*,tracking_aware=True):
+-        """Match W4 0.1s LINEAR interpolation, local->world, tracking OBB."""
++        """Match reward/MATP 10Hz CUBIC SPLINE, local->world, tracking OBB."""
+         from highway_env.planner.diffusion.trajectory_mode_reward.geometry import tracking_aware_dimensions
+         if xy.ndim!=3 or tuple(xy.shape[1:])!=(8,2):
+             raise ValueError('Expected [N,8,2] metric XY control points')
+         device=xy.device;dtype=xy.dtype
+-        dt=float(config.trajectory_dt_s);dt_dense=float(config.interpolation_dt_s)
+-        source=np.arange(9,dtype=np.float64)*dt
+-        target=np.arange(0.,source[-1]+.5*dt_dense,dt_dense)
+-        ii=np.clip(np.searchsorted(source,target,side='right')-1,0,7)
+-        ii=torch.as_tensor(ii,device=device,dtype=torch.long)
+-        alpha=torch.as_tensor((target-source[ii.detach().cpu().numpy()])/(source[ii.detach().cpu().numpy()+1]-source[ii.detach().cpu().numpy()]),device=device,dtype=dtype)
+-        knots=torch.cat([torch.zeros((len(xy),1,2),device=device,dtype=dtype),xy],dim=1)
+-        dense=knots[:,ii,:]+alpha[None,:,None]*(knots[:,ii+1,:]-knots[:,ii,:])
+-        delta=torch.diff(dense,dim=1,prepend=torch.zeros_like(dense[:,:1,:]))
+-        valid=(torch.linalg.vector_norm(delta,dim=-1)>1e-6)
+-        # torch.atan2(0, 0) has an undefined derivative. Replacing its
+-        # arguments *before* atan2 is essential: forward-filling the heading
+-        # later does not necessarily prevent NaNs in backward on CUDA.
+-        safe_dx=torch.where(valid,delta[:,:,0],torch.ones_like(delta[:,:,0]))
+-        safe_dy=torch.where(valid,delta[:,:,1],torch.zeros_like(delta[:,:,1]))
+-        yaw_raw=torch.atan2(safe_dy,safe_dx)
+-        ids=torch.arange(len(target),device=device)[None,:].expand(len(xy),-1)
+-        last=torch.cummax(torch.where(valid,ids,torch.zeros_like(ids)),dim=1).values
+-        yaw=torch.gather(yaw_raw,1,last)
+-        active=torch.cummax(valid.to(torch.int64),dim=1).values.bool()
+-        yaw=torch.where(active,yaw,torch.zeros_like(yaw))
++        from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import (
++            evaluate_dense_spline, headings_from_dense,
++        )
++        dense,_,_=evaluate_dense_spline(xy,config)
++        yaw=headings_from_dense(dense)
+         pose=torch.as_tensor(pose,device=device,dtype=dtype).reshape(3)
+         c=torch.cos(pose[2]);s=torch.sin(pose[2])
+         world_x=pose[0]+c*dense[...,0]-s*dense[...,1]
