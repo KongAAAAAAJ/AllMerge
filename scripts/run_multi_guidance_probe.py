@@ -25,6 +25,7 @@ from highway_env.planner.diffusion.guide_distill.exploration import guide_all
 from highway_env.planner.diffusion.guide_distill.matp_adapter import load_matp,project_w1
 from highway_env.planner.diffusion.guide_distill.road_boundary import RoadBoundaryField,_polygon_components
 from highway_env.planner.diffusion.trajectory_mode_reward.state_adapter import _planning_state_snapshot,_vehicle_pose
+from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import evaluate_dense_spline
 
 
 def args_parser():
@@ -104,8 +105,10 @@ def create_summary(rows,semantics,matp):
            'guided_delta_mean':float((guided-base).mean()),
            'guided_positive_fraction':float(((guided-base)>1e-6).mean()),
            'guided_exceeds_noise48_best_fraction':avg(rows,'guided_exceeds_noise48_best'),
-           'guided_ade_m':avg(rows,'guided_ade_m'),
+           'guided_ade_m':avg(rows,'guided_ade_m'),  # 10Hz dense, t=0.1..4.0s
            'guided_lateral_ade_m':avg(rows,'guided_lateral_ade_m'),
+           'sparse_control_ade_m':avg(rows,'sparse_control_ade_m'),
+           'sparse_control_lateral_ade_m':avg(rows,'sparse_control_lateral_ade_m'),
            'road_guided_gain_mean':avg(rows,'road_reward_guided_gain'),
            'road_min_margin_guided_mean':avg(rows,'road_union_min_margin_guided_m'),
            'road_feasible_guided':avg(rows,'road_feasible_guided'),
@@ -121,6 +124,8 @@ def create_summary(rows,semantics,matp):
         entry.update({'matp_reward_mean':float(post.mean()),
                       'matp_vs_guided_reward_mean':float((post-guided).mean()),
                       'matp_vs_original_reward_mean':float((post-base).mean()),
+                      'matp_ade_m':avg(rows,'matp_ade_m'),
+                      'matp_lateral_ade_m':avg(rows,'matp_lateral_ade_m'),
                       'road_feasible_matp':avg(rows,'road_feasible_matp'),
                       'curvature_feasible_matp':avg(rows,'matp_curvature_feasible'),
                       'curvature_penalty_matp_mean':avg(rows,'curvature_penalty_matp'),
@@ -128,7 +133,8 @@ def create_summary(rows,semantics,matp):
                       'curvature_valid_points_matp_mean':avg(rows,'curvature_valid_points_matp'),
                       'unsafe_matp':avg(rows,'matp_unsafe'),
                       'teacher_candidate_rate':avg(rows,'teacher_candidate')})
-    summary={'reward_source':'current progress_comfort (V5 curvature, cubic dense, 100m)',
+    summary={'trajectory_comparison':'All geometry and ADE use shared ClampedCubicTrajectorySpline 10Hz, 41 samples; ADE excludes fixed t=0',
+             'reward_source':'current progress_comfort (V5 curvature, cubic dense, 100m)',
              'guidance_directions':list(DIRECTIONS),'reward_semantics':semantics,
              'matp_enabled':matp,'unified':entry,'by_scenario':{}}
     for scenario in sorted(set(r['scenario'] for r in rows)):
@@ -184,17 +190,16 @@ def create_plots(rows,gallery,out,has_matp):
         rng=np.random.default_rng(123)
         ids=np.arange(len(gallery));rng.shuffle(ids)
         picks=[gallery[i] for i in ids[:9]]
-        from scipy.interpolate import CubicSpline
         fig,axes=plt.subplots(3,3,figsize=(13,12))
         for ax,e in zip(axes.flat,picks):
-            def draw(xy,label):
-                t=np.arange(9)*.5;knots=np.concatenate([np.zeros((1,2)),xy],axis=0)
-                v0=np.asarray([max(float(xy[0,0]),0)/.5,0]);vf=(xy[-1]-xy[-2])/.5
-                dense=CubicSpline(t,knots,bc_type=((1,v0),(1,vf)))(np.arange(41)*.1)
+            def draw(dense_key,sparse_key,label):
+                dense=e[dense_key]  # exact production 10Hz ClampedCubicTrajectorySpline
                 line,=ax.plot(dense[:,0],dense[:,1],lw=1.5,label=label)
-                ax.scatter(xy[:,0],xy[:,1],s=11,color=line.get_color())
-            draw(e['base'],'Original');draw(e['guided'],'Unified guidance')
-            if e['matp'] is not None:draw(e['matp'],'MATP W1')
+                ax.scatter(e[sparse_key][:,0],e[sparse_key][:,1],
+                           s=10,marker='o',alpha=.5,color=line.get_color())  # control points only
+            draw('base_dense','base','Original')
+            draw('guided_dense','guided','Unified guidance')
+            if e['matp_dense'] is not None:draw('matp_dense','matp','MATP W1')
             ax.grid(alpha=.25);ax.set_aspect('equal',adjustable='datalim')
             ax.set_title(f"{e['scenario']} state {e['state_id']}")
         axes.flat[0].legend(fontsize=8)
@@ -207,11 +212,12 @@ def create_plots(rows,gallery,out,has_matp):
                 pose=e['role_pose'];c=np.cos(pose[2]);s=np.sin(pose[2])
                 def world(xy):
                     return np.column_stack((pose[0]+c*xy[:,0]-s*xy[:,1],pose[1]+s*xy[:,0]+c*xy[:,1]))
-                for key,label in [('base','Original'),('guided','Unified'),('matp','MATP')]:
+                for key,label in [('base_dense','Original'),('guided_dense','Unified'),('matp_dense','MATP')]:
                     if e[key] is not None:
-                        pts=world(e[key]);ax.plot(pts[:,0],pts[:,1],lw=1.3,label=label)
+                        pts=world(e[key])  # transform 41 dense samples, NOT 8 control points
+                        ax.plot(pts[:,0],pts[:,1],lw=1.3,label=label)
                 for bound in e['road_outline']:ax.plot(bound[:,0],bound[:,1],c='black',lw=.7)
-                center=world(e['base'])
+                center=world(e['base_dense'])
                 ax.set_xlim(center[:,0].min()-12,center[:,0].max()+12)
                 ax.set_ylim(center[:,1].min()-12,center[:,1].max()+12)
                 ax.set_aspect('equal',adjustable='box');ax.grid(alpha=.2)
@@ -302,16 +308,28 @@ def main():
                         post_road=road.components(physical,role_pose,cfg)
                     else:
                         physical=diag=None;r2=i2=post_road=None
+                # Match the EXACT production Reward/Guidance/MATP dense decoder.
+                # Decode the same sparse candidates with the same endpoint contract.
+                with torch.no_grad():
+                    original_dense=evaluate_dense_spline(xy,cfg)[0].detach().cpu().numpy()
+                    guided_dense=evaluate_dense_spline(guided_xy,cfg)[0].detach().cpu().numpy()
+                    matp_dense=(evaluate_dense_spline(physical,cfg)[0].detach().cpu().numpy()
+                                if matp is not None else None)
+                if original_dense.shape[1:]!=(41,2) or guided_dense.shape!=original_dense.shape:
+                    raise RuntimeError('Unexpected 10Hz dense decoder output shape')
                 grad_norm=torch.linalg.vector_norm(g.flatten(start_dim=1),dim=-1).cpu().numpy()
                 for i in range(args.guide_count):
                     diff=guided_xy[i].cpu().numpy()-xy[i].cpu().numpy()
+                    dense_diff=guided_dense[i,1:]-original_dense[i,1:]  # 40 future points
                     row={'scenario':name,'state_id':count,'env_seed':env_seed,'group_id':i,
                          'direction':'balanced','reward_before':float(r0[i]),'reward_guided':float(r1[i]),
                          'guided_delta_reward':float(r1[i]-r0[i]),
                          'noise48_best_reward':noise_best,'guided_exceeds_noise48_best':int(r1[i]>noise_best+1e-6),
                          'initial_gradient_norm':float(grad_norm[i]),
-                         'guided_ade_m':float(np.linalg.norm(diff,axis=-1).mean()),
-                         'guided_lateral_ade_m':float(np.abs(diff[:,1]).mean()),
+                         'guided_ade_m':float(np.linalg.norm(dense_diff,axis=-1).mean()),
+                         'guided_lateral_ade_m':float(np.abs(dense_diff[:,1]).mean()),
+                         'sparse_control_ade_m':float(np.linalg.norm(diff,axis=-1).mean()),
+                         'sparse_control_lateral_ade_m':float(np.abs(diff[:,1]).mean()),
                          'guided_unsafe':float(i1['unsafe'][i]),
                          'guided_curvature_feasible':int(k_before[i]<=.020001) if matp else float('nan'),
                          'road_reward_before':float(raw_road['road'][i]),
@@ -340,6 +358,8 @@ def main():
                         row.update({'reward_matp':float(r2[i]),
                             'matp_vs_guided_reward':float(r2[i]-r1[i]),
                             'matp_vs_original_reward':float(r2[i]-r0[i]),
+                            'matp_ade_m':float(np.linalg.norm(matp_dense[i,1:]-guided_dense[i,1:],axis=-1).mean()),
+                            'matp_lateral_ade_m':float(np.abs(matp_dense[i,1:,1]-guided_dense[i,1:,1]).mean()),
                             'matp_unsafe':float(i2['unsafe'][i]),
                             'matp_collision':float(i2['collision'][i]),
                             'matp_curvature_feasible':int(k_after[i]<=.020001),
@@ -365,6 +385,9 @@ def main():
                         'base':xy[0].cpu().numpy().copy(),
                         'guided':guided_xy[0].cpu().numpy().copy(),
                         'matp':physical[0].cpu().numpy().copy() if matp else None,
+                        'base_dense':original_dense[0].copy(),
+                        'guided_dense':guided_dense[0].copy(),
+                        'matp_dense':matp_dense[0].copy() if matp_dense is not None else None,
                         'role_pose':role_pose.copy(),
                         'road_outline':[np.asarray(p.exterior.coords) for p in _polygon_components(road.geometry)]})
                 print(f'[state] {name}:{count+1}/{args.samples_per_scenario} '
