@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only UNIFIED Reward Guidance exploration probe (V5).
+"""Read-only UNIFIED Reward Guidance exploration probe (V4).
 
 Legacy filename intentionally retained for existing Windows launchers.
 Only the current `progress_comfort` task objective guides the search.
@@ -43,12 +43,6 @@ def args_parser():
     p.add_argument('--guidance-trust-rms-m',type=float,default=.75)
     p.add_argument('--guidance-max-point-move-m',type=float,default=1.25)
     p.add_argument('--reward-type',choices=('progress_comfort',),default='progress_comfort')
-    # V5: same task reward for production, Guidance and MATP post-score.
-    p.add_argument('--curvature-weight',type=float,default=0.05,
-                   help='0=V4; positive=V5 full-reward curvature term')
-    p.add_argument('--curvature-peak-weight',type=float,default=0.5)
-    p.add_argument('--curvature-margin-weight',type=float,default=0.05,
-                   help='0=V5-A violation+peak; default=V5-B')
     p.add_argument('--road-sampling-m',type=float,default=.4)
     p.add_argument('--road-inside-scale-m',type=float,default=2.0)
     p.add_argument('--road-inside-bonus',type=float,default=1.)
@@ -59,7 +53,7 @@ def args_parser():
     p.add_argument('--group-action',type=int,default=0)
     p.add_argument('--max-seed-attempts',type=int,default=1000)
     p.add_argument('--device',default='cuda' if torch.cuda.is_available() else 'cpu')
-    p.add_argument('--output-dir',type=Path,default=Path('outputs/guide_distill_reward_v5'))
+    p.add_argument('--output-dir',type=Path,default=Path('outputs/guide_distill_reward_v4'))
     p.add_argument('--no-plots',action='store_true')
     return p.parse_args()
 
@@ -77,9 +71,7 @@ def paired_score(adapter,features,context,candidates,*,role,mode):
         else:return np.full(len(values),np.nan)
         return np.asarray(arr[role,mode,:]).copy()
     info={k:field(k) for k in ('unsafe','collision','out_of_drivable',
-        'minimum_road_margin_m','comfort_penalty','progress_score','road_boundary_reward',
-        'curvature_penalty','curvature_max_abs','curvature_valid_points',
-        'curvature_violation_penalty','curvature_peak_penalty','curvature_margin_penalty')}
+        'minimum_road_margin_m','comfort_penalty','progress_score','road_boundary_reward')}
     info['legacy_w4_reward']=np.asarray(result.rewards)[role,mode,:].copy()
     return values,info,result
 
@@ -109,11 +101,7 @@ def create_summary(rows,semantics,matp):
            'road_guided_gain_mean':avg(rows,'road_reward_guided_gain'),
            'road_min_margin_guided_mean':avg(rows,'road_union_min_margin_guided_m'),
            'road_feasible_guided':avg(rows,'road_feasible_guided'),
-            'curvature_feasible_guided':avg(rows,'guided_curvature_feasible'),
-           'reward_without_curvature_gain_mean':avg(rows,'reward_without_curvature_gain'),
-           'curvature_penalty_before_mean':avg(rows,'curvature_penalty_before'),
-           'curvature_penalty_guided_mean':avg(rows,'curvature_penalty_guided'),
-           'curvature_max_abs_guided_mean':avg(rows,'curvature_max_abs_guided'),
+           'curvature_feasible_guided':avg(rows,'guided_curvature_feasible'),
            'unsafe_guided':avg(rows,'guided_unsafe'),
            'gradient_norm_mean':avg(rows,'initial_gradient_norm')}
     if matp:
@@ -123,12 +111,9 @@ def create_summary(rows,semantics,matp):
                       'matp_vs_original_reward_mean':float((post-base).mean()),
                       'road_feasible_matp':avg(rows,'road_feasible_matp'),
                       'curvature_feasible_matp':avg(rows,'matp_curvature_feasible'),
-                      'curvature_penalty_matp_mean':avg(rows,'curvature_penalty_matp'),
-                      'curvature_max_abs_matp_mean':avg(rows,'curvature_max_abs_matp'),
-                      'curvature_valid_points_matp_mean':avg(rows,'curvature_valid_points_matp'),
                       'unsafe_matp':avg(rows,'matp_unsafe'),
                       'teacher_candidate_rate':avg(rows,'teacher_candidate')})
-    summary={'reward_source':'current progress_comfort (V5 curvature, cubic dense, 100m)',
+    summary={'reward_source':'current progress_comfort (cubic dense, 100m)',
              'guidance_directions':list(DIRECTIONS),'reward_semantics':semantics,
              'matp_enabled':matp,'unified':entry,'by_scenario':{}}
     for scenario in sorted(set(r['scenario'] for r in rows)):
@@ -139,9 +124,6 @@ def create_summary(rows,semantics,matp):
             'road_feasible_guided':avg(sub,'road_feasible_guided'),
             'road_feasible_matp':avg(sub,'road_feasible_matp'),
             'curvature_feasible_matp':avg(sub,'matp_curvature_feasible'),
-            'curvature_penalty_before':avg(sub,'curvature_penalty_before'),
-            'curvature_penalty_guided':avg(sub,'curvature_penalty_guided'),
-            'curvature_penalty_matp':avg(sub,'curvature_penalty_matp'),
             'teacher_candidate_rate':avg(sub,'teacher_candidate'),
         }
     return summary
@@ -172,14 +154,6 @@ def create_plots(rows,gallery,out,has_matp):
             ax.bar(x+width/2,[avg([r for r in rows if r['scenario']==s],keypairs[1]) or 0 for s in scenarios],width,label='MATP')
         ax.set_xticks(x,scenarios,rotation=20);ax.set_ylim(0,1);ax.set_title(title);ax.legend()
     fig.tight_layout();fig.savefig(out/'03_feasibility_by_scenario.png',dpi=180);plt.close(fig)
-    fig,ax=plt.subplots(figsize=(7,4))
-    before=np.asarray([r['curvature_max_abs_before'] for r in rows])
-    guided=np.asarray([r['curvature_max_abs_guided'] for r in rows])
-    ax.hist(before,bins=35,alpha=.5,label='Original')
-    ax.hist(guided,bins=35,alpha=.5,label='Unified guidance')
-    ax.axvline(.02,c='black',ls='--',label='MATP limit')
-    ax.set_xlabel('Max absolute curvature (1/m)');ax.set_title('V5 Curvature before/after guidance');ax.legend()
-    fig.tight_layout();fig.savefig(out/'06_curvature_before_after_guidance.png',dpi=180);plt.close(fig)
     if gallery:
         rng=np.random.default_rng(123)
         ids=np.arange(len(gallery));rng.shuffle(ids)
@@ -230,9 +204,7 @@ def main():
     device=torch.device(args.device)
     guidance_root=args.guidance_root.expanduser().resolve()
     matp=None if args.no_matp else load_matp(guidance_root)
-    cfg=replace(TrajectoryModeRewardConfig(), task_curvature_weight=args.curvature_weight,
-                task_curvature_peak_weight=args.curvature_peak_weight,
-                task_curvature_margin_weight=args.curvature_margin_weight)
+    cfg=TrajectoryModeRewardConfig()
     proxy=DifferentiableTaskReward(cfg,device)
     model_adapter,model=_build_model(CheckpointSpec(name='pretrained',path=args.checkpoint.resolve()),device)
     sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=args.eta)
@@ -322,17 +294,6 @@ def main():
                          'road_feasible_guided':int(float(gd_road['road_min_margin_m'][i])>=0),
                          'original_progress_score':float(i0['progress_score'][i]),
                          'guided_progress_score':float(i1['progress_score'][i]),
-                         'reward_without_curvature_before':float(r0[i]+cfg.task_curvature_weight*i0['curvature_penalty'][i]),
-                         'reward_without_curvature_guided':float(r1[i]+cfg.task_curvature_weight*i1['curvature_penalty'][i]),
-                         'reward_without_curvature_gain':float((r1[i]-r0[i])+cfg.task_curvature_weight*(i1['curvature_penalty'][i]-i0['curvature_penalty'][i])),
-                         'curvature_penalty_before':float(i0['curvature_penalty'][i]),
-                         'curvature_penalty_guided':float(i1['curvature_penalty'][i]),
-                         'curvature_max_abs_before':float(i0['curvature_max_abs'][i]),
-                         'curvature_max_abs_guided':float(i1['curvature_max_abs'][i]),
-                         'curvature_valid_points_guided':float(i1['curvature_valid_points'][i]),
-                         'curvature_violation_guided':float(i1['curvature_violation_penalty'][i]),
-                         'curvature_peak_guided':float(i1['curvature_peak_penalty'][i]),
-                         'curvature_margin_guided':float(i1['curvature_margin_penalty'][i]),
                          'original_comfort_penalty':float(i0['comfort_penalty'][i]),
                          'guided_comfort_penalty':float(i1['comfort_penalty'][i]),
                          'road_pose_source':pose_source}
@@ -348,14 +309,8 @@ def main():
                             'road_union_min_margin_matp_m':float(post_road['road_min_margin_m'][i]),
                             'matp_progress_score':float(i2['progress_score'][i]),
                             'matp_comfort_penalty':float(i2['comfort_penalty'][i]),
-                            'reward_without_curvature_matp':float(r2[i]+cfg.task_curvature_weight*i2['curvature_penalty'][i]),
-                            'curvature_penalty_matp':float(i2['curvature_penalty'][i]),
-                            'curvature_max_abs_matp':float(i2['curvature_max_abs'][i]),
-                            'curvature_valid_points_matp':float(i2['curvature_valid_points'][i]),
-                            'curvature_valid_fraction_matp':float(i2['curvature_valid_points'][i])/39.0,
                             'teacher_candidate':int((r2[i]>r0[i]+1e-6)
                                 and (k_after[i]<=.020001)
-                                and (float(i2['curvature_valid_points'][i])>=1.0)
                                 and (float(post_road['road_min_margin_m'][i])>=0)
                                 and (float(i2['collision'][i])<.5)
                                 and (float(i2['unsafe'][i])<.5))})

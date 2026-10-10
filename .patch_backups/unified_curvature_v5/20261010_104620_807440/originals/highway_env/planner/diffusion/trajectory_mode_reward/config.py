@@ -66,18 +66,6 @@ class TrajectoryModeRewardConfig:
     task_comfort_weight: float = 0.10
     task_road_weight: float = 0.40
 
-    # V5 - MATP-aligned curvature component of the SAME progress_comfort reward.
-    # 0.0 -> V4 ablation; margin_weight=0.0 -> V5-A; defaults -> V5-B.
-    task_curvature_weight: float = 0.05
-    task_curvature_peak_weight: float = 0.5
-    task_curvature_margin_weight: float = 0.05
-    curvature_limit_m_inv: float = 0.020
-    curvature_active_threshold_m_inv: float = 0.015
-    curvature_min_segment_m: float = 0.25
-    curvature_matp_beta: float = 2.0
-    curvature_topk: int = 8
-    curvature_huber_delta: float = 0.25
-
     def __post_init__(self) -> None:
         if (
             isinstance(self.trajectories_per_mode, bool)
@@ -105,9 +93,6 @@ class TrajectoryModeRewardConfig:
             "progress_norm_m",
             "no_risk_gap_m",
             "no_risk_ttc_s",
-            "curvature_limit_m_inv",
-            "curvature_min_segment_m",
-            "curvature_huber_delta",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -128,11 +113,6 @@ class TrajectoryModeRewardConfig:
                     f"{name} must be finite and within [0,{maximum}]"
                 )
 
-        if not (0 <= float(self.curvature_active_threshold_m_inv) < float(self.curvature_limit_m_inv)):
-            raise TrajectoryModeRewardError("curvature active threshold must be in [0, limit)")
-        if isinstance(self.curvature_topk, bool) or not isinstance(self.curvature_topk, int) or self.curvature_topk < 1:
-            raise TrajectoryModeRewardError("curvature_topk must be a positive integer")
-
         if self.interpolation_dt_s > self.trajectory_dt_s:
             raise TrajectoryModeRewardError(
                 "interpolation_dt_s cannot exceed trajectory_dt_s"
@@ -147,10 +127,6 @@ class TrajectoryModeRewardConfig:
             "task_progress_weight",
             "task_comfort_weight",
             "task_road_weight",
-            "task_curvature_weight",
-            "task_curvature_peak_weight",
-            "task_curvature_margin_weight",
-            "curvature_matp_beta",
             "collision_penalty",
             "out_of_drivable_penalty",
             "temporal_max_weight",

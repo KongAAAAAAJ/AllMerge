@@ -59,7 +59,6 @@ def task_reward_from_w4_result(
     progress_comfort uses the unified 10Hz spline objective:
       task_progress_weight * progress_score - task_comfort_weight * comfort_penalty
       + task_road_weight * road_boundary_reward
-      - task_curvature_weight * curvature_penalty
 
     Road BOUNDARY continuous reward is part of progress_comfort; collision,
     TTC and vehicle gap remain hard constraint / safety signals.
@@ -83,16 +82,10 @@ def task_reward_from_w4_result(
     road = _component_to_grpo(
         result.components["road_boundary_reward"], device=device, dtype=dtype
     )
-    if "curvature_penalty" not in result.components:
-        raise RuntimeError("V5 progress_comfort scorer missing curvature_penalty")
-    curvature = _component_to_grpo(
-        result.components["curvature_penalty"], device=device, dtype=dtype
-    )
     return (
         float(config.task_progress_weight) * progress
         - float(config.task_comfort_weight) * comfort
         + float(config.task_road_weight) * road
-        - float(config.task_curvature_weight) * curvature
     )
 
 

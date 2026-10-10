@@ -63,16 +63,6 @@ class CounterfactualScoringMixin:
         # The signed road-union reward is also used by the differentiable Guide.
         # The old W4 road penalty/constraints are preserved as distinct metrics.
         from .road_union_reward import production_road_reward
-        # Curvature V5 shares the exact MATP-compatible 10Hz cubic geometry.
-        from .curvature_reward import curvature_reward_components
-        from .spline_dense import evaluate_dense_spline
-        import torch
-        with torch.no_grad():
-            control_points = torch.as_tensor(target_trajectories, dtype=torch.float64)
-            curvature_dense, _, _ = evaluate_dense_spline(control_points, self.config)
-            curvature_terms = curvature_reward_components(curvature_dense, self.config)
-        curvature_numpy = {k: v.detach().cpu().numpy().astype(np.float32)
-                           for k, v in curvature_terms.items()}
         road_boundary_reward = production_road_reward(
             target_trajectories, poses[target_role], road, self.config
         )
@@ -254,7 +244,6 @@ class CounterfactualScoringMixin:
                 "road_penalty": road_penalty.astype(np.float32),
                 "comfort_penalty": comfort_penalty.astype(np.float32),
                 "road_boundary_reward": road_boundary_reward.astype(np.float32),
-                **curvature_numpy,
                 "minimum_background_gap_m": minimum_background_gap.astype(np.float32),
                 "minimum_teammate_gap_m": minimum_teammate_gap.astype(np.float32),
                 "minimum_road_margin_m": minimum_road_margin.astype(np.float32),

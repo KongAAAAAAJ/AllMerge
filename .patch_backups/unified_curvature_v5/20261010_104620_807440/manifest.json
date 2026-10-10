@@ -1,0 +1,57 @@
+{
+  "tag": "UNIFIED_CURVATURE_V5_COMPAT_20261010",
+  "changes": {
+    "scripts/run_multi_guidance_probe.py": {
+      "old_sha256": "c42a39ea39e1f0bdc6f0e57e26de9d94d8ea92ffc66b28e30051960f6da9c77b",
+      "new_sha256": "d4a209f8dab3ae42ffc530e935b8202b74e9b2ee30b55400f20d0c9f6d0e6de5"
+    },
+    "tests/test_guide_distill_unified_v4.py": {
+      "old_sha256": "7cee9c7800d0358121fb42db41dbb75a9bb2cb93f496c5bd41758152ba5b2b57",
+      "new_sha256": "f132968a804b71176eec07200ef75e431aa8d6dde1ade82c4bc7e61516b785cb"
+    },
+    "tests/test_guide_distill_probe.py": {
+      "old_sha256": "b06e8a9ea711c5bc7242ed4cdf8fbe985c64d3028b0c852c600c057da25a9206",
+      "new_sha256": "bc2b32618298f978a0f2c859a7b57893a4be6115bf87f67f78a4607a179be297"
+    },
+    "tests/test_guide_distill_reward_alignment_v3.py": {
+      "old_sha256": "388d04163d0d81b33b27dfd87d31fd0ae630a81cf44abefb87bcc437ef6019c1",
+      "new_sha256": "07d0348237f76f065ae7afe2137cad09af2d70b438ef34c9bfa5222ecaf3ccbc"
+    },
+    "tests/test_guide_distill_curvature_v5.py": {
+      "old_sha256": null,
+      "new_sha256": "6aec2cf3762fb7d23269456c90be8b838a15a642b77e1c36d1779796ec037db6"
+    },
+    "highway_env/planner/diffusion/grpo/task_reward.py": {
+      "old_sha256": "f017ddfc8bebe8f4409414dc35e4ee6a485aa9044cab07fb2ec6f14b28f31ba2",
+      "new_sha256": "a7b3a45a702c97cab31ae38002dc137068ba59288480f2f6bdb59c124262c758"
+    },
+    "highway_env/planner/diffusion/trajectory_mode_reward/counterfactual.py": {
+      "old_sha256": "f64ff579e68384420fe65f2f11fe4f6dd65814b252cf802bd546f9a61a14915b",
+      "new_sha256": "8b4fb34f000fd8fde6487647f95d5c41593453734c99825f6fa8816ecdcc7005"
+    },
+    "highway_env/planner/diffusion/trajectory_mode_reward/results.py": {
+      "old_sha256": "3ab31a6481f66275b893fc5a08048cfe8d9b50abff8ee926dd22af52c2e1db96",
+      "new_sha256": "f2c86873ffd04b32c5b41f565782fdd8e2093ab0dc98cdf21a2550adbeb5877b"
+    },
+    "highway_env/planner/diffusion/trajectory_mode_reward/curvature_reward.py": {
+      "old_sha256": null,
+      "new_sha256": "e0b3e62e0ca5d87a59399eba29da3fb80bca56649e00fb902d5a6fcd3902ad73"
+    },
+    "highway_env/planner/diffusion/trajectory_mode_reward/config.py": {
+      "old_sha256": "376f4c26a3bde1ee92eca85f72e7b86f5cd0e15540dbc50371fb76266f551792",
+      "new_sha256": "08c904e1b45808814a393e256a32dedf86284169d23fd95c98e51f2dbe4e3a2d"
+    },
+    "highway_env/planner/diffusion/trajectory_mode_reward/scoring.py": {
+      "old_sha256": "c96f37702dd65fa05b4be2a2f9da1a3a448065a54003513d1c984ef3b66460e8",
+      "new_sha256": "5c81c4d605ea16dfa2c96e16992cb6344d9d36f19973390d268201321f690907"
+    },
+    "highway_env/planner/diffusion/guide_distill/reward_gradient.py": {
+      "old_sha256": "0810255c65f857b4e5bb1a0a03c3c853ed19aab8df39f21f5ab88cd2ccbdb92b",
+      "new_sha256": "9d4c1430260fb9f999ab4d2d2406474efdac0748ba0f7432d890f153c6e434df"
+    },
+    "__launcher__": {
+      "old_sha256": null,
+      "new_sha256": "84e7949b9946e106db230c62453ad8c8a0ff5f454b919684f14558fc68e6d7bb"
+    }
+  }
+}

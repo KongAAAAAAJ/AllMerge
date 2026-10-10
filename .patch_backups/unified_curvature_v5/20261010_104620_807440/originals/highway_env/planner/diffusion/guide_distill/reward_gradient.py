@@ -3,8 +3,7 @@
 Existing production `progress_comfort` is the only optimized objective:
     R = task_progress_weight * progress_score
       - task_comfort_weight * comfort_penalty
-      + task_road_weight * road_boundary_reward
-      - task_curvature_weight * MATP-aligned curvature_penalty.
+      + task_road_weight * road_boundary_reward.
 All terms use the current worktree's cubic-dense scorer and road boundary model.
 """
 from __future__ import annotations
@@ -16,7 +15,6 @@ import torch
 from highway_env.planner.diffusion.trajectory_mode_reward.config import TrajectoryModeRewardConfig
 from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
 from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import evaluate_dense_spline, task_comfort_from_dense
-from highway_env.planner.diffusion.trajectory_mode_reward.curvature_reward import curvature_reward_components
 
 # Kept as 'balanced' for existing probe/test compatibility, but this is the ONLY
 # guidance direction and is exactly the full production task objective.
@@ -36,7 +34,7 @@ class DifferentiableTaskReward:
                     'task_road_weight','trajectory_dt_s','interpolation_dt_s')
         absent = [k for k in required if not hasattr(cfg,k)]
         if absent:
-            raise RuntimeError('V5 unified reward config missing: '+str(absent))
+            raise RuntimeError('V4 unified reward config missing: '+str(absent))
         self.semantics = {
             'reward_type': 'progress_comfort',
             'guidance': 'balanced (unified task reward ONLY)',
@@ -45,13 +43,6 @@ class DifferentiableTaskReward:
                         'comfort': float(cfg.task_comfort_weight),
                         'road': float(cfg.task_road_weight)},
             'spline': 'ClampedCubicTrajectorySpline 10 Hz',
-            'curvature': {'weight': float(cfg.task_curvature_weight),
-                          'limit': float(cfg.curvature_limit_m_inv),
-                          'active_threshold': float(cfg.curvature_active_threshold_m_inv),
-                          'beta': float(cfg.curvature_matp_beta),
-                          'topk': int(cfg.curvature_topk),
-                          'peak_weight': float(cfg.task_curvature_peak_weight),
-                          'margin_weight': float(cfg.task_curvature_margin_weight)},
         }
         self.gradient_fallback_counts = {}
 
@@ -72,14 +63,10 @@ class DifferentiableTaskReward:
         progress = (xy[:,-1,0]/float(cfg.progress_norm_m)).clamp(0.,1.)
         comfort = task_comfort_from_dense(dense, cfg)
         road = self.road_field.components(xy, self.role_pose, cfg)['road']
-        curvature = curvature_reward_components(dense, cfg)
-        native = (float(cfg.task_progress_weight)*progress
-                  - float(cfg.task_comfort_weight)*comfort
-                  - float(cfg.task_curvature_weight)*curvature['curvature_penalty'])
+        native = float(cfg.task_progress_weight)*progress - float(cfg.task_comfort_weight)*comfort
         unified = native + float(cfg.task_road_weight)*road
         return {'balanced':unified, 'native_balanced':native, 'raw_progress':progress,
-                'comfort_penalty':comfort, 'road':road,
-                **curvature}
+                'comfort_penalty':comfort, 'road':road}
 
     def _road_finite_difference(self, xy, *, step_m=1e-3):
         with torch.no_grad():
@@ -128,8 +115,7 @@ class DifferentiableTaskReward:
         values=self.components(xy.detach())
         diffs={}
         for key,ours in [('progress_score','raw_progress'),('comfort_penalty','comfort_penalty'),
-                         ('road_boundary_reward','road'),
-                         ('curvature_penalty','curvature_penalty')]:
+                         ('road_boundary_reward','road')]:
             if key not in result.components:raise RuntimeError(f'Production scorer missing {key}')
             actual=torch.as_tensor(np.asarray(result.components[key])[role,mode,:],device=xy.device,dtype=xy.dtype)
             diffs[key]=float((actual-values[ours].detach()).abs().max())
