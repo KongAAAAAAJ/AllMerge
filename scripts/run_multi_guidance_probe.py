@@ -24,6 +24,7 @@ from highway_env.planner.diffusion.guide_distill.reward_gradient import Differen
 from highway_env.planner.diffusion.guide_distill.exploration import guide_all
 from highway_env.planner.diffusion.guide_distill.matp_adapter import load_matp,project_w1
 from highway_env.planner.diffusion.guide_distill.road_boundary import RoadBoundaryField,_polygon_components
+from highway_env.planner.diffusion.trajectory_mode_reward.centerline_reward import centerline_reward_components
 from highway_env.planner.diffusion.trajectory_mode_reward.state_adapter import _planning_state_snapshot,_vehicle_pose
 from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import evaluate_dense_spline
 
@@ -45,6 +46,9 @@ def args_parser():
     p.add_argument('--guidance-max-point-move-m',type=float,default=1.25)
     p.add_argument('--reward-type',choices=('progress_comfort',),default='progress_comfort')
     # V5: same task reward for production, Guidance and MATP post-score.
+    p.add_argument('--centerline-weight',type=float,default=0.15)
+    p.add_argument('--centerline-scale-m',type=float,default=2.0)
+    p.add_argument('--centerline-late-power',type=float,default=2.0)
     p.add_argument('--curvature-weight',type=float,default=0.05,
                    help='0=V4; positive=V5 full-reward curvature term')
     p.add_argument('--curvature-peak-weight',type=float,default=0.5)
@@ -80,6 +84,7 @@ def paired_score(adapter,features,context,candidates,*,role,mode):
     info={k:field(k) for k in ('unsafe','collision','out_of_drivable',
         'minimum_road_margin_m','comfort_penalty','progress_score','road_boundary_reward',
         'curvature_penalty','curvature_max_abs','curvature_valid_points',
+        'centerline_penalty','centerline_mean_error_m','centerline_late_error_m','centerline_valid',
         'curvature_violation_penalty','curvature_peak_penalty','curvature_margin_penalty')}
     info['legacy_w4_reward']=np.asarray(result.rewards)[role,mode,:].copy()
     return values,info,result
@@ -114,6 +119,9 @@ def create_summary(rows,semantics,matp):
            'road_feasible_guided':avg(rows,'road_feasible_guided'),
             'curvature_feasible_guided':avg(rows,'guided_curvature_feasible'),
            'reward_without_curvature_gain_mean':avg(rows,'reward_without_curvature_gain'),
+           'centerline_penalty_guided_mean':avg(rows,'centerline_penalty_guided'),
+           'centerline_late_error_before_m':avg(rows,'centerline_late_error_before_m'),
+           'centerline_late_error_guided_m':avg(rows,'centerline_late_error_guided_m'),
            'curvature_penalty_before_mean':avg(rows,'curvature_penalty_before'),
            'curvature_penalty_guided_mean':avg(rows,'curvature_penalty_guided'),
            'curvature_max_abs_guided_mean':avg(rows,'curvature_max_abs_guided'),
@@ -125,6 +133,7 @@ def create_summary(rows,semantics,matp):
                       'matp_vs_guided_reward_mean':float((post-guided).mean()),
                       'matp_vs_original_reward_mean':float((post-base).mean()),
                       'matp_ade_m':avg(rows,'matp_ade_m'),
+                      'centerline_late_error_matp_m':avg(rows,'centerline_late_error_matp_m'),
                       'matp_lateral_ade_m':avg(rows,'matp_lateral_ade_m'),
                       'road_feasible_matp':avg(rows,'road_feasible_matp'),
                       'curvature_feasible_matp':avg(rows,'matp_curvature_feasible'),
@@ -200,6 +209,9 @@ def create_plots(rows,gallery,out,has_matp):
             draw('base_dense','base','Original')
             draw('guided_dense','guided','Unified guidance')
             if e['matp_dense'] is not None:draw('matp_dense','matp','MATP W1')
+            if 'target_lane_centerline' in e:
+                ref=e['target_lane_centerline']
+                ax.plot(ref[:,0],ref[:,1],c='purple',ls='--',lw=1,label='Target lane center')
             ax.grid(alpha=.25);ax.set_aspect('equal',adjustable='datalim')
             ax.set_title(f"{e['scenario']} state {e['state_id']}")
         axes.flat[0].legend(fontsize=8)
@@ -217,6 +229,9 @@ def create_plots(rows,gallery,out,has_matp):
                         pts=world(e[key])  # transform 41 dense samples, NOT 8 control points
                         ax.plot(pts[:,0],pts[:,1],lw=1.3,label=label)
                 for bound in e['road_outline']:ax.plot(bound[:,0],bound[:,1],c='black',lw=.7)
+                if 'target_lane_centerline' in e:
+                    mid=world(e['target_lane_centerline'])
+                    ax.plot(mid[:,0],mid[:,1],c='purple',ls='--',lw=1.3,label='Target lane center')
                 center=world(e['base_dense'])
                 ax.set_xlim(center[:,0].min()-12,center[:,0].max()+12)
                 ax.set_ylim(center[:,1].min()-12,center[:,1].max()+12)
@@ -224,6 +239,18 @@ def create_plots(rows,gallery,out,has_matp):
             axes.flat[0].legend(fontsize=8)
             for ax in axes.flat[len(curves):]:ax.axis('off')
             fig.tight_layout();fig.savefig(out/'05_curved_outer_boundary_3x3.png',dpi=180);plt.close(fig)
+    # Explicit V5.2 metric: target-lane late (2-4s) offset, not road-union margin.
+    fig,ax=plt.subplots(figsize=(9,4))
+    xs=np.arange(len(scenarios));ww=.23
+    for offset,key,label in [(-ww,'centerline_late_error_before_m','Original'),
+                              (0,'centerline_late_error_guided_m','Guided'),
+                              (ww,'centerline_late_error_matp_m','MATP')]:
+        ax.bar(xs+offset,[avg([r for r in rows if r['scenario']==s],key) or 0.
+                          for s in scenarios],width=ww,label=label)
+    ax.set_xticks(xs,scenarios);ax.set_ylabel('Mean target-lane deviation, 2-4 s (m)')
+    ax.set_title('Late-horizon dense trajectory vs FROZEN target-lane centerline')
+    ax.legend();ax.grid(axis='y',alpha=.2)
+    fig.tight_layout();fig.savefig(out/'07_target_lane_centerline_error.png',dpi=180);plt.close(fig)
 
 
 def main():
@@ -238,7 +265,10 @@ def main():
     matp=None if args.no_matp else load_matp(guidance_root)
     cfg=replace(TrajectoryModeRewardConfig(), task_curvature_weight=args.curvature_weight,
                 task_curvature_peak_weight=args.curvature_peak_weight,
-                task_curvature_margin_weight=args.curvature_margin_weight)
+                task_curvature_margin_weight=args.curvature_margin_weight,
+                task_centerline_weight=args.centerline_weight,
+                centerline_scale_m=args.centerline_scale_m,
+                centerline_late_power=args.centerline_late_power)
     proxy=DifferentiableTaskReward(cfg,device)
     model_adapter,model=_build_model(CheckpointSpec(name='pretrained',path=args.checkpoint.resolve()),device)
     sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=args.eta)
@@ -271,6 +301,8 @@ def main():
                 else:
                     role_pose=_vehicle_pose(env.controlled_vehicles[args.role]);pose_source='live_fallback'
                 proxy.bind_road(road,role_pose)
+                lane_line=features['target_lane_polyline'][args.role,:,:2].detach().cpu().numpy()
+                proxy.bind_centerline(lane_line)
                 gen=torch.Generator(device=device.type).manual_seed(_sample_noise_seed(args.noise_seed,scen_idx,count))
                 with torch.no_grad():trace=sampler.sample(features,generator=gen)
                 full=trace.candidates.detach().clone()
@@ -341,8 +373,17 @@ def main():
                          'original_progress_score':float(i0['progress_score'][i]),
                          'guided_progress_score':float(i1['progress_score'][i]),
                          'reward_without_curvature_before':float(r0[i]+cfg.task_curvature_weight*i0['curvature_penalty'][i]),
+                         'reward_base3_before':float(r0[i]+cfg.task_curvature_weight*i0['curvature_penalty'][i]
+                                                     +cfg.task_centerline_weight*i0['centerline_penalty'][i]),
+                         'reward_base3_guided':float(r1[i]+cfg.task_curvature_weight*i1['curvature_penalty'][i]
+                                                     +cfg.task_centerline_weight*i1['centerline_penalty'][i]),
                          'reward_without_curvature_guided':float(r1[i]+cfg.task_curvature_weight*i1['curvature_penalty'][i]),
                          'reward_without_curvature_gain':float((r1[i]-r0[i])+cfg.task_curvature_weight*(i1['curvature_penalty'][i]-i0['curvature_penalty'][i])),
+                         'centerline_penalty_before':float(i0['centerline_penalty'][i]),
+                         'centerline_penalty_guided':float(i1['centerline_penalty'][i]),
+                         'centerline_late_error_before_m':float(i0['centerline_late_error_m'][i]),
+                         'centerline_late_error_guided_m':float(i1['centerline_late_error_m'][i]),
+                         'centerline_valid_guided':float(i1['centerline_valid'][i]),
                          'curvature_penalty_before':float(i0['curvature_penalty'][i]),
                          'curvature_penalty_guided':float(i1['curvature_penalty'][i]),
                          'curvature_max_abs_before':float(i0['curvature_max_abs'][i]),
@@ -369,6 +410,10 @@ def main():
                             'matp_progress_score':float(i2['progress_score'][i]),
                             'matp_comfort_penalty':float(i2['comfort_penalty'][i]),
                             'reward_without_curvature_matp':float(r2[i]+cfg.task_curvature_weight*i2['curvature_penalty'][i]),
+                            'reward_base3_matp':float(r2[i]+cfg.task_curvature_weight*i2['curvature_penalty'][i]
+                                                    +cfg.task_centerline_weight*i2['centerline_penalty'][i]),
+                            'centerline_penalty_matp':float(i2['centerline_penalty'][i]),
+                            'centerline_late_error_matp_m':float(i2['centerline_late_error_m'][i]),
                             'curvature_penalty_matp':float(i2['curvature_penalty'][i]),
                             'curvature_max_abs_matp':float(i2['curvature_max_abs'][i]),
                             'curvature_valid_points_matp':float(i2['curvature_valid_points'][i]),
@@ -389,7 +434,8 @@ def main():
                         'guided_dense':guided_dense[0].copy(),
                         'matp_dense':matp_dense[0].copy() if matp_dense is not None else None,
                         'role_pose':role_pose.copy(),
-                        'road_outline':[np.asarray(p.exterior.coords) for p in _polygon_components(road.geometry)]})
+                        'road_outline':[np.asarray(p.exterior.coords) for p in _polygon_components(road.geometry)],
+                        'target_lane_centerline':lane_line.copy()})
                 print(f'[state] {name}:{count+1}/{args.samples_per_scenario} '
                       f'parity={parity} unified_gain={float(np.mean(r1-r0)):+.6f}',flush=True)
                 count+=1

@@ -68,6 +68,10 @@ class TrajectoryModeRewardConfig:
 
     # V5 - MATP-aligned curvature component of the SAME progress_comfort reward.
     # 0.0 -> V4 ablation; margin_weight=0.0 -> V5-A; defaults -> V5-B.
+    # V5.2: reference the frozen intended TARGET lane (not the nearest lane).
+    task_centerline_weight: float = 0.15
+    centerline_scale_m: float = 2.0
+    centerline_late_power: float = 2.0
     task_curvature_weight: float = 0.05
     task_curvature_peak_weight: float = 0.5
     task_curvature_margin_weight: float = 0.05
@@ -108,6 +112,7 @@ class TrajectoryModeRewardConfig:
             "curvature_limit_m_inv",
             "curvature_min_segment_m",
             "curvature_huber_delta",
+            "centerline_scale_m",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -148,6 +153,8 @@ class TrajectoryModeRewardConfig:
             "task_comfort_weight",
             "task_road_weight",
             "task_curvature_weight",
+            "task_centerline_weight",
+            "centerline_late_power",
             "task_curvature_peak_weight",
             "task_curvature_margin_weight",
             "curvature_matp_beta",

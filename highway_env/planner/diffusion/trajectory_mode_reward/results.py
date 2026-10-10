@@ -18,6 +18,10 @@ _COMPONENT_NAMES = (
     "road_penalty",
     "comfort_penalty",
     "road_boundary_reward",
+    "centerline_penalty",
+    "centerline_mean_error_m",
+    "centerline_late_error_m",
+    "centerline_valid",
     "curvature_penalty",
     "curvature_violation_penalty",
     "curvature_peak_penalty",
@@ -59,6 +63,8 @@ class RewardGeometryContext:
     poses: tuple[np.ndarray, ...]
     backgrounds: tuple[Mapping, ...]
     road: object
+    # Same ego-local frozen reference used by Planner Features and Guidance.
+    target_centerlines: tuple[np.ndarray, ...] | None = None
 
 
 @dataclass(frozen=True)

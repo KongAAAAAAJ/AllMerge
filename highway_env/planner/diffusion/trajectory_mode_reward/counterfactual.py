@@ -33,6 +33,10 @@ class TrajectoryModeCounterfactualReward(
         "road_penalty",
         "comfort_penalty",
         "road_boundary_reward",
+        "centerline_penalty",
+        "centerline_mean_error_m",
+        "centerline_late_error_m",
+        "centerline_valid",
         "curvature_penalty",
         "curvature_violation_penalty",
         "curvature_peak_penalty",
@@ -153,6 +157,8 @@ class TrajectoryModeCounterfactualReward(
                     ),
                     poses=list(context.poses),
                     road=context.road,
+                    target_centerline=(None if context.target_centerlines is None
+                                       else context.target_centerlines[role]),
                     background_by_actor=(
                         context.backgrounds[role]
                     ),
@@ -283,6 +289,8 @@ class TrajectoryModeCounterfactualReward(
                     ),
                     poses=list(context.poses),
                     road=context.road,
+                    target_centerline=(None if context.target_centerlines is None
+                                       else context.target_centerlines[role]),
                     background_by_actor=(
                         context.backgrounds[role]
                     ),

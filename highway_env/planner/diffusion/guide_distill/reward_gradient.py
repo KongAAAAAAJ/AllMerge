@@ -17,6 +17,7 @@ from highway_env.planner.diffusion.trajectory_mode_reward.config import Trajecto
 from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
 from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import evaluate_dense_spline, task_comfort_from_dense
 from highway_env.planner.diffusion.trajectory_mode_reward.curvature_reward import curvature_reward_components
+from highway_env.planner.diffusion.trajectory_mode_reward.centerline_reward import centerline_reward_components
 
 # Kept as 'balanced' for existing probe/test compatibility, but this is the ONLY
 # guidance direction and is exactly the full production task objective.
@@ -52,8 +53,12 @@ class DifferentiableTaskReward:
                           'topk': int(cfg.curvature_topk),
                           'peak_weight': float(cfg.task_curvature_peak_weight),
                           'margin_weight': float(cfg.task_curvature_margin_weight)},
+            'target_centerline': {'weight':float(cfg.task_centerline_weight),
+                                  'scale_m':float(cfg.centerline_scale_m),
+                                  'late_power':float(cfg.centerline_late_power)},
         }
         self.gradient_fallback_counts = {}
+        self.target_centerline = None
 
     def bind_road(self, road_field, role_pose, *, balanced_road_weight=None):
         # Legacy caller may pass the weight; it must never override the task.
@@ -61,6 +66,13 @@ class DifferentiableTaskReward:
             raise ValueError('Guidance road weight must match current task reward config')
         self.road_field = road_field
         self.role_pose = role_pose
+
+    def bind_centerline(self, target_lane_polyline):
+        # Planner features: [M,10] or [M,2], ego-local and frozen at planning time.
+        ref=np.asarray(target_lane_polyline,dtype=np.float64)
+        if ref.ndim!=2 or ref.shape[0]<2 or ref.shape[1]<2 or not np.isfinite(ref).all():
+            raise ValueError('Expected finite frozen target_lane_polyline [M,>=2]')
+        self.target_centerline=ref[:,:2].copy()
 
     def components(self, xy: torch.Tensor) -> Dict[str, torch.Tensor]:
         if xy.ndim != 3 or tuple(xy.shape[1:]) != (8,2) or not bool(torch.isfinite(xy).all()):
@@ -73,13 +85,19 @@ class DifferentiableTaskReward:
         comfort = task_comfort_from_dense(dense, cfg)
         road = self.road_field.components(xy, self.role_pose, cfg)['road']
         curvature = curvature_reward_components(dense, cfg)
+        if self.target_centerline is None and float(cfg.task_centerline_weight)>0.:
+            raise RuntimeError('V5.2 requires bind_centerline(frozen target_lane_polyline)')
+        centerline = centerline_reward_components(dense, self.target_centerline, cfg)
+        if float(cfg.task_centerline_weight)>0. and not bool((centerline['centerline_valid']>.5).all()):
+            raise RuntimeError('Target lane centerline does not cover the 2-4s trajectory horizon')
         native = (float(cfg.task_progress_weight)*progress
                   - float(cfg.task_comfort_weight)*comfort
-                  - float(cfg.task_curvature_weight)*curvature['curvature_penalty'])
+                  - float(cfg.task_curvature_weight)*curvature['curvature_penalty']
+                  - float(cfg.task_centerline_weight)*centerline['centerline_penalty'])
         unified = native + float(cfg.task_road_weight)*road
         return {'balanced':unified, 'native_balanced':native, 'raw_progress':progress,
                 'comfort_penalty':comfort, 'road':road,
-                **curvature}
+                **curvature, **centerline}
 
     def _road_finite_difference(self, xy, *, step_m=1e-3):
         with torch.no_grad():
@@ -129,7 +147,8 @@ class DifferentiableTaskReward:
         diffs={}
         for key,ours in [('progress_score','raw_progress'),('comfort_penalty','comfort_penalty'),
                          ('road_boundary_reward','road'),
-                         ('curvature_penalty','curvature_penalty')]:
+                         ('curvature_penalty','curvature_penalty'),
+                         ('centerline_penalty','centerline_penalty')]:
             if key not in result.components:raise RuntimeError(f'Production scorer missing {key}')
             actual=torch.as_tensor(np.asarray(result.components[key])[role,mode,:],device=xy.device,dtype=xy.dtype)
             diffs[key]=float((actual-values[ours].detach()).abs().max())

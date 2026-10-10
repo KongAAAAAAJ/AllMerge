@@ -321,8 +321,19 @@ class AllMergeRewardStateAdapter:
             predictions
             for _ in range(NUM_VEHICLES)
         )
+        # Freeze the same role-specific target lane used to condition Diffusion.
+        # These are already in the corresponding planning-time ego frame.
+        target_lines = None
+        frozen_features = getattr(env, 'latest_planner_features', None)
+        if isinstance(frozen_features, Mapping) and 'target_lane_polyline' in frozen_features:
+            poly = np.asarray(frozen_features['target_lane_polyline'], dtype=np.float64)
+            if (poly.ndim != 3 or poly.shape[0] != NUM_VEHICLES or
+                    poly.shape[1] < 2 or poly.shape[2] < 2 or not np.isfinite(poly).all()):
+                raise TrajectoryModeRewardError('Invalid planning-time target_lane_polyline features')
+            target_lines = tuple(poly[role, :, :2].copy() for role in range(NUM_VEHICLES))
         return RewardGeometryContext(
             poses=poses,
             backgrounds=per_role,
             road=road,
+            target_centerlines=target_lines,
         )

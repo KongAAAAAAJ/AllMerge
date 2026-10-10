@@ -60,6 +60,7 @@ def task_reward_from_w4_result(
       task_progress_weight * progress_score - task_comfort_weight * comfort_penalty
       + task_road_weight * road_boundary_reward
       - task_curvature_weight * curvature_penalty
+      - task_centerline_weight * centerline_penalty
 
     Road BOUNDARY continuous reward is part of progress_comfort; collision,
     TTC and vehicle gap remain hard constraint / safety signals.
@@ -88,11 +89,23 @@ def task_reward_from_w4_result(
     curvature = _component_to_grpo(
         result.components["curvature_penalty"], device=device, dtype=dtype
     )
+    centerline = torch.zeros_like(progress)
+    if float(config.task_centerline_weight) > 0.:
+        if "centerline_penalty" not in result.components or "centerline_valid" not in result.components:
+            raise RuntimeError('V5.2 scorer missing target-lane centerline components')
+        centerline = _component_to_grpo(result.components['centerline_penalty'], device=device, dtype=dtype)
+        valid = _component_to_grpo(result.components['centerline_valid'],device=device,dtype=dtype)
+        # Ignore invalid mode slots but NEVER silently omit missing target geometry
+        # on any mode whose reward is actually used.
+        mode_mask = torch.as_tensor(result.valid_mode_mask,device=device,dtype=torch.bool)[:,None,:].expand_as(valid)
+        if bool(((valid < .5) & mode_mask).any()):
+            raise RuntimeError('V5.2 target-lane centerline reference is missing for a valid mode')
     return (
         float(config.task_progress_weight) * progress
         - float(config.task_comfort_weight) * comfort
         + float(config.task_road_weight) * road
         - float(config.task_curvature_weight) * curvature
+        - float(config.task_centerline_weight) * centerline
     )
 
 
