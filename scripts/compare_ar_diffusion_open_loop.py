@@ -17,6 +17,39 @@ METRICS = (
     "execution_collision_proxy", "execution_offroad_proxy",
 )
 
+# Open-loop safety-proxy columns are bool | None. csv.DictWriter serializes
+# those values as "True", "False", or ""; convert to 1/0 rates for comparison.
+BOOLEAN_METRICS = frozenset((
+    "base_dense_collision_proxy", "base_dense_offroad_proxy",
+    "execution_collision_proxy", "execution_offroad_proxy",
+))
+
+def numeric_metric(value, metric, sample_key=None):
+    text = str(value).strip() if value is not None else ""
+    lowered = text.lower()
+    if lowered in ("", "nan", "none", "null", "n/a"):
+        return None
+    if metric in BOOLEAN_METRICS:
+        if lowered == "true":
+            return 1.0
+        if lowered == "false":
+            return 0.0
+    try:
+        number = float(text)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Invalid {metric!r} value {value!r} at paired sample {sample_key!r}"
+        ) from exc
+    if not math.isfinite(number):
+        return None
+    if metric in BOOLEAN_METRICS and number not in (0.0, 1.0):
+        raise ValueError(
+            f"Boolean {metric!r} must be 0/1 or True/False; "
+            f"got {value!r} at paired sample {sample_key!r}"
+        )
+    return number
+
+
 
 def read(path):
     with Path(path).open(encoding="utf-8-sig", newline="") as fp:
@@ -56,8 +89,11 @@ def compare(a, b):
         for key in sorted(d):
             if metric not in d[key] or metric not in e[key]:
                 continue
-            x = float(d[key][metric]); y = float(e[key][metric])
-            if math.isfinite(x) and math.isfinite(y):
+            x = numeric_metric(d[key][metric], metric, key)
+            y = numeric_metric(e[key][metric], metric, key)
+            # A safety proxy may be unavailable for some samples. Keep paired
+            # denominators metric-specific, never interpret missing as False.
+            if x is not None and y is not None:
                 vals.append((x, y))
         if not vals:
             continue
