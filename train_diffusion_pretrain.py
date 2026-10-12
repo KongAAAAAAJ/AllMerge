@@ -48,6 +48,10 @@ def validate_dataset_root(dataset_root: Path, splits: tuple[str, ...]) -> None:
 def parse_args():
     parser = argparse.ArgumentParser(description="Pretrain AllMerge StructuredDiffusionPlanner.")
     parser.add_argument("--config", default="configs/diffusion_pretrain.json")
+    # AR_V1: explicit opt-in, all original Diffusion flags stay intact.
+    parser.add_argument("--generator-type", choices=("diffusion", "ar_v1"), default="diffusion")
+    parser.add_argument("--ar-sigma-x-m", type=float, default=2.0)
+    parser.add_argument("--ar-sigma-y-m", type=float, default=0.5)
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--train-split", choices=("all", "train", "val", "test"), default=None)
@@ -204,6 +208,8 @@ def main() -> int:
         "training": {
             **train_cfg,
             "dataset_root": str(dataset_root),
+            "generator_type": args.generator_type,
+            "ar_sigma_xy_m": [args.ar_sigma_x_m, args.ar_sigma_y_m] if args.generator_type == "ar_v1" else None,
             "output_dir": str(output_root),
             "train_split": train_split,
             "val_split": val_split,
@@ -271,6 +277,9 @@ def main() -> int:
     trainer = DiffusionPretrainer(
         model_config=model_cfg,
         device=device,
+        generator_type=args.generator_type,
+        ar_sigma_x_m=args.ar_sigma_x_m,
+        ar_sigma_y_m=args.ar_sigma_y_m,
         learning_rate=learning_rate,
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
         min_lr=float(train_cfg.get("min_lr", 1e-6)),

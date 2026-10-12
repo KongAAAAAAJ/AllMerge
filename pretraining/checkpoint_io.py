@@ -80,7 +80,10 @@ def export_runtime_checkpoint(
         "state_dict": state_dict,
         "model_config": model_config,
         "source_checkpoint": str(source_checkpoint),
-        "format": "allmerge_diffusion_runtime_v1",
+        "format": ("allmerge_ar_v1_runtime" if checkpoint_obj.get("generator_type") == "ar_v1"
+                   else "allmerge_diffusion_runtime_v1"),
+        "generator_type": checkpoint_obj.get("generator_type", "diffusion"),
+        "ar_sigma_xy_m": checkpoint_obj.get("ar_sigma_xy_m"),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, output_path)

@@ -16,6 +16,7 @@ import torch
 
 from highway_env.planner.diffusion.config import build_structured_diffusion_config
 from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
+from highway_env.planner.diffusion.autoregressive import StructuredAutoregressivePlanner
 from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
 
 from .checkpoint_io import load_checkpoint_file
@@ -219,13 +220,27 @@ class DiffusionPretrainer:
         lane_softmin_temperature_m: float = 0.5,
         # DENSE_RESIDUAL_SEPARATE_LR_V1
         dense_residual_learning_rate: Optional[float] = None,
+        # AR_V1: dispatcher only; Diffusion default is untouched.
+        generator_type: str = "diffusion",
+        ar_sigma_x_m: float = 2.0,
+        ar_sigma_y_m: float = 0.5,
     ) -> None:
         self.model_config_dict = dict(model_config or {})
         self.model_config = build_structured_diffusion_config(**self.model_config_dict)
         validate_model_schema(self.model_config)
         self.device = resolve_device(device)
         self.adapter = PlannerTensorAdapter(self.model_config, self.device)
-        self.planner = StructuredDiffusionPlanner(self.model_config, self.adapter).to(self.device)
+        self.generator_type = str(generator_type).lower()
+        if self.generator_type == "diffusion":
+            self.planner = StructuredDiffusionPlanner(self.model_config, self.adapter).to(self.device)
+        elif self.generator_type == "ar_v1":
+            self.planner = StructuredAutoregressivePlanner(
+                self.model_config, self.adapter,
+                sigma_x_m=ar_sigma_x_m, sigma_y_m=ar_sigma_y_m,
+            ).to(self.device)
+        else:
+            raise ValueError(f"Unknown generator_type={self.generator_type!r}")
+        self.ar_sigma_xy_m = (float(ar_sigma_x_m), float(ar_sigma_y_m))
 
         # DENSE_RESIDUAL_HEAD_V2
         # Same optimizer/step, but keep base planner and residual-head params in
@@ -364,6 +379,10 @@ class DiffusionPretrainer:
         checkpoint = torch.load(path, map_location="cpu")
         if not isinstance(checkpoint, dict) or "planner_state_dict" not in checkpoint:
             raise RuntimeError("Resume checkpoint is not an AllMerge W2 training checkpoint")
+        if checkpoint.get("generator_type", "diffusion") != self.generator_type:
+            raise RuntimeError("Cannot resume checkpoint with a different generator_type")
+        if self.generator_type == "ar_v1" and tuple(checkpoint.get("ar_sigma_xy_m", ())) != self.ar_sigma_xy_m:
+            raise RuntimeError("Cannot resume with changed AR Gaussian sigma")
         stored_config = dict(checkpoint.get("allmerge_model_config") or {})
         if stored_config != self.model_config_dict:
             raise RuntimeError("Resume checkpoint model_config differs from current config")
@@ -394,7 +413,10 @@ class DiffusionPretrainer:
             "metrics": dict(metrics),
             "train_config": dict(train_config),
             "allmerge_model_config": dict(self.model_config_dict),
-            "checkpoint_format": "allmerge_diffusion_pretrain_v2_torch",
+            "checkpoint_format": ("allmerge_ar_v1_pretrain_torch" if self.generator_type == "ar_v1"
+                                  else "allmerge_diffusion_pretrain_v2_torch"),
+            "generator_type": self.generator_type,
+            "ar_sigma_xy_m": self.ar_sigma_xy_m if self.generator_type == "ar_v1" else None,
         }
         torch.save(payload, path)
         return path

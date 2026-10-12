@@ -15,6 +15,7 @@ from .structured_model import (
     StructuredDiffusionPlanner,
 )
 from .tensor_adapter import PlannerTensorAdapter
+from .autoregressive import StructuredAutoregressivePlanner
 from .trajectory_spline import ClampedCubicTrajectorySpline  # STAGE_A_SPLINE_RUNTIME_V1
 
 
@@ -48,11 +49,15 @@ class DiffusionPlannerRuntime:
         self.checkpoint = runtime_config.get("checkpoint")
 
         checkpoint_model_config = {}
+        checkpoint_generator_type = "diffusion"
+        checkpoint_ar_sigma = None
         if self.checkpoint:
             checkpoint_path = Path(self.checkpoint)
             if checkpoint_path.exists():
                 metadata = torch.load(checkpoint_path, map_location="cpu")
                 if isinstance(metadata, dict):
+                    checkpoint_generator_type = metadata.get("generator_type", "diffusion")
+                    checkpoint_ar_sigma = metadata.get("ar_sigma_xy_m")
                     checkpoint_model_config = dict(
                         metadata.get("allmerge_model_config")
                         or metadata.get("model_config")
@@ -73,13 +78,24 @@ class DiffusionPlannerRuntime:
             self.device,
         )
 
-        self.model = (
-            StructuredDiffusionPlanner(
-                self.config,
-                self.adapter,
+        self.generator_type = runtime_config.get("generator_type", checkpoint_generator_type)
+        if self.checkpoint and self.generator_type != checkpoint_generator_type:
+            raise RuntimeError(
+                "Checkpoint generator_type mismatch: "
+                f"requested={self.generator_type} stored={checkpoint_generator_type}"
             )
-            .to(self.device)
-        )
+        if self.generator_type == "ar_v1":
+            sigma = checkpoint_ar_sigma or runtime_config.get("ar_sigma_xy_m")
+            if sigma is None or len(sigma) != 2:
+                raise ValueError("AR runtime needs checkpoint ar_sigma_xy_m=[sigma_x,sigma_y]")
+            self.model = StructuredAutoregressivePlanner(
+                self.config, self.adapter,
+                sigma_x_m=float(sigma[0]), sigma_y_m=float(sigma[1]),
+            ).to(self.device)
+        elif self.generator_type == "diffusion":
+            self.model = StructuredDiffusionPlanner(self.config, self.adapter).to(self.device)
+        else:
+            raise ValueError(f"Unknown generator_type={self.generator_type!r}")
 
         self.strict_checkpoint = bool(
             runtime_config.get(

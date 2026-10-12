@@ -1,0 +1,57 @@
+{
+  "pretraining/trainer.py": {
+    "existed": true,
+    "old_sha256": "4b504823f290c52650809a1440c4d705d83d4480e9a7c8f02bb8607914a6f359",
+    "new_sha256": "89cc5e6cbbd170a84385d60b2ee10336fc3bb83e60fbf3d482af21fad40bfcc7"
+  },
+  "train_diffusion_pretrain.py": {
+    "existed": true,
+    "old_sha256": "a83e521cbf2ac914844622d4571934a73268a1f5413776ad4e1ad6c966989cf8",
+    "new_sha256": "fe67a9b87ce9c472b9d3489030af733dfad3a3d16618085ba4b00d9071fb6ca7"
+  },
+  "pretraining/checkpoint_io.py": {
+    "existed": true,
+    "old_sha256": "5791ca0de193b051841c91689193ff89f973c0e258387f33d521e4ff896e7a93",
+    "new_sha256": "7d58ed804e9f15ece878349150b59cc264cfeb65579bd2d7020e464ddbe63070"
+  },
+  "highway_env/planner/diffusion/runtime.py": {
+    "existed": true,
+    "old_sha256": "fec28d612b7f48b9480259f00582a0129a3d284beca4c5cf81fc35e19c4a496c",
+    "new_sha256": "58fa3d44ddb256492340e3bd9bc993a363cccbaf6d4ebb47139ef10b9ee1d34a"
+  },
+  "evaluation/open_loop_visualization.py": {
+    "existed": true,
+    "old_sha256": "feb874b29df9e778abf63ec044e031e686918613841855ee4654bfd0335b37c7",
+    "new_sha256": "e9e496ae2fe99138f1bc1e7d408c0c343615c0d596691da3bd278468b889d7c8"
+  },
+  "highway_env/planner/diffusion/autoregressive.py": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "7b80484646e6b98f279a2c918ac1cb748d89ead975c482236ec758609934f664"
+  },
+  "train_ar_pretrain.py": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "56dbd373221f0367571c03e344a95cf4822a759b7e95e06e460056f8d6af1aa4"
+  },
+  "scripts/run_ar_open_loop_eval.py": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "55bd27d7233bf4b528f474fd69ba8836729ee902b656239e2e3dd6ac9fe43936"
+  },
+  "scripts/compare_ar_diffusion_open_loop.py": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "3a82014855229e242739dfd28f3e38233888fc900ffa4a136ebb97d3641d8fd2"
+  },
+  "test_ar_v1.py": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "016ca8590f7c7062086e8b2b5de0ee92e8a53fb259dabe728e17c4fb07a4f1e7"
+  },
+  "README_AR_V1_GRPO_20261012.md": {
+    "existed": false,
+    "old_sha256": null,
+    "new_sha256": "2b17456b08cc0ec29853ef1c8bef10d33783eead6cdc86fcdbd17982af0ab225"
+  }
+}

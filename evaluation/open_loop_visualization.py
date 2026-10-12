@@ -774,6 +774,7 @@ def plot_initial_vs_final_denoising(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    is_ar = final_model.__class__.__name__ == "StructuredAutoregressivePlanner"
     fig, axes = plt.subplots(1, 2, figsize=(13.0, 5.2))
     for ax, (name, noisy, pred, ade, fde) in zip(axes, panels):
         ax.plot(
@@ -782,7 +783,7 @@ def plot_initial_vs_final_denoising(
             marker=".",
             linewidth=1.2,
             alpha=0.7,
-            label="Noisy trajectory",
+            label="Coarse anchors" if is_ar else "Noisy trajectory",
         )
         ax.plot(
             pred[:, 0],
@@ -810,7 +811,8 @@ def plot_initial_vs_final_denoising(
         ax.legend(fontsize=8, loc="best")
 
     fig.suptitle(
-        "Same sample + same noise: denoising before vs after training",
+        ("Same sample + same Gaussian innovations: AR before vs after training"
+         if is_ar else "Same sample + same noise: denoising before vs after training"),
         fontsize=14,
     )
     fig.tight_layout(rect=(0, 0, 1, 0.95))
