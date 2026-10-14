@@ -1210,6 +1210,7 @@ class StructuredDiffusionPlanner(nn.Module):
             torch.Tensor
         ] = None,
         *,
+        target_mode_override: Optional[torch.Tensor] = None,
         target_trajectory_dense: Optional[torch.Tensor] = None,
         dense_loss_enabled: bool = False,
         dense_loss_lambda_p: float = 0.0,
@@ -1291,6 +1292,21 @@ class StructuredDiffusionPlanner(nn.Module):
         target_mode = (
             assignment.target_mode
         )
+        # MODE-LOCKED DISTILLATION 20261014: optional explicit mode selected by
+        # the same frozen reference policy during teacher generation.  The
+        # default None leaves original pretraining / GRPO behavior unchanged.
+        if target_mode_override is not None:
+            override = torch.as_tensor(
+                target_mode_override, device=anchors.device, dtype=torch.long
+            ).reshape(-1)
+            if override.shape != (anchors.shape[0],):
+                raise ValueError(
+                    f'target_mode_override shape {tuple(override.shape)} ' 
+                    f'!= ({anchors.shape[0]},)'
+                )
+            if bool(((override < 0) | (override >= anchors.shape[1])).any()):
+                raise ValueError('target_mode_override contains out-of-range mode')
+            target_mode = override
 
         clean_anchor_norm = (
             self.adapter.normalize_trajectory(
