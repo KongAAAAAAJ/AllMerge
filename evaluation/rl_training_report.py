@@ -17,6 +17,7 @@ import numpy as np
 _STEP = re.compile(r"^\[step\s+(\d+)\s*/\s*\d+\](.*)$")
 _PAIR = re.compile(r"(?<!\S)([\w./:-]+)=([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)")
 CONSTRAINTS = ("collision", "road", "ttc", "background_gap", "teammate_gap")
+EVALUATION_GALLERY_V2 = "execution_dense_only"
 
 
 def parse_train_log(path: str | Path) -> list[dict[str, float]]:
@@ -262,56 +263,119 @@ def _scenario_names(scenario: str) -> list[str]:
     return [scenario]
 
 
-def _cubic(t: np.ndarray, xy: np.ndarray) -> np.ndarray:
-    """Clamped cubic time interpolation; sparse points are scattered, never joined."""
-    from scipy.interpolate import CubicSpline
-    dense_t = np.arange(0.1, float(t[-1]) + 1e-6, 0.1)
-    full_t = np.concatenate(([0.0], t))
-    full_xy = np.vstack((np.zeros((1, 2)), xy))
-    dt_start = full_t[1] - full_t[0]
-    dt_end = full_t[-1] - full_t[-2]
-    boundary = ((1, (full_xy[1] - full_xy[0]) / dt_start),
-                (1, (full_xy[-1] - full_xy[-2]) / dt_end))
-    return CubicSpline(full_t, full_xy, bc_type=boundary, axis=0)(dense_t)
+# PAIRED_BASE_POINTS_EXECUTION_DENSE_V1_20261015
+def _execution_dense_from_group_trace(model, trace, features, role: int, group_idx: int, mode: int):
+    """Get the REAL residual-head+spline path for one paired G48 candidate.
+
+    trace.candidates are metric-space BASE diffusion 8-point trajectories.
+    Reuse trace.next_states[-1] (the exact state of the FINAL denoiser pass),
+    re-evaluate its final mode tokens without randomness, then calculate
+    residual-head sparse waypoints and the model's 41-knot execution spline.
+    """
+    import torch
+
+    if not trace.next_states:
+        raise RuntimeError("Cannot replay execution head: diffusion trace has no final state")
+    final_state = trace.next_states[-1][role, group_idx].unsqueeze(0)
+    one = {key: value[role:role+1] for key, value in features.items()
+           if torch.is_tensor(value)}
+    scene = model.scene_encoder(one)
+    anchor = model.adapter.normalize_trajectory(one["coarse_trajectories"])
+    last_t = torch.full((1,), int(trace.timesteps[-1]),
+                        dtype=torch.long, device=final_state.device)
+    predicted_x0, _, mode_tokens = model.denoiser(
+        final_state, last_t, scene,
+        navigation_point_norm=anchor[:, :, -1, :],
+        return_mode_tokens=True,
+    )
+    replayed_base = model.adapter.denormalize_trajectory(predicted_x0)[0, mode]
+    sampled_base = trace.candidates[role, group_idx, mode]
+    if tuple(sampled_base.shape) != (8, 2):
+        raise RuntimeError(f"Expected 8 base points, found {tuple(sampled_base.shape)}")
+    deviation = float((replayed_base - sampled_base).abs().max().item())
+    if not torch.isfinite(replayed_base).all() or deviation > 0.01:
+        raise RuntimeError(
+            f"Final-state replay mismatch: max base difference={deviation:.6g}m; "
+            "cannot safely pair residual head with G48 sampled candidate"
+        )
+
+    x0_mode_norm = predicted_x0[:, mode]
+    mode_feature = mode_tokens[:, mode]
+    execution_residual = model.dense_residual_head(mode_feature, x0_mode_norm)
+    execution_sparse = sampled_base.unsqueeze(0) + execution_residual
+    start_xy = torch.zeros_like(execution_sparse[:, 0, :])
+    start_velocity_xy = one["ego_state"][:, :2].to(dtype=execution_sparse.dtype)
+    dense = model.dense_trajectory_spline(
+        execution_sparse, start_xy=start_xy,
+        start_velocity_xy=start_velocity_xy,
+    )[0]
+    if tuple(dense.shape) != (41, 2):
+        raise RuntimeError(f"Expected 41-point 10Hz execution, got {tuple(dense.shape)}")
+    if not torch.isfinite(dense).all():
+        raise RuntimeError("Execution dense trajectory has NaN/Inf")
+    knot_err = float((dense[5::5] - execution_sparse[0]).abs().max().item())
+    if knot_err > 0.001:
+        raise RuntimeError(f"Execution spline knot mismatch: {knot_err:.6g}m")
+    return (dense.detach().cpu().numpy(),
+            execution_sparse[0].detach().cpu().numpy())
 
 
 def render_paired_gallery(gallery: list[dict[str, Any]], output_dir: str | Path) -> tuple[Path, list[dict[str, Any]]]:
-    """Render nine paired sparse trajectories and 10-Hz interpolations (offline testable)."""
+    """Plot paired diffusion base 8-point scatter + true execution 41-point line."""
     import matplotlib
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     if len(gallery) != 9:
-        raise ValueError(f"expected 9 paired trajectory records, got {len(gallery)}")
+        raise ValueError(f"Expected exactly nine paired trajectory records, got {len(gallery)}")
     gallery = sorted(gallery, key=lambda e: e["state_index"])
-    fig, axes = plt.subplots(3, 3, figsize=(15.2, 12.4), squeeze=False)
+    fig, axes = plt.subplots(3, 3, figsize=(16, 12.5), squeeze=False)
     manifest = []
     for ax, record in zip(axes.flat, gallery):
-        time_steps = np.arange(1, len(record["pre"]) + 1) * 0.5
-        for policy, style, name in (("pre", "--", "Pretrain"), ("rl", "-", "RL")):
-            sparse = np.asarray(record[policy], dtype=np.float64)
-            smooth = _cubic(time_steps, sparse)
-            line, = ax.plot(smooth[:, 0], smooth[:, 1], linestyle=style,
-                            linewidth=2.15, label=f"{name} clamped cubic (10 Hz)")
-            ax.scatter(sparse[:, 0], sparse[:, 1], s=13, alpha=0.75,
-                       color=line.get_color(), zorder=5)
-        ax.scatter([0], [0], s=36, marker="x", color="black", label="Ego")
-        displacement = np.linalg.norm(record["rl"] - record["pre"], axis=-1)
-        ax.set(title=(f"{record['scenario']} | state {record['state_index']:02d} "
-                      f"| veh {record['role']} | mode {record['mode']} | g{record['group_idx']} "
-                      f"| Δmax {displacement.max():.3f}m"),
+        base_delta = np.asarray(record["rl"], dtype=np.float64) - np.asarray(record["pre"], dtype=np.float64)
+        dense_delta = np.asarray(record["rl_dense"], dtype=np.float64) - np.asarray(record["pre_dense"], dtype=np.float64)
+        for policy, color, line_style, title in (
+            ("pre", "#2473B8", "--", "Pretrain"),
+            ("rl", "#E47E32", "-", "Trained"),
+        ):
+            base = np.asarray(record[policy], dtype=np.float64)
+            dense = np.asarray(record[policy + "_dense"], dtype=np.float64)
+            if base.shape != (8, 2) or dense.shape != (41, 2):
+                raise ValueError(f"{title}: expected base [8,2] and execution dense [41,2]; "
+                                 f"got {base.shape}, {dense.shape}")
+            if not np.isfinite(base).all() or not np.isfinite(dense).all():
+                raise ValueError("Non-finite trajectory data in paired gallery")
+            # Dense line comes from the model's ACTUAL execution residual head + spline.
+            ax.plot(dense[:, 0], dense[:, 1], color=color, linestyle=line_style,
+                    lw=2.05, alpha=0.96, label=f"{title}: execution dense (10Hz)")
+            # Eight visible markers are RAW diffusion coordinates, NOT dense knots.
+            ax.scatter(base[:, 0], base[:, 1], color=color, marker="o" if policy == "pre" else "x",
+                       s=28 if policy == "pre" else 34, zorder=5, alpha=0.92,
+                       label=f"{title}: diffusion base (8 pts)")
+        ax.scatter([0], [0], s=38, marker="+", color="black", label="Ego")
+        ax.set(title=(f"{record['scenario']} | state {record['state_index']:02d} | "
+                      f"veh {record['role']} | mode {record['mode']} | g{record['group_idx']} "
+                      f"| base maxΔ {np.linalg.norm(base_delta,axis=-1).max():.2f}m"),
                xlabel="x (m)", ylabel="y (m)")
         ax.set_aspect("equal", adjustable="datalim")
-        ax.grid(alpha=0.19)
-        ax.legend(fontsize=7, loc="best")
-        manifest.append({**{k: record[k] for k in
-                         ("state_index", "scenario", "env_seed", "noise_seed", "role", "mode", "group_idx")},
-                         "mean_point_displacement_m": float(displacement.mean()),
-                         "max_point_displacement_m": float(displacement.max())})
-    fig.suptitle("Pretrain vs RL: random 9 paired trajectories (same scene, noise, mode, group)",
+        ax.grid(alpha=0.2)
+        ax.legend(fontsize=6.5, loc="best")
+        manifest.append({
+            **{k: record[k] for k in ("state_index", "scenario", "env_seed", "noise_seed",
+                                    "role", "mode", "group_idx")},
+            "mean_point_displacement_m": float(np.linalg.norm(base_delta, axis=-1).mean()),
+            "max_point_displacement_m": float(np.linalg.norm(base_delta, axis=-1).max()),
+            "mean_dense_displacement_m": float(np.linalg.norm(dense_delta, axis=-1).mean()),
+            "max_dense_displacement_m": float(np.linalg.norm(dense_delta, axis=-1).max()),
+            "delta_base_end_x_m": float(base_delta[-1, 0]),
+            "delta_base_end_y_m": float(base_delta[-1, 1]),
+            "delta_execution_end_x_m": float(dense_delta[-1, 0]),
+            "delta_execution_end_y_m": float(dense_delta[-1, 1]),
+        })
+    fig.suptitle("Pretrain vs trained checkpoint: base diffusion points and TRUE execution dense trajectories",
                  fontsize=13)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.tight_layout(rect=(0, 0, 1, 0.965))
     figure = out / "07_pretrain_vs_rl_trajectories_3x3.png"
     fig.savefig(figure, dpi=180)
     plt.close(fig)
@@ -319,7 +383,6 @@ def render_paired_gallery(gallery: list[dict[str, Any]], output_dir: str | Path)
         writer = csv.DictWriter(stream, fieldnames=list(manifest[0]))
         writer.writeheader()
         writer.writerows(manifest)
-
     return figure, manifest
 
 
@@ -480,8 +543,16 @@ def evaluate_paired_trajectories(
                         raise RuntimeError("pretrain-selected mode is invalid")
                     pre = results["pretrain"].candidates[role, group_idx, selected_mode].cpu().numpy()
                     rl = results["rl"].candidates[role, group_idx, selected_mode].cpu().numpy()
+                    # PAIRED_BASE_POINTS_EXECUTION_DENSE_V1_20261015
+                    pre_dense, pre_execution_sparse = _execution_dense_from_group_trace(
+                        pretrained_model, results["pretrain"], features, role, group_idx, selected_mode)
+                    rl_dense, rl_execution_sparse = _execution_dense_from_group_trace(
+                        trained_model, results["rl"], features, role, group_idx, selected_mode)
                     gallery.append({**row, "role": role, "mode": selected_mode,
-                                    "group_idx": group_idx, "pre": pre, "rl": rl})
+                                    "group_idx": group_idx, "pre": pre, "rl": rl,
+                                    "pre_dense": pre_dense, "rl_dense": rl_dense,
+                                    "pre_execution_sparse": pre_execution_sparse,
+                                    "rl_execution_sparse": rl_execution_sparse})
         finally:
             env.close()
 
@@ -529,19 +600,24 @@ def evaluate_paired_trajectories(
     fig.savefig(out / "08_paired_constraint_violation_mean.png", dpi=180)
     plt.close(fig)
 
-    # Additional panel emphasizes tiny changes that would be invisible in XY.
+    # ALLMERGE_UNIFIED_EXECUTION_DENSE_EVAL_V2_20261015
+    # Plot only the true execution-dense trajectory displacement (41 x 0.1s),
+    # consistent with the execution curves in 07. No legacy base-point plot.
     fig, axes = plt.subplots(3, 3, figsize=(15, 11), squeeze=False)
     for ax, record in zip(axes.flat, gallery):
-        displacement = record["rl"] - record["pre"]
-        time_steps = np.arange(1, len(displacement)+1) * 0.5
-        ax.plot(time_steps, displacement[:, 0], marker=".", label="Δ longitudinal x")
-        ax.plot(time_steps, displacement[:, 1], marker=".", label="Δ lateral y")
+        displacement = np.asarray(record["rl_dense"]) - np.asarray(record["pre_dense"])
+        if displacement.shape != (41, 2):
+            raise ValueError("Unified execution evaluation requires paired 41-point dense trajectories")
+        time_steps = np.arange(41, dtype=np.float64) * 0.1
+        ax.plot(time_steps, displacement[:, 0], label="Δ execution x")
+        ax.plot(time_steps, displacement[:, 1], label="Δ execution y")
         ax.axhline(0, color="grey", linewidth=0.7)
         ax.set(title=f"state {record['state_index']} | veh {record['role']} | g{record['group_idx']}",
-               xlabel="Time (s)", ylabel="RL - pretrain (m)")
+               xlabel="Time (s)", ylabel="Trained − Pretrain execution (m)")
         ax.grid(alpha=.2)
         ax.legend(fontsize=7)
-    fig.tight_layout()
+    fig.suptitle("Pretrain vs trained: execution-dense displacement (41 points, 10Hz)")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(out / "09_paired_trajectory_displacement_3x3.png", dpi=180)
     plt.close(fig)
     return summary
