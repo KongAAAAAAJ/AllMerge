@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Tuple
 import torch
 
 from .scheduler import StochasticDDIMTransition
+from .mean_guidance import MeanGuideSettings, compute_mean_shift
 
 
 @dataclass
@@ -19,6 +20,8 @@ class DiffusionTrace:
     old_log_prob: torch.Tensor            # [B,G,S,M]
     candidates: torch.Tensor              # [B,G,M,T,2], metric-space x0
     logits: torch.Tensor                  # [B,G,M]
+    guidance_shifts: Tuple[torch.Tensor, ...] = ()  # each [B,G,M,T,2]
+    guidance_metrics: dict | None = None
 
 
 def _expand_group(features: Dict[str, torch.Tensor], group_size: int) -> Dict[str, torch.Tensor]:
@@ -57,18 +60,23 @@ class GroupDiffusionSampler:
     preserved; no second diffusion implementation is introduced.
     """
 
-    def __init__(self, model, *, group_size: int, eta: float = 0.02, min_std: float = 1e-5):
+    def __init__(self, model, *, group_size: int, eta: float = 0.02, min_std: float = 1e-5, guidance: MeanGuideSettings | None = None, guide_model=None):
         if group_size < 2:
             raise ValueError("group_size must be >= 2 for relative advantages")
         self.model = model
         self.group_size = int(group_size)
         self.transition = StochasticDDIMTransition(model.schedule, eta=eta, min_std=min_std)
+        self.guidance = guidance or MeanGuideSettings()
+        self.guide_model = model if guide_model is None else guide_model
+        self.guidance.validate()
+        self._guidance_call_count = 0
 
     def sample(
         self,
         features: Dict[str, torch.Tensor],
         *,
         generator: torch.Generator | None = None,
+        context=None,
     ) -> DiffusionTrace:
         model = self.model
         group_size = self.group_size
@@ -90,6 +98,20 @@ class GroupDiffusionSampler:
         states = []
         next_states = []
         log_probs = []
+        guidance_shifts = []
+        guidance_metrics = {}
+        guide_generator = None
+        if self.guidance.mode == 'random_gradient':
+            # Independent RNG stream: random direction must NOT perturb the DDIM
+            # action noise shared by G0/G1/G2 at the same seed.
+            if generator is None:
+                raise ValueError('Random-guided sampling requires an explicit generator')
+            self._guidance_call_count += 1
+            guide_generator = torch.Generator(device=sample.device.type)
+            guide_generator.manual_seed(
+                (int(generator.initial_seed()) + 104729 * self._guidance_call_count)
+                % (2**63 - 1)
+            )
         final_x0 = None
         final_logits = None
 
@@ -108,13 +130,45 @@ class GroupDiffusionSampler:
                 break
 
             prev_timestep = timesteps[index + 1]
+            mean_shift = None
+            if self.guidance.mode != 'none':
+                if tuple(timesteps) != (8, 0):
+                    raise ValueError('Reward mean guidance currently requires DDIM (8,0)')
+                # Guide direction comes from the FROZEN GRPO reference model,
+                # never from trainable actor weights. Conditional on x_t and
+                # the independent sign RNG, delta_ref(x_t) is theta-independent;
+                # PPO replay with the cached shift has a valid density ratio.
+                guide_model = self.guide_model
+                with torch.no_grad():
+                    ref_scene = guide_model.scene_encoder(expanded)
+                    ref_anchor = guide_model.adapter.normalize_trajectory(
+                        expanded['coarse_trajectories']
+                    )
+                    guide_pred, guide_logits = guide_model.denoiser(
+                        sample.detach(), current_t, ref_scene,
+                        navigation_point_norm=ref_anchor[:, :, -1, :]
+                    )
+                    pilot_transition = self.transition.step(
+                        sample.detach(), guide_pred, int(timestep), int(prev_timestep),
+                        prev_sample=sample.detach()
+                    )
+                mean_shift, guidance_metrics = compute_mean_shift(
+                    model=guide_model, features=features, expanded=expanded,
+                    scene=ref_scene, anchor=ref_anchor, mean=pilot_transition.mean,
+                    mode_logits=guide_logits, context=context, group_size=group_size,
+                    settings=self.guidance, generator=guide_generator,
+                )
             transition = self.transition.step(
                 sample,
                 predicted_x0,
                 int(timestep),
                 int(prev_timestep),
                 generator=generator,
+                mean_shift=mean_shift,
             )
+            if mean_shift is None:
+                mean_shift = torch.zeros_like(sample)
+            guidance_shifts.append(mean_shift.reshape(batch, group_size, *mean_shift.shape[1:]).detach())
             states.append(sample.reshape(batch, group_size, *sample.shape[1:]).detach())
             next_states.append(
                 transition.prev_sample.reshape(batch, group_size, *sample.shape[1:]).detach()
@@ -140,6 +194,8 @@ class GroupDiffusionSampler:
             old_log_prob=old_log_prob,
             candidates=candidates.detach(),
             logits=logits.detach(),
+            guidance_shifts=tuple(guidance_shifts),
+            guidance_metrics=guidance_metrics,
         )
 
     def replay(self, trace: DiffusionTrace, *, model=None) -> torch.Tensor:
@@ -180,6 +236,8 @@ class GroupDiffusionSampler:
                 int(timestep),
                 int(prev_timestep),
                 prev_sample=flat_next,
+                mean_shift=(trace.guidance_shifts[index].reshape_as(flat_next)
+                            if trace.guidance_shifts else None),
             )
             log_probs.append(replayed.log_prob.reshape(batch, group_size, -1))
         return torch.stack(log_probs, dim=2)

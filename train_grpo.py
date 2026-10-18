@@ -15,6 +15,7 @@ from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChan
 from highway_env.planner.diffusion.config import build_structured_diffusion_config
 from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
 from pretraining.checkpoint_io import load_checkpoint_file
+from pretraining.config_io import load_config
 from highway_env.planner.diffusion.tensor_adapter import BOOL_KEYS, FLOAT_KEYS, PlannerTensorAdapter
 from highway_env.planner.diffusion.grpo import (
     CandidateRewardAdapter,
@@ -222,7 +223,7 @@ def _fixed_state_paired_validation(
             features = item["features"]
             context = item["context"]
 
-            current_trace = trainer.sampler.sample(
+            current_trace = trainer.evaluation_sampler.sample(
                 features,
                 generator=current_generator,
             )
@@ -434,7 +435,10 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
         )
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AllMerge migration-first GRPO trainer")
-    parser.add_argument("--checkpoint", required=True, type=Path)
+    parser.add_argument("--config", type=Path,
+                        default=Path(__file__).resolve().parent / "configs/train/allmerge_grpo.yaml",
+                        help="Existing native GRPO YAML; CLI flags take priority")
+    parser.add_argument("--checkpoint", required=False, type=Path, default=None)
     parser.add_argument(
         "--dataset-shard",
         type=Path,
@@ -448,11 +452,19 @@ def parse_args() -> argparse.Namespace:
         help="online scenario used by production W4 reward",
     )
     parser.add_argument("--group-action", type=int, default=3)
-    parser.add_argument("--steps", type=int, default=3, choices=(3, 10, 100, 5000))
+    parser.add_argument("--steps", type=int, default=3, help="positive optimizer steps, e.g. 5000 or 20000")
+    parser.add_argument("--save-interval", type=int, default=0, help="write intermediate checkpoints every N steps (0 disables)")
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--eta", type=float, default=0.02)
+    parser.add_argument("--guide-mode", choices=("none", "reward_gradient", "random_gradient"),
+                        default="none", help="DDIM Gaussian mean guidance during GRPO rollout only")
+    parser.add_argument("--guide-step-m", type=float, default=0.3,
+                        help="physical RMS Gaussian mean shift in metres")
+    parser.add_argument("--guide-scope", choices=("selected", "all"), default="selected")
+    parser.add_argument("--guide-max-x-m", type=float, default=20.0)
+    parser.add_argument("--guide-max-y-m", type=float, default=6.0)
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--kl-coef", type=float, default=0.01)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
@@ -557,7 +569,58 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output", type=Path, default=Path("outputs/grpo_smoke.pt"))
-    return parser.parse_args()
+    # NATIVE_GRPO_EXISTING_YAML_V1_20261018: CLI overrides YAML defaults.
+    cfg_probe = argparse.ArgumentParser(add_help=False)
+    cfg_probe.add_argument("--config", type=Path,
+                           default=Path(__file__).resolve().parent / "configs/train/allmerge_grpo.yaml")
+    cfg_pre, _ = cfg_probe.parse_known_args()
+    cfg = load_config(cfg_pre.config)
+    if not isinstance(cfg, dict):
+        raise SystemExit(f"Expected mapping in {cfg_pre.config}")
+    aliases = {"learning_rate": "lr"}
+    extras = {"trainable_prefixes", "smoke_steps"}
+    actions = {a.dest: a for a in parser._actions}
+    processed = {}
+    for key, value in cfg.items():
+        if key in extras:
+            continue
+        target = aliases.get(key, key)
+        if target in processed:
+            raise SystemExit(f"Duplicate GRPO config key: {key} maps to {target}")
+        if target not in actions:
+            raise SystemExit(f"Unknown key in {cfg_pre.config}: {key}")
+        action = actions[target]
+        if action.type is Path and value is not None:
+            value = Path(value)
+        elif action.type in (int, float, str) and value is not None:
+            value = action.type(value)
+        if action.choices is not None and value not in action.choices:
+            raise SystemExit(f"Invalid GRPO config {key}={value!r}; choices={action.choices}")
+        processed[target] = value
+    parser.set_defaults(**processed)
+    args = parser.parse_args()
+    if args.checkpoint is None:
+        parser.error("--checkpoint is required in config or on command line")
+    args.checkpoint = Path(args.checkpoint)
+    if "trainable_prefixes" in cfg:
+        prefixes = cfg["trainable_prefixes"]
+        if not isinstance(prefixes, list) or not prefixes or not all(isinstance(s, str) and s.strip() for s in prefixes):
+            parser.error("trainable_prefixes must be a nonempty list of strings")
+        args.trainable_prefixes = tuple(prefixes)
+    else:
+        args.trainable_prefixes = GRPOConfig().trainable_prefixes
+    for field in ("output", "fixed_validation_csv"):
+        value = getattr(args, field)
+        if value is None:
+            continue
+        try:
+            value = str(value).format(seed=args.seed, guide_mode=args.guide_mode)
+        except (KeyError, ValueError) as exc:
+            parser.error(f"Invalid {field} filename template: {exc}")
+        setattr(args, field, Path(value))
+    print(f"[grpo-config] source={args.config} guide_mode={args.guide_mode} steps={args.steps} "
+          f"group_size={args.group_size} lr={args.lr} output={args.output}", flush=True)
+    return args
 
 
 def _build_trainer(args: argparse.Namespace):
@@ -592,6 +655,12 @@ def _build_trainer(args: argparse.Namespace):
             max_grad_norm=args.max_grad_norm,
             update_epochs=args.update_epochs,
             task_reward_type=args.task_reward_type,
+            guide_mode=args.guide_mode,
+            guide_step_m=args.guide_step_m,
+            guide_scope=args.guide_scope,
+            guide_max_x_m=args.guide_max_x_m,
+            guide_max_y_m=args.guide_max_y_m,
+            trainable_prefixes=args.trainable_prefixes,
             constraint_strategy=args.constraint_strategy,
             constraint_names=constraint_names,
             constraint_residual_cap=args.constraint_residual_cap,
@@ -608,6 +677,8 @@ def _build_trainer(args: argparse.Namespace):
     print(f"[grpo] trainable_params={trainer.trainable_parameter_count:,}")
     print(f"[grpo] update_epochs={args.update_epochs} clip_eps={args.clip_eps}")
     print(f"[grpo] task_reward_type={args.task_reward_type}")
+    print(f"[grpo] guide_mode={args.guide_mode} step_m={args.guide_step_m} scope={args.guide_scope} "
+          f"caps=({args.guide_max_x_m}, {args.guide_max_y_m}) | fixed_eval_guidance=none | distillation=off")
     print(
         f"[grpo] constraint_strategy={args.constraint_strategy} "
         f"constraints={constraint_names}"
@@ -729,6 +800,13 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
                 f"scenario={args.scenario} {compact}"
             )
 
+            if args.save_interval and step % args.save_interval == 0 and step < args.steps:
+                interval_path = args.output.with_name(args.output.stem + f"_step{step}.pt")
+                save_grpo_checkpoint(interval_path, model=trainer.model,
+                    optimizer=trainer.optimizer, step=step,
+                    config=trainer.config, metrics=metrics)
+                print(f"[checkpoint] step={step} path={interval_path}", flush=True)
+
             if bool(terminated) or bool(truncated):
                 env.reset(seed=int(args.seed) + step)
     finally:
@@ -740,6 +818,10 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
 
 def main() -> int:
     args = parse_args()
+    if args.steps <= 0 or args.save_interval < 0:
+        raise SystemExit('--steps must be positive and --save-interval >= 0')
+    if args.guide_mode != 'none' and (args.fake_reward or args.task_reward_type != 'progress_comfort'):
+        raise SystemExit('Guided GRPO requires production --task-reward-type progress_comfort')
     if args.fixed_validation_states < 0:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:

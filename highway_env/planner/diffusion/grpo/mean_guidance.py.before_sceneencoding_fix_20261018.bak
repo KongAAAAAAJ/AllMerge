@@ -1,0 +1,168 @@
+"""Reward-gradient or matched-random shift of stochastic DDIM Gaussian mean.
+
+This is part of the *original GRPO sampling path*. No teacher/student, distillation,
+MATP, or extra learner. Pilot: deterministic DDIM mean decoded with t=0 denoiser.
+The pilot is computed by the frozen GRPO reference model BEFORE the Gaussian
+policy action. The shift is independent of trainable actor parameters at fixed
+x_t and is cached for PPO replay. The resulting q_theta^guide is a genuine
+conditional Gaussian policy with a mathematically well-defined PPO ratio.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+import torch
+
+
+@dataclass(frozen=True)
+class MeanGuideSettings:
+    mode: str = 'none'
+    step_m: float = 0.3
+    scope: str = 'selected'
+    max_x_m: float = 20.0
+    max_y_m: float = 6.0
+
+    def validate(self) -> None:
+        if self.mode not in {'none', 'reward_gradient', 'random_gradient'}:
+            raise ValueError('guide mode must be none/reward_gradient/random_gradient')
+        if self.scope not in {'selected', 'all'}:
+            raise ValueError('guide scope must be selected or all')
+        if min(self.step_m, self.max_x_m, self.max_y_m) <= 0:
+            raise ValueError('guidance step and caps must be positive')
+
+
+def _physical_rms(x: torch.Tensor) -> torch.Tensor:
+    return x.square().sum(-1).mean(-1).sqrt()
+
+
+def _normalized_physical_gradient(
+    grad_normalized: torch.Tensor, scale: torch.Tensor, settings: MeanGuideSettings,
+    *, generator: torch.Generator | None = None,
+) -> torch.Tensor:
+    """Gradient in physical-metre mean coordinates -> normed physical shift.
+
+    Shape [G,8,2]. The random control keeps each coordinate's magnitude and
+    flips signs independently; hence physical RMS, X/Y energy and Gaussian KL
+    (diagonal equal DDIM variance in normalized units) match reward guidance.
+    """
+    phys_grad = grad_normalized / scale
+    if not bool(torch.isfinite(phys_grad).all()):
+        raise FloatingPointError('Nonfinite gradient of dense reward w.r.t. Gaussian mean')
+    rms = _physical_rms(phys_grad)
+    direction = phys_grad / rms.clamp_min(1e-12)[:, None, None]
+    direction = torch.where((rms > 1e-12)[:, None, None], direction, 0.)
+    delta = direction * settings.step_m
+    # Same scalar per candidate: cap without changing gradient direction.
+    x_max = delta[..., 0].abs().amax(-1).clamp_min(1e-12)
+    y_max = delta[..., 1].abs().amax(-1).clamp_min(1e-12)
+    f = torch.minimum(torch.ones_like(x_max), settings.max_x_m / x_max)
+    f = torch.minimum(f, settings.max_y_m / y_max)
+    delta = delta * f[:, None, None]
+    if settings.mode == 'random_gradient':
+        sign = torch.randint(0, 2, delta.shape, generator=generator,
+                             device=delta.device, dtype=torch.int64).to(delta.dtype)
+        delta = delta * (2.0 * sign - 1.0)
+    return delta / scale
+
+
+def compute_mean_shift(
+    *, model: Any, features: dict, expanded: dict, scene: torch.Tensor,
+    anchor: torch.Tensor, mean: torch.Tensor, mode_logits: torch.Tensor,
+    context: Any, group_size: int, settings: MeanGuideSettings,
+    generator: torch.Generator | None,
+) -> tuple[torch.Tensor, dict]:
+    """Return stop-gradient mean shift [B*G,M,8,2] and rollout diagnostics.
+
+    Uses production-aligned DifferentiableTaskReward on 41-point dense splines.
+    Only model inputs receive gradients; pretrained/GRPO model weights are not
+    updated by the guidance calculation itself.
+    """
+    settings.validate()
+    if settings.mode == 'none':
+        return torch.zeros_like(mean), {'guidance/actual_shift_rms_m': 0.0}
+    if context is None or getattr(context, 'env', None) is None:
+        raise ValueError('Guided GRPO requires online W4 environment context')
+    from highway_env.planner.diffusion.guide_distill.reward_gradient import DifferentiableTaskReward
+    from highway_env.planner.diffusion.guide_distill.road_boundary import RoadBoundaryField
+    from highway_env.planner.diffusion.trajectory_mode_reward.config import TrajectoryModeRewardConfig
+    from highway_env.planner.diffusion.trajectory_mode_reward.state_adapter import (
+        _planning_state_snapshot, _vehicle_pose,
+    )
+
+    batch = features['coarse_trajectories'].shape[0]
+    if batch != 3:
+        raise ValueError('Guidance currently supports the production 3-vehicle W4 batch')
+    n = mean.shape[0]
+    if n != batch * group_size:
+        raise ValueError('DDIM mean batch/group layout mismatch')
+    scale = model.adapter.trajectory_scale.to(device=mean.device, dtype=mean.dtype)
+    valid_mask = features['mode_valid_mask'].to(device=mean.device, dtype=torch.bool)
+    if not bool(valid_mask.any(dim=-1).all()):
+        raise RuntimeError('No valid modes for guided GRPO')
+    mode_count = mean.shape[1]
+    logits = mode_logits.detach().reshape(batch, group_size, mode_count)
+    logits = logits.masked_fill(~valid_mask[:, None, :], -torch.inf)
+    selected = logits.argmax(-1)
+
+    env = context.env
+    snapshot = _planning_state_snapshot(env)
+    poses = snapshot[0] if snapshot is not None else tuple(_vehicle_pose(v) for v in env.controlled_vehicles)
+    road = RoadBoundaryField.from_road(env.road, sampling_m=0.4)
+    cfg = getattr(context, 'config', None) or TrajectoryModeRewardConfig()
+    proxy_list = []
+    for role in range(batch):
+        proxy = DifferentiableTaskReward(cfg, mean.device)
+        proxy.bind_road(road, poses[role])
+        proxy.bind_centerline(features['target_lane_polyline'][role, :, :2].detach().cpu().numpy())
+        proxy_list.append(proxy)
+
+    # CUDA/cuDNN eval-mode GRU does not support backward to the input.
+    # Disabling the cuDNN RNN backend leaves the denoiser in eval semantics.
+    with torch.enable_grad(), torch.backends.cudnn.flags(enabled=False):
+        pilot = mean.detach().requires_grad_(True)
+        ts = torch.zeros((n,), dtype=torch.long, device=mean.device)
+        decoded, _ = model.denoiser(
+            pilot, ts, scene.detach(), navigation_point_norm=anchor[:, :, -1, :].detach()
+        )
+        phys = model.adapter.denormalize_trajectory(decoded).reshape(
+            batch, group_size, mode_count, *mean.shape[-2:]
+        )
+        outputs, output_gradients = [], []
+        for role, proxy in enumerate(proxy_list):
+            if settings.scope == 'selected':
+                chosen = phys[role, torch.arange(group_size, device=mean.device), selected[role]]
+            else:
+                chosen = phys[role].index_select(1, torch.where(valid_mask[role])[0]).reshape(-1, *mean.shape[-2:])
+            # Reuse the SAME validated dense Reward gradient API as the V5
+            # probe, including its road finite-difference fallback. Then apply
+            # the terminal denoiser's exact vector-Jacobian product.
+            reward_grad = proxy.gradient_of(chosen.detach())
+            if not bool(torch.isfinite(reward_grad).all()):
+                raise FloatingPointError('Nonfinite production-aligned dense guidance gradient')
+            outputs.append(chosen)
+            output_gradients.append(reward_grad)
+        gradient, = torch.autograd.grad(outputs, pilot, grad_outputs=output_gradients)
+    gradient = gradient.detach().reshape(batch, group_size, mode_count, *mean.shape[-2:])
+    shift = torch.zeros_like(gradient)
+    for role in range(batch):
+        if settings.scope == 'selected':
+            for mode in selected[role].unique().tolist():
+                group_indices = torch.where(selected[role] == int(mode))[0]
+                actual = _normalized_physical_gradient(
+                    gradient[role, group_indices, int(mode)], scale, settings, generator=generator
+                )
+                shift[role, group_indices, int(mode)] = actual
+        else:
+            for mode in torch.where(valid_mask[role])[0].tolist():
+                shift[role, :, int(mode)] = _normalized_physical_gradient(
+                    gradient[role, :, int(mode)], scale, settings, generator=generator
+                )
+    metric = shift * scale
+    active = _physical_rms(metric) > 0
+    shift_rms = float(_physical_rms(metric)[active].mean()) if bool(active.any()) else 0.0
+    return shift.reshape_as(mean).detach(), {
+        'guidance/actual_shift_rms_m': shift_rms,
+        'guidance/active_fraction': float(active.float().mean()),
+    }

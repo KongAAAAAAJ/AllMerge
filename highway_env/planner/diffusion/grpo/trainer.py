@@ -19,6 +19,7 @@ from .constraint_strategy import (
 )
 from .reward_adapter import CandidateRewardAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
+from .mean_guidance import MeanGuideSettings
 from .task_reward import (
     SUPPORTED_TASK_REWARDS,
     legacy_w4_reward_from_result,
@@ -48,6 +49,11 @@ class GRPOConfig:
     active_temperature: float = 0.20
     active_support_gate: bool = False
     active_support_margin: float = 1e-3
+    guide_mode: str = "none"
+    guide_step_m: float = 0.3
+    guide_scope: str = "selected"
+    guide_max_x_m: float = 20.0
+    guide_max_y_m: float = 6.0
     trainable_prefixes: Tuple[str, ...] = (
         "denoiser.layers",
         "denoiser.reg_head",
@@ -109,6 +115,14 @@ class GRPOTrainer:
             raise ValueError("active_temperature must be > 0")
         if self.config.active_support_margin < 0.0:
             raise ValueError("active_support_margin must be >= 0")
+        guide_settings = MeanGuideSettings(
+            mode=self.config.guide_mode, step_m=self.config.guide_step_m,
+            scope=self.config.guide_scope, max_x_m=self.config.guide_max_x_m,
+            max_y_m=self.config.guide_max_y_m,
+        )
+        guide_settings.validate()
+        if guide_settings.mode != 'none' and self.config.task_reward_type != 'progress_comfort':
+            raise ValueError('Reward mean guidance requires task_reward_type=progress_comfort')
         self._configure_trainable_parameters()
         parameters = tuple(p for p in self.model.parameters() if p.requires_grad)
         if not parameters:
@@ -133,6 +147,12 @@ class GRPOTrainer:
             self.model,
             group_size=self.config.group_size,
             eta=self.config.eta,
+            guidance=guide_settings,
+            guide_model=self.reference_model,
+        )
+        # Always evaluate UNGUIDED for a common model-quality comparison.
+        self.evaluation_sampler = GroupDiffusionSampler(
+            self.model, group_size=self.config.group_size, eta=self.config.eta,
         )
         self.reference_sampler = GroupDiffusionSampler(
             self.reference_model,
@@ -227,7 +247,7 @@ class GRPOTrainer:
         # Keep dropout disabled: diffusion transition log-prob must describe all policy stochasticity.
         self.model.eval()
         with torch.no_grad():
-            trace = self.sampler.sample(features, generator=generator)
+            trace = self.sampler.sample(features, generator=generator, context=context)
             strategy_metrics: Dict[str, float] = {}
             needs_full_result = (
                 self.config.constraint_strategy != "none"
@@ -299,6 +319,8 @@ class GRPOTrainer:
             strategy_metrics["reward/effective_reward_mean"] = float(
                 effective_rewards.mean().detach()
             )
+        if trace.guidance_metrics:
+            strategy_metrics.update(trace.guidance_metrics)
         return trace, rewards, advantages, strategy_metrics
 
     @staticmethod

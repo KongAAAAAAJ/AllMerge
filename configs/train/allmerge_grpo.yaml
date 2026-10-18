@@ -1,13 +1,40 @@
-# Migration-first defaults. Keep the model/pretraining config owned by W2.
-group_size: 4
-learning_rate: 5.0e-5
+# Native GRPO training defaults. Loaded automatically by train_grpo.py.
+# Run from the all_merge-guideDistill worktree; CLI options override these values.
+# Model architecture is still loaded from the checkpoint, not from this training YAML.
+checkpoint: ../all_merge-gru/outputs/gru_coarse_goal_ablation_100ep_3seed/seed_0/mlp_dense/run_1/checkpoints/best.pt
+scenario: curved
+group_action: 3
+steps: 20000
+save_interval: 2000
+batch_size: 1
+group_size: 48
+learning_rate: 1.0e-6
 eta: 0.02
 clip_eps: 0.20
 kl_coef: 0.01
 max_grad_norm: 10.0
+update_epochs: 2
+task_reward_type: progress_comfort
+constraint_strategy: none
+constraint_names: collision,road,ttc,background_gap,teammate_gap
+constraint_residual_cap: 5.0
+# The only flag that needs changing between the three terminal commands.
+guide_mode: none
+guide_step_m: 0.3
+guide_scope: selected
+guide_max_x_m: 20.0
+guide_max_y_m: 6.0
+fixed_validation_states: 16
+fixed_validation_interval: 500
+fixed_validation_seed_offset: 10000
+seed: 0
+output: outputs/guided_grpo_compare/seed_{seed}/{guide_mode}/policy.pt
+# IMPORTANT: preserve all GRU refinement parameters from current GRPOConfig.
 trainable_prefixes:
   - denoiser.layers
   - denoiser.reg_head
-
-# Correctness gates before long training.
-smoke_steps: [3, 10, 100]
+  - denoiser.gru_refine_token_norm
+  - denoiser.gru_refine_h0
+  - denoiser.gru_refine_input
+  - denoiser.gru_refine
+  - denoiser.gru_refine_out

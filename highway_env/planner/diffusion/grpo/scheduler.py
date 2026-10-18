@@ -41,6 +41,7 @@ class StochasticDDIMTransition:
         *,
         prev_sample: Optional[torch.Tensor] = None,
         generator: Optional[torch.Generator] = None,
+        mean_shift: Optional[torch.Tensor] = None,
     ) -> TransitionResult:
         t = int(timestep)
         prev_t = int(prev_timestep)
@@ -64,6 +65,10 @@ class StochasticDDIMTransition:
         std = (self.eta * variance.sqrt()).clamp_min(self.min_std)
         direction_scale = (one - alpha_prev - std.square()).clamp_min(0.0).sqrt()
         mean = alpha_prev.sqrt() * predicted_x0 + direction_scale * pred_epsilon
+        if mean_shift is not None:
+            if mean_shift.shape != mean.shape or not bool(torch.isfinite(mean_shift).all()):
+                raise ValueError("mean_shift must be finite and match DDIM mean shape")
+            mean = mean + mean_shift
 
         if prev_sample is not None and generator is not None:
             raise ValueError("Pass either prev_sample for replay or generator for sampling, not both")
