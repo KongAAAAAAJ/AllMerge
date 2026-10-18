@@ -207,8 +207,18 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
         adapter=model.adapter
         if model.training:
             raise RuntimeError('Online teacher source must be in eval mode during collection')
-        if next(model.parameters()).device != device:
-            raise RuntimeError('Online teacher source/device mismatch')
+        # `cuda` denotes the current CUDA device, while model parameters
+        # normally report an explicit index such as `cuda:0`.
+        model_device=next(model.parameters()).device
+        def _cuda_index(d):
+            return torch.cuda.current_device() if d.index is None else d.index
+        if (model_device.type != device.type or
+            (device.type == 'cuda' and _cuda_index(model_device) != _cuda_index(device)) or
+            (device.type != 'cuda' and model_device != device)):
+            raise RuntimeError('Online teacher source/device mismatch: '
+                               f'model={model_device} requested={device}')
+        # Use the actual Student device for all guidance tensors.
+        device=model_device
         if source_step is None or source_model_sha256 is None:
             raise RuntimeError('Online teacher source step and model SHA are required')
 
