@@ -39,7 +39,7 @@ class DifferentiableTaskReward:
         if absent:
             raise RuntimeError('V5 unified reward config missing: '+str(absent))
         self.semantics = {
-            'reward_type': 'progress_comfort',
+            'reward_type': 'unified_v6',
             'guidance': 'balanced (unified task reward ONLY)',
             'progress_norm_m': float(cfg.progress_norm_m),
             'weights': {'progress': float(cfg.task_progress_weight),
@@ -59,6 +59,7 @@ class DifferentiableTaskReward:
         }
         self.gradient_fallback_counts = {}
         self.target_centerline = None
+        self.initial_velocity_xy = None
 
     def bind_road(self, road_field, role_pose, *, balanced_road_weight=None):
         # Legacy caller may pass the weight; it must never override the task.
@@ -66,6 +67,12 @@ class DifferentiableTaskReward:
             raise ValueError('Guidance road weight must match current task reward config')
         self.road_field = road_field
         self.role_pose = role_pose
+
+    def bind_initial_velocity(self, velocity_xy):
+        velocity=torch.as_tensor(velocity_xy,device=self.device,dtype=torch.float32)
+        if velocity.shape!=(2,) or not torch.isfinite(velocity).all():
+            raise ValueError('V6 requires ego_state velocity [vx,vy]')
+        self.initial_velocity_xy=velocity.detach()
 
     def bind_centerline(self, target_lane_polyline):
         # Planner features: [M,10] or [M,2], ego-local and frozen at planning time.
@@ -80,23 +87,31 @@ class DifferentiableTaskReward:
         if self.road_field is None:
             raise RuntimeError('Bind road field before unified reward evaluation')
         cfg = self.config
-        dense, _, _ = evaluate_dense_spline(xy, cfg)
-        progress = (xy[:,-1,0]/float(cfg.progress_norm_m)).clamp(0.,1.)
-        comfort = task_comfort_from_dense(dense, cfg)
-        road = self.road_field.components(xy, self.role_pose, cfg)['road']
+        if self.initial_velocity_xy is None:
+            raise RuntimeError('bind_initial_velocity must be called before V6 reward')
+        dense, _, _ = evaluate_dense_spline(xy, cfg,initial_velocity_xy=self.initial_velocity_xy)
+        from highway_env.planner.diffusion.trajectory_mode_reward.task_objective import longitudinal_terms,combine_reward
+        kin=longitudinal_terms(dense,cfg,initial_velocity_xy=self.initial_velocity_xy)
+        progress=kin['progress_score']
+        hd=torch.atan2(torch.diff(dense[...,1],dim=-1),torch.diff(dense[...,0],dim=-1))
+        dyaw=torch.atan2(torch.sin(torch.diff(hd,dim=-1)),torch.cos(torch.diff(hd,dim=-1)))
+        comfort=dyaw.abs().mean(dim=-1)/float(cfg.interpolation_dt_s)
+        road = self.road_field.components(xy, self.role_pose, cfg,initial_velocity_xy=self.initial_velocity_xy)['road']
         curvature = curvature_reward_components(dense, cfg)
         if self.target_centerline is None and float(cfg.task_centerline_weight)>0.:
             raise RuntimeError('V5.2 requires bind_centerline(frozen target_lane_polyline)')
         centerline = centerline_reward_components(dense, self.target_centerline, cfg)
         if float(cfg.task_centerline_weight)>0. and not bool((centerline['centerline_valid']>.5).all()):
             raise RuntimeError('Target lane centerline does not cover the 2-4s trajectory horizon')
-        native = (float(cfg.task_progress_weight)*progress
-                  - float(cfg.task_comfort_weight)*comfort
-                  - float(cfg.task_curvature_weight)*curvature['curvature_penalty']
-                  - float(cfg.task_centerline_weight)*centerline['centerline_penalty'])
-        unified = native + float(cfg.task_road_weight)*road
+        parts={'progress_score':progress,'accel_penalty':kin['accel_penalty'],
+            'jerk_penalty':kin['jerk_penalty'],'road_boundary_reward':road,
+            'curvature_penalty':curvature['curvature_penalty'],
+            'centerline_penalty':centerline['centerline_penalty'],
+            'lateral_comfort_penalty':comfort}
+        native=combine_reward({**parts,'road_boundary_reward':torch.zeros_like(road)},cfg)
+        unified=combine_reward(parts,cfg)
         return {'balanced':unified, 'native_balanced':native, 'raw_progress':progress,
-                'comfort_penalty':comfort, 'road':road,
+                'comfort_penalty':comfort, 'road':road, **kin,
                 **curvature, **centerline}
 
     def _road_finite_difference(self, xy, *, step_m=1e-3):
@@ -106,8 +121,8 @@ class DifferentiableTaskReward:
                 for axis in range(2):
                     xp=xy.detach().clone();xm=xy.detach().clone()
                     xp[:,t,axis]+=step_m;xm[:,t,axis]-=step_m
-                    p=self.road_field.components(xp,self.role_pose,self.config)['road']
-                    m=self.road_field.components(xm,self.role_pose,self.config)['road']
+                    p=self.road_field.components(xp,self.role_pose,self.config,initial_velocity_xy=self.initial_velocity_xy)['road']
+                    m=self.road_field.components(xm,self.role_pose,self.config,initial_velocity_xy=self.initial_velocity_xy)['road']
                     out[:,t,axis]=(p-m)/(2*step_m)
             return out
 
@@ -145,10 +160,12 @@ class DifferentiableTaskReward:
     def validate_against_production(self,xy,result,*,role:int,mode:int,tol:float=.002):
         values=self.components(xy.detach())
         diffs={}
-        for key,ours in [('progress_score','raw_progress'),('comfort_penalty','comfort_penalty'),
+        for key,ours in [('progress_score','raw_progress'),
                          ('road_boundary_reward','road'),
                          ('curvature_penalty','curvature_penalty'),
-                         ('centerline_penalty','centerline_penalty')]:
+                         ('centerline_penalty','centerline_penalty'),
+                         ('accel_penalty','accel_penalty'),
+                         ('jerk_penalty','jerk_penalty')]:
             if key not in result.components:raise RuntimeError(f'Production scorer missing {key}')
             actual=torch.as_tensor(np.asarray(result.components[key])[role,mode,:],device=xy.device,dtype=xy.dtype)
             diffs[key]=float((actual-values[ours].detach()).abs().max())

@@ -122,7 +122,6 @@ def _build_fixed_validation_states(
     if count <= 0:
         return []
 
-    env_cls = SCENARIOS[args.scenario]
     fixed_states = []
     print(
         f"[fixed-val] building {count} states | "
@@ -143,7 +142,8 @@ def _build_fixed_validation_states(
                 + index
             )
 
-            env = env_cls(
+            scene_name=(tuple(SCENARIOS)[index%len(SCENARIOS)] if args.scenario=='all' else args.scenario)
+            env = SCENARIOS[scene_name](
                 config={
                     "show_trajectories": False,
                     "show_future_trajectories": False,
@@ -436,8 +436,19 @@ def _validate_fixed_step_zero(metrics: Dict[str, float]) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AllMerge migration-first GRPO trainer")
     parser.add_argument("--config", type=Path,
-                        default=Path(__file__).resolve().parent / "configs/train/allmerge_grpo.yaml",
-                        help="Existing native GRPO YAML; CLI flags take priority")
+                        default=Path(__file__).resolve().parent / "configs/train/allmerge_posttrain.yaml",
+                        help="Unified native posttrain YAML; CLI flags take priority")
+    parser.add_argument('--method',choices=('grpo','reward_guided_grpo','post_guide_distillation'),default='grpo')
+    parser.add_argument('--pgd-stage',choices=('collect','train','full'),default='full')
+    parser.add_argument('--pgd-strategy',choices=('a2_v2','b1_adaptive','b2_warm_search'),default='b2_warm_search')
+    parser.add_argument('--pgd-train-states',type=int,default=100)
+    parser.add_argument('--pgd-guide-count',type=int,default=12)
+    parser.add_argument('--pgd-guide-iters',type=int,default=20)
+    parser.add_argument('--pgd-teacher-file',type=Path,default=Path('outputs/posttrain_v6/post_guide_distillation/teachers.pt'))
+    parser.add_argument('--pgd-resume',type=Path,default=None)
+    parser.add_argument('--pgd-start-step',type=int,default=0)
+    parser.add_argument('--pgd-recovery-interval',type=int,default=250)
+    parser.add_argument('--pgd-early-stage-weight',type=float,default=0.0)
     parser.add_argument("--checkpoint", required=False, type=Path, default=None)
     parser.add_argument(
         "--dataset-shard",
@@ -447,7 +458,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=tuple(SCENARIOS),
+        choices=(*SCENARIOS,'all'),
         default="straight",
         help="online scenario used by production W4 reward",
     )
@@ -572,7 +583,7 @@ def parse_args() -> argparse.Namespace:
     # NATIVE_GRPO_EXISTING_YAML_V1_20261018: CLI overrides YAML defaults.
     cfg_probe = argparse.ArgumentParser(add_help=False)
     cfg_probe.add_argument("--config", type=Path,
-                           default=Path(__file__).resolve().parent / "configs/train/allmerge_grpo.yaml")
+                           default=Path(__file__).resolve().parent / "configs/train/allmerge_posttrain.yaml")
     cfg_pre, _ = cfg_probe.parse_known_args()
     cfg = load_config(cfg_pre.config)
     if not isinstance(cfg, dict):
@@ -609,12 +620,18 @@ def parse_args() -> argparse.Namespace:
         args.trainable_prefixes = tuple(prefixes)
     else:
         args.trainable_prefixes = GRPOConfig().trainable_prefixes
+    if args.method=='grpo':
+        args.guide_mode='none'
+    elif args.method=='reward_guided_grpo':
+        args.guide_mode='reward_gradient'
+    else:
+        args.guide_mode='none'
     for field in ("output", "fixed_validation_csv"):
         value = getattr(args, field)
         if value is None:
             continue
         try:
-            value = str(value).format(seed=args.seed, guide_mode=args.guide_mode)
+            value = str(value).format(seed=args.seed, guide_mode=args.guide_mode,method=args.method)
         except (KeyError, ValueError) as exc:
             parser.error(f"Invalid {field} filename template: {exc}")
         setattr(args, field, Path(value))
@@ -723,14 +740,9 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             "scenario batch is the 3-vehicle platoon"
         )
 
-    env_cls = SCENARIOS[args.scenario]
-    env = env_cls(
-        config={
-            "show_trajectories": False,
-            "show_future_trajectories": False,
-        },
-        render_mode=None,
-    )
+    scene_names=(tuple(SCENARIOS) if args.scenario=='all' else (args.scenario,))
+    envs={name:SCENARIOS[name](config={'show_trajectories':False,
+         'show_future_trajectories':False},render_mode=None) for name in scene_names}
 
     fixed_states = []
     metrics: Dict[str, float] = {}
@@ -755,9 +767,12 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             )
             print(f"[fixed-val] csv={fixed_csv}")
 
-        env.reset(seed=int(args.seed))
+        for k,(name,e) in enumerate(envs.items()):
+            e.reset(seed=int(args.seed)+k*1000)
 
         for step in range(1, args.steps + 1):
+            selected_scene=scene_names[(step-1)%len(scene_names)]
+            env=envs[selected_scene]
             _, _, terminated, truncated, _ = env.step(int(args.group_action))
             features = _scenario_features(env, adapter)
             context = _frozen_reward_context(trainer, features, env)
@@ -797,7 +812,7 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
             )
             print(
                 f"[step {step:03d}/{args.steps}] "
-                f"scenario={args.scenario} {compact}"
+                f"scenario={selected_scene} {compact}"
             )
 
             if args.save_interval and step % args.save_interval == 0 and step < args.steps:
@@ -808,16 +823,67 @@ def _run_w4(args, adapter, trainer, device, generator) -> Dict[str, float]:
                 print(f"[checkpoint] step={step} path={interval_path}", flush=True)
 
             if bool(terminated) or bool(truncated):
-                env.reset(seed=int(args.seed) + step)
+                env.reset(seed=int(args.seed) + step + scene_names.index(selected_scene)*1000)
     finally:
-        env.close()
+        for env in envs.values():env.close()
         _close_fixed_validation_states(fixed_states)
 
     return metrics
 
 
+def _run_post_guide_distillation(args):
+    """Native config-driven PGD. No root-level external training scripts."""
+    import sys
+    from highway_env.planner.diffusion.guide_distill import teacher
+    from highway_env.planner.diffusion.guide_distill import post_guide_distillation
+    root=Path(__file__).resolve().parent
+    if not args.checkpoint.is_file():
+        raise FileNotFoundError('Local Pretrain checkpoint missing '+str(args.checkpoint))
+    out=args.output.resolve()
+    if args.scenario not in ('all','straight','curved','merge_in','merge_out'):
+        raise ValueError('Unknown PGD scene')
+    teacher_file=args.pgd_teacher_file.resolve()
+    common=argparse.Namespace(checkpoint=args.checkpoint.resolve(),scenario=args.scenario,
+        role=0,device=args.device,seed=args.seed,noise_seed=args.seed+50000,
+        eval_seed=args.seed+100000,eval_noise_seed=args.seed+150000,
+        group_size=args.group_size,guide_count=args.pgd_guide_count,
+        guidance_iters=args.pgd_guide_iters,guidance_step_m=args.guide_step_m,
+        max_teachers_per_state=4,train_states=args.pgd_train_states,
+        teacher_file=teacher_file,steps=args.steps,lr=args.lr,
+        max_grad_norm=5.,save_interval=args.save_interval or args.steps,
+        output=out,pgd_strategy=args.pgd_strategy)
+    with torch.no_grad():
+        teacher.preflight(common,root)
+    if args.pgd_stage in ('collect','full'):
+        if teacher_file.exists():
+            raise FileExistsError('PGD teacher dataset exists; choose a fresh output or --pgd-stage train: '+str(teacher_file))
+        teacher.collect(common,root)
+    if args.pgd_stage in ('train','full'):
+        if not teacher_file.exists():raise FileNotFoundError('Collect a V6 teacher dataset first: '+str(teacher_file))
+        arguments=['post_guide_distillation','--method','student','--root',str(root),
+            '--checkpoint',str(args.checkpoint),'--teacher-file',str(teacher_file),
+            '--scenario',str(args.scenario),'--seed',str(args.seed),
+            '--noise-seed',str(common.noise_seed),'--group-size',str(args.group_size),
+            '--lr',str(args.lr),'--max-grad-norm','5.0',
+            '--early-stage-weight',str(args.pgd_early_stage_weight),
+            '--start-step',str(args.pgd_start_step),'--stop-step',str(args.steps),
+            '--output',str(out),'--log',str(out.with_suffix('.csv')),
+            '--recovery',str(out.with_name(out.stem+'_recovery.pt')),
+            '--recovery-interval',str(args.pgd_recovery_interval)]
+        if args.pgd_resume:arguments += ['--resume',str(args.pgd_resume)]
+        old_argv=sys.argv
+        try:
+            sys.argv=arguments
+            post_guide_distillation.main()
+        finally:sys.argv=old_argv
+    print('[OK] V6 Post-Guide Distillation',out)
+    return 0
+
+
 def main() -> int:
     args = parse_args()
+    if args.method=='post_guide_distillation':
+        return _run_post_guide_distillation(args)
     if args.steps <= 0 or args.save_interval < 0:
         raise SystemExit('--steps must be positive and --save-interval >= 0')
     if args.guide_mode != 'none' and (args.fake_reward or args.task_reward_type != 'progress_comfort'):

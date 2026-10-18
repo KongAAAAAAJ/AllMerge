@@ -13,6 +13,12 @@ from .constants import NUM_MODES, NUM_VEHICLES
 
 _COMPONENT_NAMES = (
     "progress_score",
+    "accel_penalty",
+    "jerk_penalty",
+    "accel_peak_mps2",
+    "jerk_peak_mps3",
+    "speed_final_mps",
+    "lateral_comfort_penalty",
     "gap_penalty",
     "ttc_penalty",
     "road_penalty",
@@ -65,6 +71,7 @@ class RewardGeometryContext:
     road: object
     # Same ego-local frozen reference used by Planner Features and Guidance.
     target_centerlines: tuple[np.ndarray, ...] | None = None
+    initial_velocity_xy: tuple[np.ndarray, ...] | None = None
 
 
 @dataclass(frozen=True)

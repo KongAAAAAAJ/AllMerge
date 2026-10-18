@@ -82,6 +82,19 @@ class TrajectoryModeRewardConfig:
     curvature_topk: int = 8
     curvature_huber_delta: float = 0.25
 
+    # V6: single normalized longitudinal objective; these are the only tunable
+    # reward constants in production, GRPO/RGG and Post-Guide Distillation.
+    v6_accel_weight: float = 0.12
+    v6_jerk_weight: float = 0.08
+    v6_lateral_comfort_weight: float = 0.05
+    v6_accel_comfort_mps2: float = 4.0
+    v6_accel_feasible_mps2: float = 6.0
+    v6_jerk_comfort_mps3: float = 2.0
+    v6_jerk_feasible_mps3: float = 8.0
+    v6_strong_penalty_beta: float = 8.0
+    v6_peak_weight: float = 0.30
+    v6_min_progress_norm_m: float = 20.0
+
     def __post_init__(self) -> None:
         if (
             isinstance(self.trajectories_per_mode, bool)
@@ -113,6 +126,9 @@ class TrajectoryModeRewardConfig:
             "curvature_min_segment_m",
             "curvature_huber_delta",
             "centerline_scale_m",
+            "v6_accel_feasible_mps2",
+            "v6_jerk_feasible_mps3",
+            "v6_min_progress_norm_m",
         )
         for name in positive:
             value = float(getattr(self, name))
@@ -138,6 +154,10 @@ class TrajectoryModeRewardConfig:
         if isinstance(self.curvature_topk, bool) or not isinstance(self.curvature_topk, int) or self.curvature_topk < 1:
             raise TrajectoryModeRewardError("curvature_topk must be a positive integer")
 
+        if (self.v6_accel_comfort_mps2 >= self.v6_accel_feasible_mps2
+                or self.v6_jerk_comfort_mps3 >= self.v6_jerk_feasible_mps3
+                or not 0 <= self.v6_peak_weight <= 1):
+            raise TrajectoryModeRewardError('Invalid V6 comfort/feasibility/peak thresholds')
         if self.interpolation_dt_s > self.trajectory_dt_s:
             raise TrajectoryModeRewardError(
                 "interpolation_dt_s cannot exceed trajectory_dt_s"
@@ -154,6 +174,13 @@ class TrajectoryModeRewardConfig:
             "task_road_weight",
             "task_curvature_weight",
             "task_centerline_weight",
+            "v6_accel_weight",
+            "v6_jerk_weight",
+            "v6_lateral_comfort_weight",
+            "v6_accel_comfort_mps2",
+            "v6_jerk_comfort_mps3",
+            "v6_strong_penalty_beta",
+            "v6_peak_weight",
             "centerline_late_power",
             "task_curvature_peak_weight",
             "task_curvature_margin_weight",

@@ -9,7 +9,7 @@ import torch
 
 _ROAD_FIELDS=weakref.WeakKeyDictionary()
 
-def production_road_reward(trajectories, pose, road, config):
+def production_road_reward(trajectories, pose, road, config, *, initial_velocity_xy=None):
     from highway_env.planner.diffusion.guide_distill.road_boundary import RoadBoundaryField
     try:
         field=_ROAD_FIELDS.get(road)
@@ -23,7 +23,7 @@ def production_road_reward(trajectories, pose, road, config):
             pass
     with torch.no_grad():
         xy=torch.as_tensor(np.asarray(trajectories),dtype=torch.float64)
-        val=field.components(xy,pose,config)['road']
+        val=field.components(xy,pose,config,initial_velocity_xy=initial_velocity_xy)['road']
     result=val.detach().cpu().numpy()
     if not np.isfinite(result).all():
         raise FloatingPointError('Nonfinite production road boundary reward')

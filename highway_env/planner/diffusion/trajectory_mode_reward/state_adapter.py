@@ -331,8 +331,19 @@ class AllMergeRewardStateAdapter:
                     poly.shape[1] < 2 or poly.shape[2] < 2 or not np.isfinite(poly).all()):
                 raise TrajectoryModeRewardError('Invalid planning-time target_lane_polyline features')
             target_lines = tuple(poly[role, :, :2].copy() for role in range(NUM_VEHICLES))
+        ego_velocity = None
+        if isinstance(frozen_features, Mapping) and 'ego_state' in frozen_features:
+            state = np.asarray(frozen_features['ego_state'],dtype=np.float64)
+            if state.ndim!=2 or state.shape[0]!=NUM_VEHICLES or state.shape[1]<2:
+                raise TrajectoryModeRewardError('Invalid ego_state velocity shape')
+            ego_velocity=tuple(state[r,:2].copy() for r in range(NUM_VEHICLES))
+        if ego_velocity is None:
+            # Stop V6 training on states for which actual initial velocities
+            # are unavailable; do not silently infer from the first waypoint.
+            raise TrajectoryModeRewardError('V6 requires planning-time ego_state velocity')
         return RewardGeometryContext(
             poses=poses,
+            initial_velocity_xy=ego_velocity,
             backgrounds=per_role,
             road=road,
             target_centerlines=target_lines,

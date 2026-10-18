@@ -115,6 +115,7 @@ def compute_mean_shift(
     for role in range(batch):
         proxy = DifferentiableTaskReward(cfg, mean.device)
         proxy.bind_road(road, poses[role])
+        proxy.bind_initial_velocity(features['ego_state'][role,:2])
         proxy.bind_centerline(features['target_lane_polyline'][role, :, :2].detach().cpu().numpy())
         proxy_list.append(proxy)
 

@@ -236,6 +236,7 @@ def _heading_from_xy_batch(xy: np.ndarray) -> np.ndarray:
 def _dense_local_trajectories_batch(
     trajectories: np.ndarray,
     config: TrajectoryModeRewardConfig,
+    initial_velocity_xy=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Batch interpolate [G,3,8,2] into [G,3,T,3] without a G loop."""
     values = np.asarray(trajectories, dtype=np.float64)
@@ -251,7 +252,11 @@ def _dense_local_trajectories_batch(
     import torch
     xy=torch.as_tensor(values,dtype=torch.float64)
     with torch.no_grad():
-        dense_xy,_,_=evaluate_dense_spline(xy,config)
+        velocity = None
+        if initial_velocity_xy is not None:
+            velocity = torch.as_tensor(initial_velocity_xy,dtype=torch.float64)
+            velocity = velocity.expand(values.shape[0],3,2)
+        dense_xy,_,_=evaluate_dense_spline(xy,config,initial_velocity_xy=velocity)
         dense_heading=headings_from_dense(dense_xy)
     dense=np.concatenate((dense_xy.numpy(),dense_heading.unsqueeze(-1).numpy()),axis=-1)
     target_times=np.arange(dense.shape[-2],dtype=np.float64)*config.interpolation_dt_s

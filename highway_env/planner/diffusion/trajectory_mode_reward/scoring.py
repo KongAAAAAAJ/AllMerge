@@ -32,6 +32,7 @@ class CounterfactualScoringMixin:
         *,
         target_role: int,
         target_centerline: np.ndarray | None = None,
+        initial_velocity_by_role=None,
         target_trajectories: np.ndarray,
         frozen_argmax_joint_trajectories: np.ndarray,
         poses: list[np.ndarray],
@@ -48,18 +49,19 @@ class CounterfactualScoringMixin:
         ).copy()
         joint[:, target_role] = target_trajectories
 
-        dense_local, _ = _dense_local_trajectories_batch(joint, self.config)
+        if initial_velocity_by_role is None:
+            raise RuntimeError('V6 score requires planning-time ego_state velocity')
+        dense_local, _ = _dense_local_trajectories_batch(joint, self.config,
+            initial_velocity_xy=np.stack(initial_velocity_by_role)[None])
         dense_world = np.empty_like(dense_local, dtype=np.float64)
         for role in range(NUM_VEHICLES):
             dense_world[:, role] = local_to_world(dense_local[:, role], poses[role])
 
         local = dense_local[:, target_role]
         world = dense_world[:, target_role]
-        progress_score = np.clip(
-            target_trajectories[:, -1, 0] / self.config.progress_norm_m,
-            0.0,
-            1.0,
-        ).astype(np.float64, copy=False)
+        # V6 progress is calculated by the SAME shared tensor implementation
+        # used in Guidance; no separate clipping/normalization here.
+        progress_score = None
 
         # The signed road-union reward is also used by the differentiable Guide.
         # The old W4 road penalty/constraints are preserved as distinct metrics.
@@ -71,15 +73,28 @@ class CounterfactualScoringMixin:
         from .centerline_reward import centerline_reward_components
         with torch.no_grad():
             control_points = torch.as_tensor(target_trajectories, dtype=torch.float64)
-            curvature_dense, _, _ = evaluate_dense_spline(control_points, self.config)
+            v0 = torch.as_tensor(initial_velocity_by_role[target_role],dtype=torch.float64)
+            curvature_dense, _, _ = evaluate_dense_spline(control_points, self.config,initial_velocity_xy=v0)
+            from .task_objective import longitudinal_terms
+            kin=longitudinal_terms(curvature_dense,self.config,initial_velocity_xy=v0)
+            # Reuse existing heading-based lateral comfort only; longitudinal
+            # acceleration is penalized by the V6 longitudinal term.
+            hd=torch.atan2(torch.diff(curvature_dense[...,1],dim=-1),torch.diff(curvature_dense[...,0],dim=-1))
+            dyaw=torch.atan2(torch.sin(torch.diff(hd,dim=-1)),torch.cos(torch.diff(hd,dim=-1)))
+            lateral_cost=dyaw.abs().mean(dim=-1)/float(self.config.interpolation_dt_s)
             curvature_terms = curvature_reward_components(curvature_dense, self.config)
             centerline_terms = centerline_reward_components(curvature_dense, target_centerline, self.config)
         curvature_numpy = {k: v.detach().cpu().numpy().astype(np.float32)
                            for k, v in curvature_terms.items()}
+        kinematic_numpy={k:v.detach().cpu().numpy().astype(np.float32)
+                           for k,v in kin.items() if k not in ('accel_series_mps2','jerk_series_mps3')}
+        progress_score=kin['progress_score'].detach().cpu().numpy().astype(np.float64)
+        lateral_comfort_penalty=lateral_cost.detach().cpu().numpy().astype(np.float32)
         centerline_numpy = {k: v.detach().cpu().numpy().astype(np.float32)
                             for k, v in centerline_terms.items()}
         road_boundary_reward = production_road_reward(
-            target_trajectories, poses[target_role], road, self.config
+            target_trajectories, poses[target_role], road, self.config,
+            initial_velocity_xy=initial_velocity_by_role[target_role]
         )
         road_margin = road_margin_series_batch(
             world, road, self.config, tracking_aware=True
@@ -254,6 +269,8 @@ class CounterfactualScoringMixin:
             "clearance_violation": clearance_violation,
             "components": {
                 "progress_score": progress_score.astype(np.float32),
+                "lateral_comfort_penalty": lateral_comfort_penalty,
+                **kinematic_numpy,
                 "gap_penalty": gap_penalty.astype(np.float32),
                 "ttc_penalty": ttc_penalty.astype(np.float32),
                 "road_penalty": road_penalty.astype(np.float32),

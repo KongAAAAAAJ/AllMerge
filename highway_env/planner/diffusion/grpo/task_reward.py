@@ -100,13 +100,20 @@ def task_reward_from_w4_result(
         mode_mask = torch.as_tensor(result.valid_mode_mask,device=device,dtype=torch.bool)[:,None,:].expand_as(valid)
         if bool(((valid < .5) & mode_mask).any()):
             raise RuntimeError('V5.2 target-lane centerline reference is missing for a valid mode')
-    return (
-        float(config.task_progress_weight) * progress
-        - float(config.task_comfort_weight) * comfort
-        + float(config.task_road_weight) * road
-        - float(config.task_curvature_weight) * curvature
-        - float(config.task_centerline_weight) * centerline
-    )
+    from highway_env.planner.diffusion.trajectory_mode_reward.task_objective import combine_reward
+    def comp(name):
+        if name not in result.components:
+            raise RuntimeError('V6 production reward is missing '+name)
+        return _component_to_grpo(result.components[name],device=device,dtype=dtype)
+    return combine_reward({
+        'progress_score':comp('progress_score'),
+        'accel_penalty':comp('accel_penalty'),
+        'jerk_penalty':comp('jerk_penalty'),
+        'road_boundary_reward':road,
+        'curvature_penalty':curvature,
+        'centerline_penalty':centerline,
+        'lateral_comfort_penalty':comp('lateral_comfort_penalty'),
+    },config)
 
 
 def legacy_w4_reward_from_result(

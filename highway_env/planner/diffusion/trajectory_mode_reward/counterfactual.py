@@ -28,6 +28,12 @@ class TrajectoryModeCounterfactualReward(
 
     COMPONENT_NAMES = (
         "progress_score",
+        "accel_penalty",
+        "jerk_penalty",
+        "accel_peak_mps2",
+        "jerk_peak_mps3",
+        "speed_final_mps",
+        "lateral_comfort_penalty",
         "gap_penalty",
         "ttc_penalty",
         "road_penalty",
@@ -156,6 +162,7 @@ class TrajectoryModeCounterfactualReward(
                         frozen_argmax
                     ),
                     poses=list(context.poses),
+                    initial_velocity_by_role=context.initial_velocity_xy,
                     road=context.road,
                     target_centerline=(None if context.target_centerlines is None
                                        else context.target_centerlines[role]),
@@ -288,6 +295,7 @@ class TrajectoryModeCounterfactualReward(
                         frozen_argmax
                     ),
                     poses=list(context.poses),
+                    initial_velocity_by_role=context.initial_velocity_xy,
                     road=context.road,
                     target_centerline=(None if context.target_centerlines is None
                                        else context.target_centerlines[role]),

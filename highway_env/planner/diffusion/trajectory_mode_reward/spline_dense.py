@@ -13,15 +13,21 @@ def _decoder(sparse_dt:float, dense_dt:float, device:str):
     return ClampedCubicTrajectorySpline(horizon_s=8*sparse_dt,
              sparse_dt=sparse_dt,dense_dt=dense_dt).to(torch.device(device))
 
-def evaluate_dense_spline(xy:torch.Tensor, config):
+def evaluate_dense_spline(xy:torch.Tensor, config, *, initial_velocity_xy=None):
     if xy.shape[-2:] != (8,2):
         raise ValueError(f'Expected control points [...,8,2], received {xy.shape}')
     dt=float(config.trajectory_dt_s)
     original_shape=xy.shape[:-2]
     flat=xy.reshape(-1,8,2)
     origin=torch.zeros_like(flat[:,0])
-    start=torch.stack((flat[:,0,0].clamp_min(0)/dt,
-                       torch.zeros_like(flat[:,0,0])),dim=-1)
+    if initial_velocity_xy is None:
+        # Utility fallback only: proper V6 production and guidance callers
+        # MUST pass planning-time ego velocity explicitly.
+        start=torch.stack((flat[:,0,0].clamp_min(0)/dt,
+                           torch.zeros_like(flat[:,0,0])),dim=-1)
+    else:
+        velocity=torch.as_tensor(initial_velocity_xy,dtype=xy.dtype,device=xy.device)
+        start=torch.broadcast_to(velocity,(*original_shape,2)).reshape(-1,2).detach()
     end=(flat[:,-1]-flat[:,-2])/dt
     spline=_decoder(dt,float(config.interpolation_dt_s),str(flat.device))
     dense,v,a=spline.evaluate(flat,origin,start,end_velocity_xy=end)

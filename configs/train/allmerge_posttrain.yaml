@@ -1,8 +1,19 @@
+# V6 single posttrain config: change ONLY `method` for the three comparisons.
+# Keep the existing GRPO fields; RGG is selected by method, not guide_mode.
+method: grpo
+pgd_stage: full
+pgd_strategy: b2_warm_search
+pgd_train_states: 100
+pgd_guide_count: 12
+pgd_guide_iters: 20
+pgd_teacher_file: all_merge-guideDistill/outputs/posttrain_v6/post_guide_distillation/teachers.pt
+pgd_early_stage_weight: 0.0
+pgd_recovery_interval: 250
 # Native GRPO training defaults. Loaded automatically by train_grpo.py.
 # Run from the all_merge-guideDistill worktree; CLI options override these values.
 # Model architecture is still loaded from the checkpoint, not from this training YAML.
-checkpoint: ../all_merge-gru/outputs/gru_coarse_goal_ablation_100ep_3seed/seed_0/mlp_dense/run_1/checkpoints/best.pt
-scenario: curved
+checkpoint: D:\KONG_Files\AllMerge\all_merge-gru\outputs\gru_coarse_goal_ablation_100ep_3seed\seed_0\mlp_dense\run_1\checkpoints\best.pt
+scenario: all
 group_action: 3
 steps: 20000
 save_interval: 2000
@@ -14,12 +25,12 @@ clip_eps: 0.20
 kl_coef: 0.01
 max_grad_norm: 10.0
 update_epochs: 2
-task_reward_type: progress_comfort
+task_reward_type: progress_comfort # implementation now unified V6, name retained for GRPOConfig compatibility
 constraint_strategy: none
 constraint_names: collision,road,ttc,background_gap,teammate_gap
 constraint_residual_cap: 5.0
 # The only flag that needs changing between the three terminal commands.
-guide_mode: none
+guide_mode: none # auto-resolved from method; do not edit
 guide_step_m: 0.3
 guide_scope: selected
 guide_max_x_m: 20.0
@@ -28,7 +39,7 @@ fixed_validation_states: 16
 fixed_validation_interval: 500
 fixed_validation_seed_offset: 10000
 seed: 0
-output: outputs/guided_grpo_compare/seed_{seed}/{guide_mode}/policy.pt
+output: all_merge-guideDistill/outputs/posttrain_v6/{method}/seed_{seed}/policy.pt
 # IMPORTANT: preserve all GRU refinement parameters from current GRPOConfig.
 trainable_prefixes:
   - denoiser.layers

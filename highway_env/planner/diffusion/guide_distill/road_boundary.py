@@ -135,7 +135,7 @@ class RoadBoundaryField:
         outside=self.outside_slope*margin.clamp_max(0.)
         return inside+outside
 
-    def dense_world_footprint_margins(self,xy:torch.Tensor,pose,config,*,tracking_aware=True):
+    def dense_world_footprint_margins(self,xy:torch.Tensor,pose,config,*,tracking_aware=True,initial_velocity_xy=None):
         """Match reward/MATP 10Hz CUBIC SPLINE, local->world, tracking OBB."""
         from highway_env.planner.diffusion.trajectory_mode_reward.geometry import tracking_aware_dimensions
         if xy.ndim!=3 or tuple(xy.shape[1:])!=(8,2):
@@ -144,7 +144,7 @@ class RoadBoundaryField:
         from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import (
             evaluate_dense_spline, headings_from_dense,
         )
-        dense,_,_=evaluate_dense_spline(xy,config)
+        dense,_,_=evaluate_dense_spline(xy,config,initial_velocity_xy=initial_velocity_xy)
         yaw=headings_from_dense(dense)
         pose=torch.as_tensor(pose,device=device,dtype=dtype).reshape(3)
         c=torch.cos(pose[2]);s=torch.sin(pose[2])
@@ -161,8 +161,8 @@ class RoadBoundaryField:
         margins=self.signed_distance(footprint).amin(dim=-1)
         return margins,torch.stack([world_x,world_y,world_h],dim=-1)
 
-    def components(self,xy,pose,config):
-        margin,world=self.dense_world_footprint_margins(xy,pose,config)
+    def components(self,xy,pose,config,*,initial_velocity_xy=None):
+        margin,world=self.dense_world_footprint_margins(xy,pose,config,initial_velocity_xy=initial_velocity_xy)
         # Exclude t=0: initial ego pose cannot be changed by planning.
         m=margin[:,1:]
         score=self.reward_of_margin(m)
