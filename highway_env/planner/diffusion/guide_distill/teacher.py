@@ -8,6 +8,7 @@ This comparison is an executable pilot; real CUDA execution requires local envir
 from __future__ import annotations
 import argparse,csv,dataclasses,hashlib,json,os,random,sys,time
 from pathlib import Path
+import numpy as np
 
 
 def digest(p):
