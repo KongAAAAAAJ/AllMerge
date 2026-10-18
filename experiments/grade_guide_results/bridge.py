@@ -67,10 +67,10 @@ def profile_points(name, horizon=8):
 
 def score_selected(candidates, reward_adapter, features, context, role, modes):
     """Use the exact current V5.2 task scorer, no reward reimplementation."""
-    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
     result = reward_adapter.evaluate_result(candidates,features=features,context=context)
-    task = task_reward_from_w4_result(result,context=context,device=candidates.device,
-                                       dtype=candidates.dtype,reward_type='progress_comfort')
+    task = task_reward_from_result(result,context=context,device=candidates.device,
+                                       dtype=candidates.dtype,reward_type='unified_v6')
     def get(name):
         src=getattr(result,name,None)
         if src is None: src=result.components.get(name)

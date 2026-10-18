@@ -402,7 +402,7 @@ class CandidateRewardAdapter:
                 context=context,
             )
             return w4_to_grpo_rewards(
-                result.rewards,
+                result.task_rewards,
                 device=candidates.device,
                 dtype=candidates.dtype,
             )

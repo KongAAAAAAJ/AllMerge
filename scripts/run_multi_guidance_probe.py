@@ -18,7 +18,7 @@ from scripts.run_grpo_noise_probe import (SCENARIOS,CheckpointSpec,_build_model,
     _frozen_reward_context,_scenario_features,_state_seed,_sample_noise_seed)
 from highway_env.planner.diffusion.grpo.sampling import GroupDiffusionSampler
 from highway_env.planner.diffusion.grpo.reward_adapter import CandidateRewardAdapter,resolve_reward_evaluator
-from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
 from highway_env.planner.diffusion.trajectory_mode_reward.config import TrajectoryModeRewardConfig
 from highway_env.planner.diffusion.guide_distill.reward_gradient import DifferentiableTaskReward,DIRECTIONS
 from highway_env.planner.diffusion.guide_distill.exploration import guide_all
@@ -71,8 +71,8 @@ def args_parser():
 
 def paired_score(adapter,features,context,candidates,*,role,mode):
     result=adapter.evaluate_result(candidates,features=features,context=context)
-    task=task_reward_from_w4_result(result,context=context,device=candidates.device,
-                                     dtype=candidates.dtype,reward_type='progress_comfort')
+    task=task_reward_from_result(result,context=context,device=candidates.device,
+                                     dtype=candidates.dtype,reward_type='unified_v6')
     if tuple(task.shape)!=(3,candidates.shape[1],10):
         raise RuntimeError('Unexpected current task reward shape '+str(tuple(task.shape)))
     values=task[role,:,mode].detach().cpu().numpy().copy()
@@ -86,7 +86,6 @@ def paired_score(adapter,features,context,candidates,*,role,mode):
         'curvature_penalty','curvature_max_abs','curvature_valid_points',
         'centerline_penalty','centerline_mean_error_m','centerline_late_error_m','centerline_valid',
         'curvature_violation_penalty','curvature_peak_penalty','curvature_margin_penalty')}
-    info['legacy_w4_reward']=np.asarray(result.rewards)[role,mode,:].copy()
     return values,info,result
 
 

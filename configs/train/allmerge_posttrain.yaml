@@ -25,7 +25,7 @@ clip_eps: 0.20
 kl_coef: 0.01
 max_grad_norm: 10.0
 update_epochs: 2
-task_reward_type: progress_comfort # implementation now unified V6, name retained for GRPOConfig compatibility
+task_reward_type: unified_v6 # implementation now unified V6, name retained for GRPOConfig compatibility
 constraint_strategy: none
 constraint_names: collision,road,ttc,background_gap,teammate_gap
 constraint_residual_cap: 5.0

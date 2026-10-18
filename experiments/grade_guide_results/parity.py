@@ -58,7 +58,7 @@ def validate_reward_parity(proxy, sparse_xy, production_result, *, role, mode, t
         # trusting/parsing an exception message that may change across branches.
         import numpy as np
         import torch
-        from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+        from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
 
         with torch.no_grad():
             values = proxy.components(sparse_xy.detach())
@@ -71,10 +71,10 @@ def validate_reward_parity(proxy, sparse_xy, production_result, *, role, mode, t
                     device=sparse_xy.device, dtype=sparse_xy.dtype,
                 )
                 diffs[prod_key] = float((actual - values[proxy_key].detach()).abs().max())
-            native = task_reward_from_w4_result(
+            native = task_reward_from_result(
                 production_result, context={'config': proxy.config},
                 device=sparse_xy.device, dtype=sparse_xy.dtype,
-                reward_type='progress_comfort',
+                reward_type='unified_v6',
             )[role, :, mode]
             diffs['task_reward'] = float(
                 (native - values['balanced'].detach()).abs().max()

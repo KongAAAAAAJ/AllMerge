@@ -78,7 +78,7 @@ class RewardGeometryContext:
 class TrajectoryModePretrainRewardResult:
     """Frozen same-mode rewards cached once for one live state."""
 
-    rewards: np.ndarray
+    task_rewards: np.ndarray
     valid_mode_mask: np.ndarray
     unsafe: np.ndarray
     collision: np.ndarray
@@ -88,14 +88,14 @@ class TrajectoryModePretrainRewardResult:
 
     def __post_init__(self) -> None:
         expected = (NUM_VEHICLES, NUM_MODES)
-        rewards = np.asarray(self.rewards)
+        rewards = np.asarray(self.task_rewards)
         if (
             rewards.shape != expected
             or rewards.dtype != np.float32
             or not np.isfinite(rewards).all()
         ):
             raise TrajectoryModeRewardError(
-                "pretrain rewards must be finite float32 [3,10]"
+                "pretrain task_rewards must be finite float32 [3,10]"
             )
         valid = np.asarray(self.valid_mode_mask)
         if valid.shape != expected or valid.dtype != np.bool_:
@@ -124,8 +124,8 @@ class TrajectoryModePretrainRewardResult:
 class TrajectoryModeRewardResult:
     """Current and frozen rewards under identical teammate context."""
 
-    rewards: np.ndarray
-    pretrain_rewards: np.ndarray
+    task_rewards: np.ndarray
+    pretrain_task_rewards: np.ndarray
     valid_mode_mask: np.ndarray
 
     unsafe: np.ndarray
@@ -142,7 +142,7 @@ class TrajectoryModeRewardResult:
     pretrain_components: Mapping[str, np.ndarray]
 
     def __post_init__(self) -> None:
-        rewards = np.asarray(self.rewards)
+        rewards = np.asarray(self.task_rewards)
         if (
             rewards.ndim != 3
             or rewards.shape[:2] != (NUM_VEHICLES, NUM_MODES)
@@ -151,19 +151,19 @@ class TrajectoryModeRewardResult:
             or not np.isfinite(rewards).all()
         ):
             raise TrajectoryModeRewardError(
-                "rewards must be finite float32 [3,10,N]"
+                "task_rewards must be finite float32 [3,10,N]"
             )
         sample_shape = rewards.shape
         pretrain_shape = (NUM_VEHICLES, NUM_MODES)
 
-        pretrain = np.asarray(self.pretrain_rewards)
+        pretrain = np.asarray(self.pretrain_task_rewards)
         if (
             pretrain.shape != pretrain_shape
             or pretrain.dtype != np.float32
             or not np.isfinite(pretrain).all()
         ):
             raise TrajectoryModeRewardError(
-                "pretrain_rewards must be finite float32 [3,10]"
+                "pretrain_task_rewards must be finite float32 [3,10]"
             )
 
         valid = np.asarray(self.valid_mode_mask)

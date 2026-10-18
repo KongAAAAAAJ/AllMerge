@@ -108,7 +108,7 @@ class TrajectoryModeCounterfactualReward(
             NUM_VEHICLES,
             NUM_MODES,
         )
-        rewards = np.zeros(
+        task_rewards = np.zeros(
             shape,
             dtype=np.float32,
         )
@@ -170,8 +170,8 @@ class TrajectoryModeCounterfactualReward(
                         context.backgrounds[role]
                     ),
                 )
-                rewards[role, mode] = scored[
-                    "rewards"
+                task_rewards[role, mode] = scored[
+                    "task_rewards"
                 ][0]
                 unsafe[role, mode] = scored[
                     "unsafe"
@@ -192,7 +192,7 @@ class TrajectoryModeCounterfactualReward(
                     ] = scored["components"][name][0]
 
         return TrajectoryModePretrainRewardResult(
-            rewards=rewards,
+            task_rewards=task_rewards,
             valid_mode_mask=valid,
             unsafe=unsafe,
             collision=collision,
@@ -241,7 +241,7 @@ class TrajectoryModeCounterfactualReward(
             NUM_MODES,
             candidate_values.shape[2],
         )
-        rewards = np.zeros(
+        task_rewards = np.zeros(
             shape,
             dtype=np.float32,
         )
@@ -303,8 +303,8 @@ class TrajectoryModeCounterfactualReward(
                         context.backgrounds[role]
                     ),
                 )
-                rewards[role, mode] = scored[
-                    "rewards"
+                task_rewards[role, mode] = scored[
+                    "task_rewards"
                 ]
                 unsafe[role, mode] = scored[
                     "unsafe"
@@ -325,8 +325,8 @@ class TrajectoryModeCounterfactualReward(
                     ] = scored["components"][name]
 
         return TrajectoryModeRewardResult(
-            rewards=rewards,
-            pretrain_rewards=pretrain.rewards,
+            task_rewards=task_rewards,
+            pretrain_task_rewards=pretrain.task_rewards,
             valid_mode_mask=valid,
             unsafe=unsafe,
             collision=collision,

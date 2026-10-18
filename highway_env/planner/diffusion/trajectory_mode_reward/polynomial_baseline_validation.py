@@ -195,9 +195,9 @@ def _evaluate_state(
     parity_errors = []
     for role in range(NUM_VEHICLES):
         mode_idx = int(selected_idx[role])
-        reward = float(result.rewards[role, mode_idx, 0])
+        reward = float(result.task_rewards[role, mode_idx, 0])
         reference_reward = float(
-            result.pretrain_rewards[role, mode_idx]
+            result.pretrain_task_rewards[role, mode_idx]
         )
         parity_errors.append(abs(reward - reference_reward))
 

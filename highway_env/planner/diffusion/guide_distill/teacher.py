@@ -27,11 +27,11 @@ def boot(root):
 
 
 def paired_score(adapter,features,context,candidates,*,role,mode):
-    """One production W4 reward adapter for native V6 teacher proposals."""
-    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+    """One production V6 score for native teacher proposals."""
+    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
     result=adapter.evaluate_result(candidates,features=features,context=context)
-    score=task_reward_from_w4_result(result,context=context,device=candidates.device,
-            dtype=candidates.dtype,reward_type='progress_comfort')
+    score=task_reward_from_result(result,context=context,device=candidates.device,
+            dtype=candidates.dtype,reward_type='unified_v6')
     values=score[role,:,mode].detach().cpu().numpy().copy()
     def field(key):
         if hasattr(result,key):arr=np.asarray(getattr(result,key))
@@ -74,7 +74,7 @@ def _seed(seed):
 
 
 def verify_reward_parity_v2(proxy, xy, result, *, role, mode):
-    """Validate the real V5.2 reward on its two numerical paths.
+    """Validate the V6 reward on its production and differentiable numerical paths.
 
     Production curvature is evaluated on CPU float64 and later serialized to
     float32, whereas guidance/Autograd runs on CUDA float32.  Comparing those
@@ -88,7 +88,7 @@ def verify_reward_parity_v2(proxy, xy, result, *, role, mode):
     Neither test is disabled and no reward/gradient definition is changed.
     """
     import torch
-    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+    from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
 
     with torch.no_grad():
         # Inputs retain the exact original float32 coordinates, cast to double.
@@ -98,10 +98,10 @@ def verify_reward_parity_v2(proxy, xy, result, *, role, mode):
         diff64 = proxy.validate_against_production(
             precise_xy, result, role=role, mode=mode, tol=0.002)
 
-        prod32 = task_reward_from_w4_result(
+        prod32 = task_reward_from_result(
             result, context={'config': proxy.config},
             device=xy.device, dtype=xy.dtype,
-            reward_type='progress_comfort')[role, :, mode]
+            reward_type='unified_v6')[role, :, mode]
         guide32 = proxy.components(xy.detach())['balanced']
         if guide32.shape != prod32.shape:
             raise RuntimeError('REWARD PARITY SHAPE MISMATCH '
@@ -169,7 +169,13 @@ def preflight(args,root):
     n=sum(p.numel() for name,p in model.named_parameters() if any(name.startswith(x) for x in prefixes))
     if n<=0:raise RuntimeError('No trainable policy parameters match original GRPO scope')
     _=load_matp()
-    print('[PASS] preflight: reward=centerline 0.10, V5.2, frozen MATP W1, original GRPO scope')
+    cfg = policy_cfg()
+    print('[PASS] preflight: reward=unified_v6'
+          f' progress_weight={cfg.task_progress_weight}'
+          f' acceleration_weight={cfg.v6_accel_weight}'
+          f' jerk_weight={cfg.v6_jerk_weight}'
+          f' centerline_weight={cfg.task_centerline_weight}'
+          ' matp=in_repo_weighted_joint_v6 matp_historical_parity=unverified')
     print('[MODEL] pretrained SHA256=',digest(args.checkpoint),'trainable_param_count=',n)
     print('[REWARD] source SHA256=',digest(root/'highway_env/planner/diffusion/grpo/task_reward.py'))
     print('[GRPO] trainer SHA256=',digest(root/'highway_env/planner/diffusion/grpo/trainer.py'))

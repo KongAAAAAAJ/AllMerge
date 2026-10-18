@@ -12,7 +12,7 @@ from .rollout_adapter import AllMergeRolloutAdapter
 from .sampling import DiffusionTrace, GroupDiffusionSampler
 from .scheduler import StochasticDDIMTransition, TransitionResult
 from .trainer import GRPOConfig, GRPOTrainer
-from .task_reward import SUPPORTED_TASK_REWARDS, task_reward_from_w4_result
+from .task_reward import SUPPORTED_TASK_REWARDS, task_reward_from_result
 
 __all__ = [
     "AllMergeRolloutAdapter",
@@ -38,7 +38,7 @@ __all__ = [
     "load_pretrained",
     "resolve_reward_evaluator",
     "save_grpo_checkpoint",
-    "task_reward_from_w4_result",
+    "task_reward_from_result",
 ]
 
 # LAGRANGIAN_CONSTRAINED_GRPO_BASELINE_V2_SEMANTIC

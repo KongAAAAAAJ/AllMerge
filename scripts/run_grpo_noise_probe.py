@@ -58,7 +58,7 @@ SCENARIOS = {
 
 
 # Active VehicleModeRewardConfig weights.  Component statistics are verified
-# against reward_result.rewards on every state, so a future reward-config drift
+# against reward_result.task_rewards on every state, so a future reward-config drift
 # fails loudly instead of silently reporting stale weighted contributions.
 REWARD_COMPONENT_WEIGHTS = {
     "progress_score": 0.47,
@@ -771,7 +771,7 @@ def _run_checkpoint(
                         trace.candidates, features=features, context=context
                     )
                     rewards = w4_to_grpo_rewards(
-                        reward_result.rewards,
+                        reward_result.task_rewards,
                         device=trace.candidates.device,
                         dtype=trace.candidates.dtype,
                     )

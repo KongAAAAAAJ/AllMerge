@@ -422,7 +422,7 @@ def evaluate_paired_trajectories(
     from highway_env.planner.diffusion.grpo import (
         CandidateRewardAdapter, GroupDiffusionSampler,
         evaluate_w4_constraints, resolve_reward_evaluator,
-        task_reward_from_w4_result,
+        task_reward_from_result,
     )
     from highway_env.planner.diffusion.grpo.reward_adapter import GRPORewardContext
     from highway_env.planner.diffusion.tensor_adapter import BOOL_KEYS, FLOAT_KEYS
@@ -514,7 +514,7 @@ def evaluate_paired_trajectories(
                         constraint_magnitudes[policy][name].append(float(np.mean(values)))
                     max_magnitudes[policy].append(float(cb.violation.max(dim=-1).values[mask].mean().item()))
                     feasible_values[policy].append(float(cb.feasible_mask[mask].float().mean().item()))
-                    task = task_reward_from_w4_result(
+                    task = task_reward_from_result(
                         result, context=context, device=trace.candidates.device,
                         dtype=trace.candidates.dtype, reward_type=task_reward_type,
                     )

@@ -22,8 +22,7 @@ from .sampling import DiffusionTrace, GroupDiffusionSampler
 from .mean_guidance import MeanGuideSettings
 from .task_reward import (
     SUPPORTED_TASK_REWARDS,
-    legacy_w4_reward_from_result,
-    task_reward_from_w4_result,
+    task_reward_from_result,
 )
 
 
@@ -37,7 +36,7 @@ class GRPOConfig:
     max_grad_norm: float = 10.0
     advantage_eps: float = 1e-6
     update_epochs: int = 2
-    task_reward_type: str = "legacy_w4"
+    task_reward_type: str = "unified_v6"
     constraint_strategy: str = "none"
     constraint_names: Tuple[str, ...] = SUPPORTED_CONSTRAINTS
     constraint_residual_cap: float = 5.0
@@ -69,7 +68,7 @@ class GRPOTrainer:
     """Small GRPO core around the existing StructuredDiffusionPlanner.
 
     The trainer deliberately owns no reward definition and no planner network.
-    It only coordinates sampling/replay, W4 reward delegation, group-relative
+    It only coordinates sampling/replay, V6 reward delegation, group-relative
     advantages, clipped policy optimization, KL regularization and checkpointable
     optimizer state.
     """
@@ -121,8 +120,8 @@ class GRPOTrainer:
             max_y_m=self.config.guide_max_y_m,
         )
         guide_settings.validate()
-        if guide_settings.mode != 'none' and self.config.task_reward_type != 'progress_comfort':
-            raise ValueError('Reward mean guidance requires task_reward_type=progress_comfort')
+        if guide_settings.mode != 'none' and self.config.task_reward_type != 'unified_v6':
+            raise ValueError('Reward mean guidance requires unified_v6')
         self._configure_trainable_parameters()
         parameters = tuple(p for p in self.model.parameters() if p.requires_grad)
         if not parameters:
@@ -222,19 +221,12 @@ class GRPOTrainer:
         context: Any,
     ) -> torch.Tensor:
         """Score candidates with the configured task objective."""
-        if self.config.task_reward_type == "legacy_w4":
-            return self.reward_adapter(
-                candidates, features=features, context=context
-            )
         result = self.reward_adapter.evaluate_result(
             candidates, features=features, context=context
         )
-        return task_reward_from_w4_result(
-            result,
-            context=context,
-            device=candidates.device,
-            dtype=candidates.dtype,
-            reward_type=self.config.task_reward_type,
+        return task_reward_from_result(
+            result, context=context, device=candidates.device,
+            dtype=candidates.dtype, reward_type=self.config.task_reward_type,
         )
 
     def collect(
@@ -249,17 +241,15 @@ class GRPOTrainer:
         with torch.no_grad():
             trace = self.sampler.sample(features, generator=generator, context=context)
             strategy_metrics: Dict[str, float] = {}
-            needs_full_result = (
-                self.config.constraint_strategy != "none"
-                or self.config.task_reward_type != "legacy_w4"
+            result = self.reward_adapter.evaluate_result(
+                trace.candidates, features=features, context=context,
             )
-            if not needs_full_result:
-                rewards = self.reward_adapter(
-                    trace.candidates,
-                    features=features,
-                    context=context,
-                )
-                legacy_rewards = rewards
+            rewards = task_reward_from_result(
+                result, context=context,
+                device=trace.candidates.device, dtype=trace.candidates.dtype,
+                reward_type=self.config.task_reward_type,
+            )
+            if self.config.constraint_strategy == "none":
                 effective_rewards = rewards
                 advantages = group_relative_advantage(
                     rewards,
@@ -267,54 +257,26 @@ class GRPOTrainer:
                     valid_mask=features.get("mode_valid_mask"),
                 )
             else:
-                result = self.reward_adapter.evaluate_result(
-                    trace.candidates,
-                    features=features,
-                    context=context,
-                )
-                rewards = task_reward_from_w4_result(
+                constraints = evaluate_w4_constraints(
                     result,
                     context=context,
                     device=trace.candidates.device,
                     dtype=trace.candidates.dtype,
-                    reward_type=self.config.task_reward_type,
+                    names=self.config.constraint_names,
+                    residual_cap=self.config.constraint_residual_cap,
                 )
-                legacy_rewards = legacy_w4_reward_from_result(
-                    result,
-                    device=trace.candidates.device,
-                    dtype=trace.candidates.dtype,
-                )
-                if self.config.constraint_strategy == "none":
-                    effective_rewards = rewards
-                    advantages = group_relative_advantage(
+                assert self.constraint_strategy is not None
+                effective_rewards, advantages, strategy_metrics = (
+                    self.constraint_strategy.compute(
                         rewards,
-                        eps=self.config.advantage_eps,
+                        constraints,
                         valid_mask=features.get("mode_valid_mask"),
+                        advantage_eps=self.config.advantage_eps,
+                        update_dual=True,
                     )
-                else:
-                    constraints = evaluate_w4_constraints(
-                        result,
-                        context=context,
-                        device=trace.candidates.device,
-                        dtype=trace.candidates.dtype,
-                        names=self.config.constraint_names,
-                        residual_cap=self.config.constraint_residual_cap,
-                    )
-                    assert self.constraint_strategy is not None
-                    effective_rewards, advantages, strategy_metrics = (
-                        self.constraint_strategy.compute(
-                            rewards,
-                            constraints,
-                            valid_mask=features.get("mode_valid_mask"),
-                            advantage_eps=self.config.advantage_eps,
-                            update_dual=True,
-                        )
-                    )
+                )
             strategy_metrics["reward/task_reward_mean"] = float(
                 rewards.mean().detach()
-            )
-            strategy_metrics["reward/legacy_w4_reward_mean"] = float(
-                legacy_rewards.mean().detach()
             )
             strategy_metrics["reward/effective_reward_mean"] = float(
                 effective_rewards.mean().detach()

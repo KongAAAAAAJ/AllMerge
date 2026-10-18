@@ -331,15 +331,15 @@ def validate_one(
             config=config,
         )
 
-        if result.rewards.shape != (
+        if result.task_rewards.shape != (
             NUM_VEHICLES,
             NUM_MODES,
             1,
         ):
             raise AssertionError(
-                f"unexpected reward shape: {result.rewards.shape}"
+                f"unexpected reward shape: {result.task_rewards.shape}"
             )
-        if not np.isfinite(result.rewards).all():
+        if not np.isfinite(result.task_rewards).all():
             raise AssertionError(
                 "non-finite total reward detected"
             )
@@ -401,7 +401,7 @@ def validate_one(
                 "than baseline"
             )
 
-        baseline_rewards = result.rewards[
+        baseline_rewards = result.task_rewards[
             :,
             BASELINE_MODE,
             0,

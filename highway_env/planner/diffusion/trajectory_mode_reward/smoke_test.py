@@ -113,19 +113,19 @@ def main() -> None:
         valid,
     )
 
-    assert result.rewards.shape == (3, 10, 2)
+    assert result.task_rewards.shape == (3, 10, 2)
     assert bool(
         result.out_of_drivable[0, 0, 1]
     )
     assert (
-        float(result.rewards[0, 0, 0])
-        > float(result.rewards[0, 0, 1])
+        float(result.task_rewards[0, 0, 0])
+        > float(result.task_rewards[0, 0, 1])
     )
 
     print(
         "[OK] trajectory_mode_reward smoke test: "
-        f"safe={result.rewards[0,0,0]:.4f}, "
-        f"offroad={result.rewards[0,0,1]:.4f}"
+        f"safe={result.task_rewards[0,0,0]:.4f}, "
+        f"offroad={result.task_rewards[0,0,1]:.4f}"
     )
 
 

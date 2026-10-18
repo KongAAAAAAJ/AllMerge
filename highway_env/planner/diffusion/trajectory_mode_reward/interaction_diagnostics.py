@@ -209,7 +209,7 @@ def _diagnose_state(
                 target_role=int(target_role),
                 selected_mode_idx=mode_idx,
                 reward=float(
-                    result.rewards[target_role, mode_idx, 0]
+                    result.task_rewards[target_role, mode_idx, 0]
                 ),
                 collision=reward_collision,
                 clearance_violation=reward_clearance,

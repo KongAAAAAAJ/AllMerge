@@ -7,8 +7,7 @@ import torch
 
 from highway_env.planner.diffusion.grpo.constraints import evaluate_w4_constraints
 from highway_env.planner.diffusion.grpo.task_reward import (
-    legacy_w4_reward_from_result,
-    task_reward_from_w4_result,
+    task_reward_from_result,
 )
 from highway_env.planner.diffusion.grpo.trainer import GRPOConfig, GRPOTrainer
 
@@ -246,17 +245,12 @@ class SafeMPODiffTrainer(GRPOTrainer):
                 features=features,
                 context=context,
             )
-            rewards = task_reward_from_w4_result(
+            rewards = task_reward_from_result(
                 result,
                 context=context,
                 device=trace.candidates.device,
                 dtype=trace.candidates.dtype,
                 reward_type=self.config.task_reward_type,
-            )
-            legacy_rewards = legacy_w4_reward_from_result(
-                result,
-                device=trace.candidates.device,
-                dtype=trace.candidates.dtype,
             )
             constraints = evaluate_w4_constraints(
                 result,
@@ -297,7 +291,6 @@ class SafeMPODiffTrainer(GRPOTrainer):
                     "constraint/feasible_fraction": float(feasible_fraction.detach()),
                     "constraint/max_violation_mean": float(max_violation_mean.detach()),
                     "reward/task_reward_mean": float(rewards.mean().detach()),
-                    "reward/legacy_w4_reward_mean": float(legacy_rewards.mean().detach()),
                     # No penalty-shaped reward is used in SafeMPO-Diff.
                     "reward/effective_reward_mean": float(rewards.mean().detach()),
                 }

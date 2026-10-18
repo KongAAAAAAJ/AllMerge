@@ -12,7 +12,8 @@ from highway_env.planner.diffusion.trajectory_mode_reward.config import (
 )
 from .reward_adapter import w4_to_grpo_rewards
 
-SUPPORTED_TASK_REWARDS = ("legacy_w4", "progress_comfort")
+# Name # All reward results are produced by the single canonical V6 objective.
+SUPPORTED_TASK_REWARDS = ("unified_v6",)
 
 
 def _context_reward_config(context: Any) -> TrajectoryModeRewardConfig:
@@ -31,20 +32,7 @@ def _context_reward_config(context: Any) -> TrajectoryModeRewardConfig:
     return config
 
 
-def _component_to_grpo(
-    value: Any, *, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
-    array = np.asarray(value, dtype=np.float32)
-    if array.ndim != 3 or array.shape[:2] != (3, 10):
-        raise ValueError(f"W4 component must be [3,10,N], got {array.shape}")
-    return torch.as_tensor(
-        np.ascontiguousarray(np.transpose(array, (0, 2, 1))),
-        device=device,
-        dtype=dtype,
-    )
-
-
-def task_reward_from_w4_result(
+def task_reward_from_result(
     result: Any,
     *,
     context: Any,
@@ -52,71 +40,16 @@ def task_reward_from_w4_result(
     dtype: torch.dtype,
     reward_type: str,
 ) -> torch.Tensor:
-    """Return the GRPO task objective, deliberately separated from constraints.
-
-    legacy_w4 preserves the historical reward exactly.
-
-    progress_comfort uses the unified 10Hz spline objective:
-      task_progress_weight * progress_score - task_comfort_weight * comfort_penalty
-      + task_road_weight * road_boundary_reward
-      - task_curvature_weight * curvature_penalty
-      - task_centerline_weight * centerline_penalty
-
-    Road BOUNDARY continuous reward is part of progress_comfort; collision,
-    TTC and vehicle gap remain hard constraint / safety signals.
-    """
+    """Read the sole official V6 score from production Result [3,10,N]."""
     if reward_type not in SUPPORTED_TASK_REWARDS:
-        raise ValueError(
-            f"unsupported task reward {reward_type!r}; supported={SUPPORTED_TASK_REWARDS}"
-        )
-    if reward_type == "legacy_w4":
-        return w4_to_grpo_rewards(result.rewards, device=device, dtype=dtype)
-
+        raise ValueError(f"Only V6 reward is supported, got {reward_type!r}")
     config = _context_reward_config(context)
-    progress = _component_to_grpo(
-        result.components["progress_score"], device=device, dtype=dtype
-    )
-    comfort = _component_to_grpo(
-        result.components["comfort_penalty"], device=device, dtype=dtype
-    )
-    if "road_boundary_reward" not in result.components:
-        raise RuntimeError("Current progress_comfort scorer missing road_boundary_reward")
-    road = _component_to_grpo(
-        result.components["road_boundary_reward"], device=device, dtype=dtype
-    )
-    if "curvature_penalty" not in result.components:
-        raise RuntimeError("V5 progress_comfort scorer missing curvature_penalty")
-    curvature = _component_to_grpo(
-        result.components["curvature_penalty"], device=device, dtype=dtype
-    )
-    centerline = torch.zeros_like(progress)
     if float(config.task_centerline_weight) > 0.:
-        if "centerline_penalty" not in result.components or "centerline_valid" not in result.components:
-            raise RuntimeError('V5.2 scorer missing target-lane centerline components')
-        centerline = _component_to_grpo(result.components['centerline_penalty'], device=device, dtype=dtype)
-        valid = _component_to_grpo(result.components['centerline_valid'],device=device,dtype=dtype)
-        # Ignore invalid mode slots but NEVER silently omit missing target geometry
-        # on any mode whose reward is actually used.
-        mode_mask = torch.as_tensor(result.valid_mode_mask,device=device,dtype=torch.bool)[:,None,:].expand_as(valid)
-        if bool(((valid < .5) & mode_mask).any()):
-            raise RuntimeError('V5.2 target-lane centerline reference is missing for a valid mode')
-    from highway_env.planner.diffusion.trajectory_mode_reward.task_objective import combine_reward
-    def comp(name):
-        if name not in result.components:
-            raise RuntimeError('V6 production reward is missing '+name)
-        return _component_to_grpo(result.components[name],device=device,dtype=dtype)
-    return combine_reward({
-        'progress_score':comp('progress_score'),
-        'accel_penalty':comp('accel_penalty'),
-        'jerk_penalty':comp('jerk_penalty'),
-        'road_boundary_reward':road,
-        'curvature_penalty':curvature,
-        'centerline_penalty':centerline,
-        'lateral_comfort_penalty':comp('lateral_comfort_penalty'),
-    },config)
-
-
-def legacy_w4_reward_from_result(
-    result: Any, *, device: torch.device, dtype: torch.dtype
-) -> torch.Tensor:
-    return w4_to_grpo_rewards(result.rewards, device=device, dtype=dtype)
+        valid = result.components.get('centerline_valid')
+        if valid is None:
+            raise RuntimeError('V6 result missing centerline_valid')
+        valid = np.asarray(valid)
+        mask = np.asarray(result.valid_mode_mask)[:, :, None]
+        if np.any((valid < 0.5) & mask):
+            raise RuntimeError('V6 target-lane centerline reference missing for a valid mode')
+    return w4_to_grpo_rewards(result.task_rewards, device=device, dtype=dtype)

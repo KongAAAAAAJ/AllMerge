@@ -39,7 +39,7 @@ def run_test() -> None:
         scores=np.full(count,float(target_role)+0.25,dtype=np.float32)
         flags=np.zeros(count,dtype=bool)
         return {
-            'rewards':scores,
+            'task_rewards':scores,
             'unsafe':flags.copy(),
             'collision':flags.copy(),
             'out_of_drivable':flags.copy(),
@@ -55,10 +55,10 @@ def run_test() -> None:
             object(),candidates,frozen_argmax,valid,pretrain,geometry_context=context
         )
     assert calls==[(0,1),(1,1),(2,1),(0,2),(1,2),(2,2)],calls
-    assert pretrain.rewards.shape==(3,10)
-    assert result.rewards.shape==(3,10,2)
+    assert pretrain.task_rewards.shape==(3,10)
+    assert result.task_rewards.shape==(3,10,2)
     for role in range(3):
-        assert np.all(result.rewards[role,0]==role+0.25)
+        assert np.all(result.task_rewards[role,0]==role+0.25)
     print('[PASS] V6 frozen/current counterfactual scoring share correct per-role planning-time initial velocities')
 
 if __name__=='__main__':run_test()

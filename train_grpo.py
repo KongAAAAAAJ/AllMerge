@@ -482,11 +482,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--update-epochs", type=int, default=2)
     parser.add_argument(
         "--task-reward-type",
-        choices=("legacy_w4", "progress_comfort"),
-        default="legacy_w4",
+        choices=("unified_v6",),
+        default="unified_v6",
         help=(
-            "task objective; progress_comfort removes collision/road/TTC/gap "
-            "terms so safety is handled only by constraints"
+            "Unified V6 task objective; collision/road/TTC/gap safety flags remain constraints"
         ),
     )
     parser.add_argument(
@@ -886,8 +885,8 @@ def main() -> int:
         return _run_post_guide_distillation(args)
     if args.steps <= 0 or args.save_interval < 0:
         raise SystemExit('--steps must be positive and --save-interval >= 0')
-    if args.guide_mode != 'none' and (args.fake_reward or args.task_reward_type != 'progress_comfort'):
-        raise SystemExit('Guided GRPO requires production --task-reward-type progress_comfort')
+    if args.guide_mode != 'none' and (args.fake_reward or args.task_reward_type != 'unified_v6'):
+        raise SystemExit('Guided GRPO requires production --task-reward-type unified_v6')
     if args.fixed_validation_states < 0:
         raise SystemExit("--fixed-validation-states must be >= 0")
     if args.fixed_validation_interval < 1:
@@ -897,10 +896,8 @@ def main() -> int:
             "constrained GRPO requires the production W4 reward evaluator; "
             "--fake-reward only supports --constraint-strategy none"
         )
-    if args.fake_reward and args.task_reward_type != "legacy_w4":
-        raise SystemExit(
-            "--task-reward-type progress_comfort requires the production W4 evaluator"
-        )
+    if args.fake_reward:
+        raise SystemExit('V6 production entry no longer supports legacy/fake W4 reward')
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)

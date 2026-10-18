@@ -252,17 +252,28 @@ class CounterfactualScoringMixin:
             | (minimum_teammate_gap < self.config.platoon_safe_gap_m)
         )
 
-        rewards = (
-            self.config.progress_weight * progress_score
-            - self.config.gap_weight * gap_penalty
-            - self.config.ttc_weight * ttc_penalty
-            - self.config.road_weight * road_penalty
-            - self.config.comfort_weight * comfort_penalty
-            - self.config.collision_penalty * collision.astype(np.float64)
-        )
+        # Official V6 total. No W4 total or duplicate reward algebra.
+        # Cast component arrays to float32, matching GRPO/GUIDANCE tensor scoring.
+        from .task_objective import combine_reward
+        v6_components = {
+            name: torch.as_tensor(value, dtype=torch.float32)
+            for name, value in {
+                'progress_score': progress_score,
+                'accel_penalty': kinematic_numpy['accel_penalty'],
+                'jerk_penalty': kinematic_numpy['jerk_penalty'],
+                'road_boundary_reward': road_boundary_reward,
+                'curvature_penalty': curvature_numpy['curvature_penalty'],
+                'centerline_penalty': centerline_numpy['centerline_penalty'],
+                'lateral_comfort_penalty': lateral_comfort_penalty,
+            }.items()
+        }
+        with torch.no_grad():
+            task_rewards = combine_reward(v6_components, self.config).cpu().numpy().astype(np.float32)
+        if not np.isfinite(task_rewards).all():
+            raise RuntimeError('Nonfinite V6 production task reward')
         unsafe = collision | out_of_drivable | clearance_violation
         return {
-            "rewards": rewards.astype(np.float32),
+            "task_rewards": task_rewards,
             "unsafe": unsafe,
             "collision": collision,
             "out_of_drivable": out_of_drivable,

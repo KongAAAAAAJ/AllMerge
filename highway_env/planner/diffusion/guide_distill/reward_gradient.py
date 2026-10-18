@@ -1,11 +1,8 @@
-"""Unified task-reward guidance. No auxiliary objectives or directional branches.
+"""Differentiable V6 reward guidance using the same combine_reward() as scoring.
 
-Existing production `progress_comfort` is the only optimized objective:
-    R = task_progress_weight * progress_score
-      - task_comfort_weight * comfort_penalty
-      + task_road_weight * road_boundary_reward
-      - task_curvature_weight * MATP-aligned curvature_penalty.
-All terms use the current worktree's cubic-dense scorer and road boundary model.
+V6 includes normalized progress, longitudinal acceleration/jerk tiers,
+road-union margin, curvature, target-centerline and lateral comfort.
+Safety constraints remain separately reported.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -14,7 +11,7 @@ import numpy as np
 import torch
 
 from highway_env.planner.diffusion.trajectory_mode_reward.config import TrajectoryModeRewardConfig
-from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_w4_result
+from highway_env.planner.diffusion.grpo.task_reward import task_reward_from_result
 from highway_env.planner.diffusion.trajectory_mode_reward.spline_dense import evaluate_dense_spline, task_comfort_from_dense
 from highway_env.planner.diffusion.trajectory_mode_reward.curvature_reward import curvature_reward_components
 from highway_env.planner.diffusion.trajectory_mode_reward.centerline_reward import centerline_reward_components
@@ -33,29 +30,31 @@ class DifferentiableTaskReward:
 
     def __post_init__(self):
         cfg = self.config
-        required = ('progress_norm_m','task_progress_weight','task_comfort_weight',
-                    'task_road_weight','trajectory_dt_s','interpolation_dt_s')
-        absent = [k for k in required if not hasattr(cfg,k)]
+        required = ('task_progress_weight','v6_accel_weight','v6_jerk_weight',
+                    'task_road_weight','task_curvature_weight','task_centerline_weight',
+                    'v6_lateral_comfort_weight','trajectory_dt_s','interpolation_dt_s')
+        absent = [name for name in required if not hasattr(cfg, name)]
         if absent:
-            raise RuntimeError('V5 unified reward config missing: '+str(absent))
+            raise RuntimeError('V6 reward config missing: '+str(absent))
         self.semantics = {
             'reward_type': 'unified_v6',
-            'guidance': 'balanced (unified task reward ONLY)',
-            'progress_norm_m': float(cfg.progress_norm_m),
-            'weights': {'progress': float(cfg.task_progress_weight),
-                        'comfort': float(cfg.task_comfort_weight),
-                        'road': float(cfg.task_road_weight)},
-            'spline': 'ClampedCubicTrajectorySpline 10 Hz',
-            'curvature': {'weight': float(cfg.task_curvature_weight),
-                          'limit': float(cfg.curvature_limit_m_inv),
-                          'active_threshold': float(cfg.curvature_active_threshold_m_inv),
-                          'beta': float(cfg.curvature_matp_beta),
-                          'topk': int(cfg.curvature_topk),
-                          'peak_weight': float(cfg.task_curvature_peak_weight),
-                          'margin_weight': float(cfg.task_curvature_margin_weight)},
-            'target_centerline': {'weight':float(cfg.task_centerline_weight),
-                                  'scale_m':float(cfg.centerline_scale_m),
-                                  'late_power':float(cfg.centerline_late_power)},
+            'guidance': 'balanced (shared V6 task objective ONLY)',
+            'weights': {
+                'progress': float(cfg.task_progress_weight),
+                'acceleration': float(cfg.v6_accel_weight),
+                'jerk': float(cfg.v6_jerk_weight),
+                'road': float(cfg.task_road_weight),
+                'curvature': float(cfg.task_curvature_weight),
+                'centerline': float(cfg.task_centerline_weight),
+                'lateral_comfort': float(cfg.v6_lateral_comfort_weight),
+            },
+            'spline': 'ClampedCubicTrajectorySpline 10 Hz / ego_state v0',
+            'curvature': {
+                'limit': float(cfg.curvature_limit_m_inv),
+                'active_threshold': float(cfg.curvature_active_threshold_m_inv),
+                'beta': float(cfg.curvature_matp_beta),
+                'topk': int(cfg.curvature_topk),
+            },
         }
         self.gradient_fallback_counts = {}
         self.target_centerline = None
@@ -99,7 +98,7 @@ class DifferentiableTaskReward:
         road = self.road_field.components(xy, self.role_pose, cfg,initial_velocity_xy=self.initial_velocity_xy)['road']
         curvature = curvature_reward_components(dense, cfg)
         if self.target_centerline is None and float(cfg.task_centerline_weight)>0.:
-            raise RuntimeError('V5.2 requires bind_centerline(frozen target_lane_polyline)')
+            raise RuntimeError('V6 requires bind_centerline(frozen target_lane_polyline)')
         centerline = centerline_reward_components(dense, self.target_centerline, cfg)
         if float(cfg.task_centerline_weight)>0. and not bool((centerline['centerline_valid']>.5).all()):
             raise RuntimeError('Target lane centerline does not cover the 2-4s trajectory horizon')
@@ -169,8 +168,8 @@ class DifferentiableTaskReward:
             if key not in result.components:raise RuntimeError(f'Production scorer missing {key}')
             actual=torch.as_tensor(np.asarray(result.components[key])[role,mode,:],device=xy.device,dtype=xy.dtype)
             diffs[key]=float((actual-values[ours].detach()).abs().max())
-        native=task_reward_from_w4_result(result,context={'config':self.config},
-                   device=xy.device,dtype=xy.dtype,reward_type='progress_comfort')[role,:,mode]
+        native=task_reward_from_result(result,context={'config':self.config},
+                   device=xy.device,dtype=xy.dtype,reward_type='unified_v6')[role,:,mode]
         diffs['task_reward']=float((native-values['balanced'].detach()).abs().max())
         if not all(np.isfinite(x) for x in diffs.values()) or max(diffs.values())>tol:
             raise RuntimeError('CURRENT REWARD PARITY FAILED '+str(diffs))
