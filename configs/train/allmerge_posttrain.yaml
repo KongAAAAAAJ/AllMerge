@@ -49,3 +49,5 @@ trainable_prefixes:
   - denoiser.gru_refine_input
   - denoiser.gru_refine
   - denoiser.gru_refine_out
+pgd_online_refresh_interval: 1000
+pgd_online_refresh_states: 32

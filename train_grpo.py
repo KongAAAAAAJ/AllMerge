@@ -438,7 +438,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path,
                         default=Path(__file__).resolve().parent / "configs/train/allmerge_posttrain.yaml",
                         help="Unified native posttrain YAML; CLI flags take priority")
-    parser.add_argument('--method',choices=('grpo','reward_guided_grpo','post_guide_distillation'),default='grpo')
+    parser.add_argument('--method',choices=('grpo','reward_guided_grpo','post_guide_distillation','online_post_guide_distillation'),default='grpo')
     parser.add_argument('--pgd-stage',choices=('collect','train','full'),default='full')
     parser.add_argument('--pgd-strategy',choices=('a2_v2','b1_adaptive','b2_warm_search'),default='b2_warm_search')
     parser.add_argument('--pgd-train-states',type=int,default=100)
@@ -449,6 +449,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--pgd-start-step',type=int,default=0)
     parser.add_argument('--pgd-recovery-interval',type=int,default=250)
     parser.add_argument('--pgd-early-stage-weight',type=float,default=0.0)
+    parser.add_argument('--pgd-online-refresh-interval',type=int,default=1000)
+    parser.add_argument('--pgd-online-refresh-states',type=int,default=32)
     parser.add_argument("--checkpoint", required=False, type=Path, default=None)
     parser.add_argument(
         "--dataset-shard",
@@ -883,6 +885,9 @@ def main() -> int:
     args = parse_args()
     if args.method=='post_guide_distillation':
         return _run_post_guide_distillation(args)
+    if args.method=='online_post_guide_distillation':
+        from highway_env.planner.diffusion.guide_distill.online_post_guide_distillation import run
+        return run(args,Path(__file__).resolve().parent)
     if args.steps <= 0 or args.save_interval < 0:
         raise SystemExit('--steps must be positive and --save-interval >= 0')
     if args.guide_mode != 'none' and (args.fake_reward or args.task_reward_type != 'unified_v6'):

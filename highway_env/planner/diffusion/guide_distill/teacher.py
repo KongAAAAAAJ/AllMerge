@@ -180,7 +180,7 @@ def preflight(args,root):
     print('[REWARD] source SHA256=',digest(root/'highway_env/planner/diffusion/grpo/task_reward.py'))
     print('[GRPO] trainer SHA256=',digest(root/'highway_env/planner/diffusion/grpo/trainer.py'))
 
-def collect(args,root):
+def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=None):
     import torch,numpy as np
     from dataclasses import replace
     from scripts.run_grpo_noise_probe import (SCENARIOS,CheckpointSpec,_build_model,
@@ -198,7 +198,20 @@ def collect(args,root):
     device=torch.device(args.device)
     cfg=policy_cfg()
     matp=load_matp()
-    adapter,model=_build_model(CheckpointSpec(name='frozen_teacher',path=Path(args.checkpoint).resolve()),device)
+    if source_model is None:
+        # Offline PGD remains frozen-Pretrain teacher collection.
+        adapter,model=_build_model(CheckpointSpec(name='frozen_teacher',path=Path(args.checkpoint).resolve()),device)
+    else:
+        # Online PGD uses the current, already-frozen-for-inference Student snapshot.
+        model=source_model
+        adapter=model.adapter
+        if model.training:
+            raise RuntimeError('Online teacher source must be in eval mode during collection')
+        if next(model.parameters()).device != device:
+            raise RuntimeError('Online teacher source/device mismatch')
+        if source_step is None or source_model_sha256 is None:
+            raise RuntimeError('Online teacher source step and model SHA are required')
+
     proxy=DifferentiableTaskReward(cfg,device)
     sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=.02)
     scorer=CandidateRewardAdapter(resolve_reward_evaluator('auto'))
@@ -354,6 +367,10 @@ def collect(args,root):
           'seed':args.seed,'noise_seed':args.noise_seed,'scenario':args.scenario,'group_size':args.group_size,
           'guide_count':args.guide_count,'guidance_iters':args.guidance_iters,'guidance_step_m':args.guidance_step_m,
           'training_states':len(ledger),'states_with_teacher':len(collection),'teacher_count':sum(len(s['teachers']) for s in collection)}
+    if source_model is not None:
+        meta.update({'teacher_source':'current_student',
+                     'source_step':int(source_step),
+                     'source_model_sha256':str(source_model_sha256)})
     if not collection:raise RuntimeError('No safely feasible higher-reward teachers; abort distillation')
     meta['elapsed_seconds']=round(time.perf_counter()-start,2)
     # Every scenario sees 250 x 12 candidate checks; preserve overlap between
@@ -366,7 +383,7 @@ def collect(args,root):
         'pre_road_feasible':sum(x['pre_road_margin_m']>=0 for x in rejection_rows if x['scenario']==s),
         **{k:sum(x[k] for x in rejection_rows if x['scenario']==s) for k in failure_fields}}
         for s in ALL_SCENES}
-    detail_path=Path(args.teacher_file).with_name('teacher_candidate_funnel.csv')
+    detail_path=Path(args.teacher_file).with_name('teacher_candidate_funnel.csv' if source_model is None else 'teacher_candidate_funnel_'+Path(args.teacher_file).stem+'.csv')
     detail_path.parent.mkdir(parents=True,exist_ok=True)
     with detail_path.open('w',newline='',encoding='utf-8-sig') as f:
         w=csv.DictWriter(f,fieldnames=list(rejection_rows[0]));w.writeheader();w.writerows(rejection_rows)

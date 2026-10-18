@@ -166,6 +166,51 @@ def paired_replay_loss(model, features, target, teacher_mode, replay, *, early_s
             'terminal_regression_loss':terminal,'early_regression_loss':early,'target_mode':mode}
 
 
+
+def student_train_step(model, optimizer, trainable_params, teachers, local_rng, device, *,
+                       early_stage_weight=0.0, max_grad_norm=5.0):
+    """One exact paired-DDIM Student update shared by offline and online PGD.
+
+    The Student and its AdamW optimizer are owned by the caller. This function
+    never loads or reinitializes either; only the active Teacher Bank varies.
+    """
+    import torch,numpy as np
+    if not teachers.get('states'):
+        raise RuntimeError('Teacher bank has no accepted teacher states')
+    entry=teachers['states'][int(local_rng.integers(0,len(teachers['states'])))]
+    teacher=entry['teachers'][int(local_rng.integers(0,len(entry['teachers'])))]
+    target=teacher['target'].to(device)[None]
+    features={k:v[None].to(device) for k,v in entry['features'].items()}
+    teacher_mode=int(teacher['mode'])
+    model.train()
+    optimizer.zero_grad(set_to_none=True)
+    replay=teacher.get('paired_replay')
+    if not isinstance(replay,dict) or replay.get('source_group_id')!=teacher['group_id']:
+        raise RuntimeError('Teacher/replay group ID mismatch; refusing unpaired student update')
+    loss_data=paired_replay_loss(model,features,target,teacher_mode,replay,
+                                 early_stage_weight=early_stage_weight)
+    actual=int(loss_data['target_mode'].reshape(-1)[0].detach().item())
+    if actual!=teacher_mode:
+        raise RuntimeError(f'Teacher-mode lock failed: expected {teacher_mode}, actual {actual}')
+    loss=loss_data['loss']
+    if not torch.isfinite(loss):
+        raise FloatingPointError('Nonfinite student loss')
+    if not loss.requires_grad:
+        raise RuntimeError('Student loss has no autograd graph; check trainable scope / detach')
+    loss.backward()
+    grad=float(torch.nn.utils.clip_grad_norm_(trainable_params,max_grad_norm))
+    if not np.isfinite(grad):
+        raise FloatingPointError('Nonfinite student gradient norm')
+    optimizer.step()
+    return {'scenario':entry['scenario'],'teacher_mode':teacher_mode,
+            'teacher_group_id':int(teacher['group_id']),'loss':float(loss.detach()),
+            'reg_loss':float(loss_data['trajectory_regression_loss'].detach()),
+            'terminal_reg_loss':float(loss_data['terminal_regression_loss'].detach()),
+            'early_reg_loss':float(loss_data['early_regression_loss'].detach()),
+            'cls_loss':float(loss_data['trajectory_classification_loss'].detach()),
+            'grad_norm':grad}
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--method',choices=('student','grpo'),required=True)
@@ -249,38 +294,8 @@ def main():
           f'checkpoint={a.resume} teacher_sha={fp["teacher_sha256"][:12]}',flush=True)
     for step in range(a.start_step+1,a.stop_step+1):
         if a.method=='student':
-            entry=teachers['states'][int(local_rng.integers(0,len(teachers['states'])))]
-            teacher=entry['teachers'][int(local_rng.integers(0,len(entry['teachers'])))]
-            target=teacher['target'].to(device)[None]
-            features={k:v[None].to(device) for k,v in entry['features'].items()}
-            # The exact reference-selected mode that Guidance optimized is the
-            # regression AND classification target.  Do not silently reassign
-            # this teacher to its nearest coarse anchor.
-            teacher_mode=int(teacher['mode'])
-            mode_override=torch.tensor([teacher_mode],device=device,dtype=torch.long)
-            model.train();opt.zero_grad(set_to_none=True)
-            replay=teacher.get('paired_replay')
-            if not isinstance(replay,dict) or replay.get('source_group_id')!=teacher['group_id']:
-                raise RuntimeError('Teacher/replay group ID mismatch; refusing unpaired student update')
-            loss_data=paired_replay_loss(model,features,target,teacher_mode,replay,
-                                         early_stage_weight=a.early_stage_weight)
-            actual=int(loss_data['target_mode'].reshape(-1)[0].detach().item())
-            if actual!=teacher_mode:
-                raise RuntimeError(f'Teacher-mode lock failed: expected {teacher_mode}, actual {actual}')
-            loss=loss_data['loss']
-            if not torch.isfinite(loss):raise FloatingPointError(f'Nonfinite student loss at step {step}')
-            if not loss.requires_grad:
-                raise RuntimeError(f'Student loss has no autograd graph at step {step}; check trainable scope / no_grad / detach')
-            loss.backward();grad=float(torch.nn.utils.clip_grad_norm_(params,a.max_grad_norm))
-            if not np.isfinite(grad):raise FloatingPointError(f'Nonfinite student grad at step {step}')
-            opt.step()
-            row={'step':step,'scenario':entry['scenario'],'teacher_mode':teacher_mode,
-                 'teacher_group_id':int(teacher['group_id']),'loss':float(loss.detach()),
-                 'reg_loss':float(loss_data['trajectory_regression_loss'].detach()),
-                 'terminal_reg_loss':float(loss_data['terminal_regression_loss'].detach()),
-                 'early_reg_loss':float(loss_data['early_regression_loss'].detach()),
-                 'cls_loss':float(loss_data['trajectory_classification_loss'].detach()),
-                 'grad_norm':grad}
+            row=student_train_step(model,opt,params,teachers,local_rng,device,
+                early_stage_weight=a.early_stage_weight,max_grad_norm=a.max_grad_norm)
         else:
             state_info=teachers['ledger'][(step-1)%len(teachers['ledger'])]
             env=SCENARIOS[state_info['scenario']](config={'show_trajectories':False,'show_future_trajectories':False},render_mode=None)
