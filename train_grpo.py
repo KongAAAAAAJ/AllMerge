@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import csv
 from pathlib import Path
 from typing import Dict, Iterable
@@ -472,7 +473,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-6)
     parser.add_argument("--eta", type=float, default=0.02)
     parser.add_argument("--guide-mode", choices=("none", "reward_gradient", "random_gradient"),
-                        default="none", help="DDIM Gaussian mean guidance during GRPO rollout only")
+                        default="none", help="DDIM Gaussian mean guidance during GRPO or Online-PGD teacher rollout")
     parser.add_argument("--guide-step-m", type=float, default=0.3,
                         help="physical RMS Gaussian mean shift in metres")
     parser.add_argument("--guide-scope", choices=("selected", "all"), default="selected")
@@ -625,8 +626,10 @@ def parse_args() -> argparse.Namespace:
         args.guide_mode='none'
     elif args.method=='reward_guided_grpo':
         args.guide_mode='reward_gradient'
-    else:
+    elif args.method=='post_guide_distillation':
         args.guide_mode='none'
+    # Online PGD reads guide_mode directly from the single YAML / CLI.
+    # Its three modes share the same Student optimizer and Teacher Guidance.
     for field in ("output", "fixed_validation_csv"):
         value = getattr(args, field)
         if value is None:
@@ -636,6 +639,15 @@ def parse_args() -> argparse.Namespace:
         except (KeyError, ValueError) as exc:
             parser.error(f"Invalid {field} filename template: {exc}")
         setattr(args, field, Path(value))
+    # Keep the existing no-guidance run path stable (including recovery).
+    # Guided Online-PGD runs are segregated when the caller did not supply
+    # --output and the YAML template does not already include {guide_mode}.
+    explicit_output = any(x == '--output' or x.startswith('--output=') for x in sys.argv[1:])
+    if (args.method == 'online_post_guide_distillation'
+            and args.guide_mode != 'none'
+            and not explicit_output
+            and '{guide_mode}' not in str(cfg.get('output', ''))):
+        args.output = args.output.parent / args.guide_mode / args.output.name
     print(f"[grpo-config] source={args.config} guide_mode={args.guide_mode} steps={args.steps} "
           f"group_size={args.group_size} lr={args.lr} output={args.output}", flush=True)
     return args

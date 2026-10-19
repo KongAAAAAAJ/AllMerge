@@ -35,7 +35,7 @@ def _teacher_path(policy_path, round_id, source_step):
 
 
 def validate_teacher_bank(payload, *, source_step, source_sha256,
-                          reward_config_sha256, scenario):
+                          reward_config_sha256, scenario, sampling_guide_mode='none'):
     meta=payload.get('meta',{})
     for key, expected in [('source_step',source_step),
                           ('source_model_sha256',source_sha256),
@@ -43,6 +43,9 @@ def validate_teacher_bank(payload, *, source_step, source_sha256,
                           ('scenario',scenario)]:
         if meta.get(key)!=expected:
             raise RuntimeError(f'Teacher bank {key} mismatch: expected={expected!r}, actual={meta.get(key)!r}')
+    if meta.get('sampling_guide_mode', 'none') != sampling_guide_mode:
+        raise RuntimeError('Teacher bank sampling guide_mode mismatch: '
+                           f'expected={sampling_guide_mode!r}, actual={meta.get("sampling_guide_mode")!r}')
     if (meta.get('noise_pairing_schema')!='frozen_ddim_v1' or
         meta.get('paired_timesteps')!=[8,0]):
         raise RuntimeError('Teacher bank paired replay schema mismatch')
@@ -63,7 +66,7 @@ def _model_sha(model):
 
 
 def _fingerprint(args, root):
-    return {
+    fingerprint = {
         'version':1,'method':'online_post_guide_distillation',
         'checkpoint_sha256':teacher.digest(args.checkpoint),
         'reward_sha256':teacher.digest(root/'highway_env/planner/diffusion/trajectory_mode_reward/task_objective.py'),
@@ -74,6 +77,13 @@ def _fingerprint(args, root):
         'guide_count':args.pgd_guide_count,'guide_iters':args.pgd_guide_iters,
         'guide_step_m':args.guide_step_m,'strategy':args.pgd_strategy,
     }
+    # Preserve exact legacy fingerprints for mode=none resume compatibility.
+    if args.guide_mode != 'none':
+        fingerprint.update(guide_mode=args.guide_mode,
+                           guide_scope=args.guide_scope,
+                           guide_max_x_m=args.guide_max_x_m,
+                           guide_max_y_m=args.guide_max_y_m)
+    return fingerprint
 
 
 def run(args, root):
@@ -161,7 +171,10 @@ def run(args, root):
                 group_size=args.group_size,guide_count=args.pgd_guide_count,
                 guidance_iters=args.pgd_guide_iters,guidance_step_m=args.guide_step_m,
                 max_teachers_per_state=4,train_states=args.pgd_online_refresh_states,
-                teacher_file=bank_path,pgd_strategy=args.pgd_strategy)
+                teacher_file=bank_path,pgd_strategy=args.pgd_strategy,
+                guide_mode=args.guide_mode, guide_scope=args.guide_scope,
+                guide_step_m=args.guide_step_m,
+                guide_max_x_m=args.guide_max_x_m, guide_max_y_m=args.guide_max_y_m)
             before_rng=distill.rng_capture(local_rng)
             try:
                 with torch.no_grad():
@@ -177,14 +190,17 @@ def run(args, root):
             from highway_env.planner.diffusion.trajectory_mode_reward.config import trajectory_mode_reward_config_sha256
             validate_teacher_bank(bank_data,source_step=step,source_sha256=source_sha,
                                   reward_config_sha256=trajectory_mode_reward_config_sha256(teacher.policy_cfg()),
-                                  scenario=args.scenario)
+                                  scenario=args.scenario,
+                                  sampling_guide_mode=args.guide_mode)
             active_bank=bank_path
             active_bank_sha=teacher.digest(bank_path)
             next_refresh=step+args.pgd_online_refresh_interval
             # Recovery immediately after refresh makes interruption deterministic.
             save(step,recovery)
-            print(f'[ONLINE-PGD] refresh step={step} bank={bank_path} '
-                  f'teachers={len(bank_data["states"])}',flush=True)
+            print(f'[ONLINE-PGD] refresh step={step} guide_mode={args.guide_mode} '
+                  f'bank={bank_path} teachers={len(bank_data["states"])} '
+                  f'sampling_shift_rms_m={bank_data["meta"].get("sampling_shift_rms_m_mean", 0.0):.5f}',
+                  flush=True)
         elif bank_data is None:
             bank_data=teacher.load(active_bank)
             if teacher.digest(active_bank)!=active_bank_sha:

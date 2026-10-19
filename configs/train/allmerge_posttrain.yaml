@@ -30,7 +30,10 @@ constraint_strategy: none
 constraint_names: collision,road,ttc,background_gap,teammate_gap
 constraint_residual_cap: 5.0
 # The only flag that needs changing between the three terminal commands.
-guide_mode: none # auto-resolved from method; do not edit
+# Online-PGD DDIM sampling mode: none / random_gradient / reward_gradient.
+# Change guide_mode here or use --guide-mode on the CLI.
+# GRPO/RGG force their own mode; offline PGD always uses none.
+guide_mode: none  # Online-PGD sampling mode (GRPO/RGG force their mode)
 guide_step_m: 0.3
 guide_scope: selected
 guide_max_x_m: 20.0

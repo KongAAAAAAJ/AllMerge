@@ -186,6 +186,7 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
     from scripts.run_grpo_noise_probe import (SCENARIOS,CheckpointSpec,_build_model,
         _frozen_reward_context,_scenario_features,_state_seed,_sample_noise_seed)
     from highway_env.planner.diffusion.grpo.sampling import GroupDiffusionSampler
+    from highway_env.planner.diffusion.grpo.mean_guidance import MeanGuideSettings
     from highway_env.planner.diffusion.grpo.reward_adapter import CandidateRewardAdapter,resolve_reward_evaluator
     from highway_env.planner.diffusion.guide_distill.reward_gradient import DifferentiableTaskReward
     from highway_env.planner.diffusion.guide_distill.exploration import guide_all
@@ -225,7 +226,17 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
     # PGD uses high-precision internal reward evaluation for its repeated
     # 10 Hz finite differences; GRPO/RGG retain their original native dtype.
     proxy=DifferentiableTaskReward(cfg,device,high_precision=True)
-    sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=.02)
+    sampling_guide_mode = (getattr(args, 'guide_mode', 'none') if source_model is not None else 'none')
+    # Offline PGD stays unchanged. Online PGD reuses the original GRPO mean
+    # guidance on the CURRENT frozen Student's DDIM rollout.
+    guidance = MeanGuideSettings(
+        mode=sampling_guide_mode,
+        step_m=float(getattr(args, 'guide_step_m', .3)),
+        scope=str(getattr(args, 'guide_scope', 'selected')),
+        max_x_m=float(getattr(args, 'guide_max_x_m', 20.)),
+        max_y_m=float(getattr(args, 'guide_max_y_m', 6.)))
+    sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=.02,
+                                  guidance=guidance,guide_model=model)
     scorer=CandidateRewardAdapter(resolve_reward_evaluator('auto'))
     collection=[];ledger=[];attempts=0
     rejection_rows=[]
@@ -254,7 +265,11 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
             proxy.bind_centerline(line)
             group_seed=_sample_noise_seed(args.noise_seed,scene_idx,len(ledger))
             gen=torch.Generator(device=device.type).manual_seed(group_seed)
-            with torch.no_grad(): sampled=sampler.sample(features,generator=gen)
+            with torch.no_grad(): sampled=sampler.sample(features,generator=gen,context=context)
+            sampling_shift_rms = float((sampled.guidance_metrics or {}).get(
+                'guidance/actual_shift_rms_m', 0.0))
+            if sampling_guide_mode != 'none' and not np.isfinite(sampling_shift_rms):
+                raise FloatingPointError('Nonfinite Online-PGD DDIM sampling guidance shift')
             original=sampled.candidates[:,:args.guide_count].detach().clone()
             mode=int(selected[args.role].item())
             original_xy=original[args.role,:,mode].detach().clone()
@@ -361,7 +376,8 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
                 collection.append({'scenario':scene,'env_seed':env_seed,'noise_seed':group_seed,
                                    'features':feature_cpu,'teachers':chosen})
             ledger.append({'scenario':scene,'env_seed':env_seed,'state_index':len(ledger),
-                           'eligible':len(valid),'kept':len(chosen)})
+                           'eligible':len(valid),'kept':len(chosen),
+                           'sampling_shift_rms_m':sampling_shift_rms})
             print(f'[collect] {scene} state={len(ledger)}/{args.train_states} '
                   f'eligible={len(valid)} kept={len(chosen)}',flush=True)
         finally:
@@ -378,7 +394,9 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
           'checkpoint_sha256':digest(args.checkpoint),'source_reward_sha256':digest(root/'highway_env/planner/diffusion/grpo/task_reward.py'),
           'seed':args.seed,'noise_seed':args.noise_seed,'scenario':args.scenario,'group_size':args.group_size,
           'guide_count':args.guide_count,'guidance_iters':args.guidance_iters,'guidance_step_m':args.guidance_step_m,
-          'training_states':len(ledger),'states_with_teacher':len(collection),'teacher_count':sum(len(s['teachers']) for s in collection)}
+          'training_states':len(ledger),'states_with_teacher':len(collection),'teacher_count':sum(len(s['teachers']) for s in collection),
+          'sampling_guide_mode':sampling_guide_mode,
+          'sampling_shift_rms_m_mean':float(np.mean([row['sampling_shift_rms_m'] for row in ledger])) if ledger else 0.0}
     if source_model is not None:
         meta.update({'teacher_source':'current_student',
                      'source_step':int(source_step),
