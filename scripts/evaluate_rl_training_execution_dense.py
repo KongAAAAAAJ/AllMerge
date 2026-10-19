@@ -32,7 +32,6 @@ def parse_args():
     p.add_argument("--group-size", type=int, default=48)
     p.add_argument("--group-action", type=int, default=3)
     p.add_argument("--eta", type=float, default=0.02)
-    p.add_argument("--task-reward-type", choices=("legacy_w4", "progress_comfort"), default="progress_comfort")
     p.add_argument("--constraint-names", default="collision,road,ttc,background_gap,teammate_gap")
     p.add_argument("--constraint-residual-cap", type=float, default=5.0)
     p.add_argument("--seed", type=int, default=7)
@@ -68,7 +67,7 @@ def main() -> int:
             validation_seed_offset=args.fixed_validation_seed_offset,
             visualization_seed=args.visualization_seed,
             eta=args.eta, device_name=args.device,
-            task_reward_type=args.task_reward_type,
+            task_reward_type="v6",
             constraint_names=tuple(n.strip() for n in args.constraint_names.split(",") if n.strip()),
             constraint_residual_cap=args.constraint_residual_cap,
         )

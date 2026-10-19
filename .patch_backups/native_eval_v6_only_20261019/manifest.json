@@ -1,0 +1,10 @@
+{
+  "scripts/evaluate_rl_training_execution_dense.py": {
+    "original_sha256": "a78080886d95d7b484be2d9256b4cbbc4bc634ffefcc0f029b2d366a52948388",
+    "patched_sha256": "ef66cc32d960e9ab0ffcae6414069e4053d23df250dd45de5778526db8cbbece"
+  },
+  "evaluation/rl_training_report.py": {
+    "original_sha256": "13a5c3ea1e1cdc24acfe2c25e944b4d684fccc406d80ffcc65d02adc524c50a6",
+    "patched_sha256": "3d5d96f9317144272cb74ab08d7801c9614a7dfa6ee853612b6f733a573ca76f"
+  }
+}
