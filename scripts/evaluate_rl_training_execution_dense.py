@@ -37,6 +37,12 @@ def parse_args():
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--fixed-validation-seed-offset", type=int, default=10000)
     p.add_argument("--visualization-seed", type=int, default=0)
+    # NATIVE_GUIDED_INFERENCE_EVAL_20261019: same Guided Gaussian policy as native GRPO training.
+    p.add_argument("--guide-mode", choices=("none", "reward_gradient", "random_gradient"), default="none")
+    p.add_argument("--guide-step-m", type=float, default=None, help="default from allmerge_posttrain.yaml")
+    p.add_argument("--guide-scope", choices=("selected", "all"), default=None)
+    p.add_argument("--guide-max-x-m", type=float, default=None)
+    p.add_argument("--guide-max-y-m", type=float, default=None)
     p.add_argument("--device", default="auto")
     return p.parse_args()
 
@@ -62,7 +68,8 @@ def main() -> int:
         # NATIVE_EVAL_POSTTRAIN_V6_20261019: use the same YAML as train_grpo.py.
         from pretraining.config_io import load_config
         posttrain_cfg_file = REPO_ROOT / "configs" / "train" / "allmerge_posttrain.yaml"
-        reward_type = load_config(posttrain_cfg_file).get("task_reward_type")
+        posttrain_cfg = load_config(posttrain_cfg_file)
+        reward_type = posttrain_cfg.get("task_reward_type")
         if reward_type != "unified_v6":
             raise RuntimeError(
                 f"Posttrain config {posttrain_cfg_file} must declare "
@@ -77,6 +84,11 @@ def main() -> int:
             visualization_seed=args.visualization_seed,
             eta=args.eta, device_name=args.device,
             task_reward_type=reward_type,
+            guide_mode=args.guide_mode,
+            guide_step_m=(args.guide_step_m if args.guide_step_m is not None else float(posttrain_cfg.get("guide_step_m", 0.3))),
+            guide_scope=(args.guide_scope if args.guide_scope is not None else str(posttrain_cfg.get("guide_scope", "selected"))),
+            guide_max_x_m=(args.guide_max_x_m if args.guide_max_x_m is not None else float(posttrain_cfg.get("guide_max_x_m", 20.0))),
+            guide_max_y_m=(args.guide_max_y_m if args.guide_max_y_m is not None else float(posttrain_cfg.get("guide_max_y_m", 6.0))),
             constraint_names=tuple(n.strip() for n in args.constraint_names.split(",") if n.strip()),
             constraint_residual_cap=args.constraint_residual_cap,
         )

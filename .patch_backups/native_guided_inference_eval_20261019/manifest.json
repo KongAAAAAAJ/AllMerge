@@ -1,0 +1,13 @@
+{
+  "patch": "native_guided_inference_eval_20261019",
+  "files": {
+    "scripts/evaluate_rl_training_execution_dense.py": {
+      "before_sha256": "749a96b01d2976169945101374279dcfcd0aba823a2c6a922959b03dd5d026d8",
+      "after_sha256": "10cd5fb936314b92ce00980b7b4b3d02d40a46407d42f9ad08ae2f8b7ac28c50"
+    },
+    "evaluation/rl_training_report.py": {
+      "before_sha256": "cbaeeab51764486c1101b7c1cc7d3a2a1b5747dde4c14e4a8f60c66226fb3b1f",
+      "after_sha256": "12d8b10fc5c40c7366a00a70e2d568a681bda4df25ba1ca73e15b7d5357dd0aa"
+    }
+  }
+}

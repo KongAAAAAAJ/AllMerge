@@ -404,6 +404,12 @@ def evaluate_paired_trajectories(
     constraint_names: Iterable[str] = CONSTRAINTS,
     constraint_residual_cap: float = 5.0,
     task_reward_type: str = "unified_v6",
+    # NATIVE_GUIDED_INFERENCE_EVAL_20261019
+    guide_mode: str = "none",
+    guide_step_m: float = 0.3,
+    guide_scope: str = "selected",
+    guide_max_x_m: float = 20.0,
+    guide_max_y_m: float = 6.0,
 ) -> dict[str, Any]:
     """Fresh paired-state evaluation with matching noise and frozen pretrain modes.
 
@@ -444,7 +450,17 @@ def evaluate_paired_trajectories(
                           else "cpu" if device_name == "auto" else device_name)
     pretrained_model, adapter = _model(pretrained_checkpoint, device)
     trained_model, _ = _model(checkpoint, device)
-    sampler_rl = GroupDiffusionSampler(trained_model, group_size=group_size, eta=eta)
+    # Reuse the exact training-time frozen-reference guidance function.
+    from highway_env.planner.diffusion.grpo.mean_guidance import MeanGuideSettings
+    guide_settings = MeanGuideSettings(
+        mode=guide_mode, step_m=guide_step_m, scope=guide_scope,
+        max_x_m=guide_max_x_m, max_y_m=guide_max_y_m,
+    )
+    guide_settings.validate()
+    sampler_rl = GroupDiffusionSampler(
+        trained_model, group_size=group_size, eta=eta,
+        guidance=guide_settings, guide_model=pretrained_model,
+    )
     sampler_pre = GroupDiffusionSampler(pretrained_model, group_size=group_size, eta=eta)
     reward_adapter = CandidateRewardAdapter(resolve_reward_evaluator("auto"))
     scenario_classes = {
@@ -496,7 +512,7 @@ def evaluate_paired_trajectories(
                 generator_pre = torch.Generator(device=device.type).manual_seed(noise_seed)
                 generator_rl = torch.Generator(device=device.type).manual_seed(noise_seed)
                 trace_pre = sampler_pre.sample(features, generator=generator_pre)
-                trace_rl = sampler_rl.sample(features, generator=generator_rl)
+                trace_rl = sampler_rl.sample(features, generator=generator_rl, context=context)
                 results = {}
                 for policy, trace in (("pretrain", trace_pre), ("rl", trace_rl)):
                     result = reward_adapter.evaluate_result(
@@ -528,6 +544,12 @@ def evaluate_paired_trajectories(
 
                 row = {"state_index": index, "scenario": env_name,
                        "env_seed": env_seed, "noise_seed": noise_seed}
+                row["rl_guide_shift_rms_m"] = float(
+                    (trace_rl.guidance_metrics or {}).get("guidance/actual_shift_rms_m", 0.0)
+                )
+                row["rl_guide_active_fraction"] = float(
+                    (trace_rl.guidance_metrics or {}).get("guidance/active_fraction", 0.0)
+                )
                 for policy in ("pretrain", "rl"):
                     row[f"{policy}_reward"] = reward_pair[policy][-1]
                     row[f"{policy}_feasible_fraction"] = feasible_values[policy][-1]
@@ -566,6 +588,13 @@ def evaluate_paired_trajectories(
     figure, manifest = render_paired_gallery(gallery, out)
 
     summary = {"model_checkpoint": str(checkpoint),
+               "guide_mode": guide_mode, "guide_step_m": float(guide_step_m),
+               "guide_scope": guide_scope,
+               "guide_max_x_m": float(guide_max_x_m),
+               "guide_max_y_m": float(guide_max_y_m),
+               "guide_reference_checkpoint": str(pretrained_checkpoint),
+               "rl_guide_shift_rms_m": float(np.mean([r["rl_guide_shift_rms_m"] for r in rows])),
+               "rl_guide_active_fraction": float(np.mean([r["rl_guide_active_fraction"] for r in rows])),
                "pretrain_checkpoint": str(pretrained_checkpoint),
                "scenario": scenario, "seed": seed, "group_size": group_size,
                "task_reward_type": task_reward_type,
