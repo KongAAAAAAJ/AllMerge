@@ -403,7 +403,7 @@ def evaluate_paired_trajectories(
     device_name: str = "auto",
     constraint_names: Iterable[str] = CONSTRAINTS,
     constraint_residual_cap: float = 5.0,
-    task_reward_type: str = "v6",
+    task_reward_type: str = "unified_v6",
 ) -> dict[str, Any]:
     """Fresh paired-state evaluation with matching noise and frozen pretrain modes.
 
@@ -412,7 +412,7 @@ def evaluate_paired_trajectories(
     sampled valid-mode candidate support.
     """
     # NATIVE_EVAL_V6_ONLY_20261019: V6 is the only available evaluation reward.
-    if task_reward_type != "v6":
+    if task_reward_type != "unified_v6":
         raise ValueError(f"Only V6 reward is supported in evaluation, got {task_reward_type!r}")
     import matplotlib
     matplotlib.use("Agg", force=True)

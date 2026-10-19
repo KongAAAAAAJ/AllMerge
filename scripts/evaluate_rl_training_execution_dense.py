@@ -59,6 +59,15 @@ def main() -> int:
         results["training_figures"] = plot_training_curves(train_rows, fixed_rows, out)
         print("[eval] plotted reward/loss/violation/KL curves")
     if not args.curves_only:
+        # NATIVE_EVAL_POSTTRAIN_V6_20261019: use the same YAML as train_grpo.py.
+        from pretraining.config_io import load_config
+        posttrain_cfg_file = REPO_ROOT / "configs" / "train" / "allmerge_posttrain.yaml"
+        reward_type = load_config(posttrain_cfg_file).get("task_reward_type")
+        if reward_type != "unified_v6":
+            raise RuntimeError(
+                f"Posttrain config {posttrain_cfg_file} must declare "
+                f"task_reward_type=unified_v6, found {reward_type!r}"
+            )
         results["paired"] = evaluate_paired_trajectories(
             args.checkpoint, args.pretrain_checkpoint, out,
             scenario=args.scenario, num_states=args.num_states,
@@ -67,7 +76,7 @@ def main() -> int:
             validation_seed_offset=args.fixed_validation_seed_offset,
             visualization_seed=args.visualization_seed,
             eta=args.eta, device_name=args.device,
-            task_reward_type="v6",
+            task_reward_type=reward_type,
             constraint_names=tuple(n.strip() for n in args.constraint_names.split(",") if n.strip()),
             constraint_residual_cap=args.constraint_residual_cap,
         )
