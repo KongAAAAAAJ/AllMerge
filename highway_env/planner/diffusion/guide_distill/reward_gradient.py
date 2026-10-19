@@ -25,6 +25,7 @@ DIRECTIONS = ('balanced',)
 class DifferentiableTaskReward:
     config: TrajectoryModeRewardConfig
     device: torch.device
+    high_precision: bool = False  # PGD-only FP64 internal scoring; RGG stays unchanged
     road_field: object | None = None
     role_pose: object | None = None
 
@@ -88,14 +89,20 @@ class DifferentiableTaskReward:
         cfg = self.config
         if self.initial_velocity_xy is None:
             raise RuntimeError('bind_initial_velocity must be called before V6 reward')
-        dense, _, _ = evaluate_dense_spline(xy, cfg,initial_velocity_xy=self.initial_velocity_xy)
+        # The V6 longitudinal jerk and curvature use repeated 10 Hz finite
+        # differences.  For PGD's offline teacher generation, evaluate in
+        # float64 to avoid amplifying float32 XY rounding into the reward.
+        # This cast remains differentiable: gradients w.r.t. float32 input
+        # waypoints are still returned in float32.  Existing RGG is unchanged.
+        work_xy = xy.to(torch.float64) if self.high_precision and xy.dtype != torch.float64 else xy
+        dense, _, _ = evaluate_dense_spline(work_xy, cfg,initial_velocity_xy=self.initial_velocity_xy)
         from highway_env.planner.diffusion.trajectory_mode_reward.task_objective import longitudinal_terms,combine_reward
         kin=longitudinal_terms(dense,cfg,initial_velocity_xy=self.initial_velocity_xy)
         progress=kin['progress_score']
         hd=torch.atan2(torch.diff(dense[...,1],dim=-1),torch.diff(dense[...,0],dim=-1))
         dyaw=torch.atan2(torch.sin(torch.diff(hd,dim=-1)),torch.cos(torch.diff(hd,dim=-1)))
         comfort=dyaw.abs().mean(dim=-1)/float(cfg.interpolation_dt_s)
-        road = self.road_field.components(xy, self.role_pose, cfg,initial_velocity_xy=self.initial_velocity_xy)['road']
+        road = self.road_field.components(work_xy, self.role_pose, cfg,initial_velocity_xy=self.initial_velocity_xy)['road']
         curvature = curvature_reward_components(dense, cfg)
         if self.target_centerline is None and float(cfg.task_centerline_weight)>0.:
             raise RuntimeError('V6 requires bind_centerline(frozen target_lane_polyline)')

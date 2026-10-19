@@ -109,8 +109,8 @@ def verify_reward_parity_v2(proxy, xy, result, *, role, mode):
         if not bool(torch.isfinite(prod32).all() and torch.isfinite(guide32).all()):
             raise RuntimeError('NON-FINITE REWARD during production/guidance parity check')
         err32 = (prod32 - guide32).abs()
-        # Allow limited float32 rounding / discrete top-k boundary variation,
-        # but reject meaningful differences in the actual training objective.
+        # FP32 waypoint inputs are evaluated in FP64 on the PGD Guidance side.
+        # Reject meaningful disagreement with the production V6 score.
         scale = torch.maximum(prod32.abs(), guide32.abs())
         allowed = 5.0e-4 + 5.0e-3 * scale
         failure = err32 > allowed
@@ -125,7 +125,7 @@ def verify_reward_parity_v2(proxy, xy, result, *, role, mode):
                        'float64_component_differences': diff64}))
         if not getattr(verify_reward_parity_v2, '_reported', False):
             print('[REWARD PARITY] float64 production/guidance components match; '
-                  f'float32 reward max abs error={float(err32.max()):.6g}',flush=True)
+                  f'FP32 inputs + FP64 PGD reward max abs error={float(err32.max()):.6g}',flush=True)
             verify_reward_parity_v2._reported = True
         return {'float64_components': diff64,
                 'float32_task_reward_max_abs': float(err32.max())}
@@ -222,7 +222,9 @@ def collect(args,root,*,source_model=None,source_step=None,source_model_sha256=N
         if source_step is None or source_model_sha256 is None:
             raise RuntimeError('Online teacher source step and model SHA are required')
 
-    proxy=DifferentiableTaskReward(cfg,device)
+    # PGD uses high-precision internal reward evaluation for its repeated
+    # 10 Hz finite differences; GRPO/RGG retain their original native dtype.
+    proxy=DifferentiableTaskReward(cfg,device,high_precision=True)
     sampler=GroupDiffusionSampler(model,group_size=args.group_size,eta=.02)
     scorer=CandidateRewardAdapter(resolve_reward_evaluator('auto'))
     collection=[];ledger=[];attempts=0
