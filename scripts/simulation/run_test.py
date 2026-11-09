@@ -1,11 +1,19 @@
 """用来测试全链路闭环"""
 
+# Allow direct execution from any working directory.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+
 import torch
 from stable_baselines3.common.utils import set_random_seed
 
-from data_save import DataSaver
+from simulation.data_save import DataSaver
 from decide.decide import decide
-from env_reset import env_reset
+from simulation.env_reset import env_reset
 from mode_selector.mode_selector import set_platoon_mode
 
 env_name = "highway-platoon-v0"  # merge-platoon-v0 / highway-platoon-v0

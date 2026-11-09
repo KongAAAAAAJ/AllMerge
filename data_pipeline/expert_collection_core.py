@@ -21,7 +21,7 @@ import torch
 #
 # Therefore the simulation must run with cwd=<parent of all_merge>.
 # This script enforces that automatically while keeping repo_root on sys.path.
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = REPO_ROOT.parent
 
 if str(REPO_ROOT) not in sys.path:
@@ -38,7 +38,7 @@ os.chdir(
 from stable_baselines3.common.utils import set_random_seed  # noqa: E402
 
 from decide.decide import decide  # noqa: E402
-from env_reset import env_reset  # noqa: E402
+from simulation.env_reset import env_reset  # noqa: E402
 from mode_selector.mode_selector import set_platoon_mode  # noqa: E402
 
 from highway_env.planner.diffusion.mode_assignment import (  # noqa: E402

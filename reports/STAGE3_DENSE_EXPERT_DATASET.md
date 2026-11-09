@@ -12,4 +12,4 @@ Contract:
 - sparse `expert_trajectory_xy`: `[8,2]`, sampled directly from dense indices `[4,9,...,39]`
 - no sparse-to-dense interpolation fallback
 
-The old dataset remains readable. `validate_expert_dataset.py --require-dense` enforces the v2 dense schema.
+The old dataset remains readable. `scripts/data/validate_expert_dataset.py --require-dense` enforces the v2 dense schema.

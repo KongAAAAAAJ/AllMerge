@@ -6,7 +6,7 @@ CONFIG="${CONFIG:-configs/diffusion_pretrain.json}"
 DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/allmerge_expert}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/diffusion_pretrain}"
 
-"${PYTHON_BIN}" train_diffusion_pretrain.py \
+"${PYTHON_BIN}" -m scripts.training.train_diffusion_pretrain \
   --config "${CONFIG}" \
   --dataset-root "${DATASET_ROOT}" \
   --output-dir "${OUTPUT_DIR}" \

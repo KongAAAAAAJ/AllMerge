@@ -1,4 +1,4 @@
-"""Synthetic smoke test for the actual W1 root-level expert_dataset contract."""
+"""Synthetic smoke test for the actual W1 data_pipeline.expert_dataset contract."""
 from __future__ import annotations
 
 import tempfile

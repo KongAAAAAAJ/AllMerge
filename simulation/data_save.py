@@ -20,9 +20,9 @@ class DataSaver:
 
     def __init__(self, plot_dir=None, output_root=None):
         self.plot_dir = (Path(plot_dir) if plot_dir is not None else
-                         Path(__file__).resolve().parent / "infos" / "result_plots")
+                         Path(__file__).resolve().parents[1] / "infos" / "result_plots")
         self.output_root = (Path(output_root) if output_root is not None else
-                            Path(__file__).resolve().parent / "infos")
+                            Path(__file__).resolve().parents[1] / "infos")
         self.episode_artifacts = []
         self.front_wheel_angles = [[], [], []]
         self.all_front_wheel_angles = [[], [], []]

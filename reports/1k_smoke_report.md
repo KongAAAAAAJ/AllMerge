@@ -16,11 +16,11 @@ CHECKPOINT=outputs/diffusion_pretrain_smoke1k/run_1/checkpoints/last.ckpt \
   NUM_SAMPLES=256 \
   bash scripts/run_diffusion_open_loop_eval.sh
 
-python export_diffusion_runtime_checkpoint.py \
+python scripts/training/export_diffusion_runtime_checkpoint.py \
   outputs/diffusion_pretrain_smoke1k/run_1/checkpoints/last.ckpt \
   outputs/diffusion_pretrain_smoke1k/run_1/runtime/last_runtime.pt
 
-python test_diffusion_runtime_load.py \
+python tests/test_diffusion_runtime_load.py \
   --checkpoint outputs/diffusion_pretrain_smoke1k/run_1/runtime/last_runtime.pt \
   --dataset-root data/expert/allmerge_planner_v1
 ```

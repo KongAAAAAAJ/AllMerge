@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+# Allow direct execution from any working directory.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+
 import argparse
 from pathlib import Path
 
-from expert_dataset import split_shards
+from data_pipeline.expert_dataset import split_shards
 
 
 def parse_args() -> argparse.Namespace:

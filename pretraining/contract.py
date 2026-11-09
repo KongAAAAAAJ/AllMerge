@@ -5,7 +5,7 @@ from typing import Mapping
 
 import torch
 
-from expert_dataset import BOOL_FEATURE_KEYS, FEATURE_KEYS
+from data_pipeline.expert_dataset import BOOL_FEATURE_KEYS, FEATURE_KEYS
 from .dataset_adapter import unpack_w1_batch
 
 

@@ -7,7 +7,7 @@ from typing import Mapping
 import torch
 from torch.utils.data import DataLoader
 
-from expert_dataset import build_dataset
+from data_pipeline.expert_dataset import build_dataset
 
 
 def build_w1_dataloader(

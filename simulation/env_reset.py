@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import gymnasium as gym
 from stable_baselines3.common.vec_env import DummyVecEnv, VecVideoRecorder
@@ -12,7 +13,7 @@ def env_reset(env_name, seed=None):
         "merge-platoon-v0": "all_merge/infos/videos/merge/",
         "highway-platoon-v0": "all_merge/infos/videos/slow-down/",
     }
-    video_folder = video_folders[env_name]
+    video_folder = str(Path(__file__).resolve().parents[2] / video_folders[env_name])
     highway_env.register_highway_envs()
     env = DummyVecEnv([
         lambda: gym.make(

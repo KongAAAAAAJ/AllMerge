@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+# Allow direct execution from any working directory.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+
 import argparse
 import json
 import os
@@ -13,7 +21,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.utils import set_random_seed
 
-from expert_collection_core import (
+from data_pipeline.expert_collection_core import (
     FEATURE_KEYS,
     MODE_NAMES,
     SEMANTIC_NAMES,
@@ -24,7 +32,7 @@ from expert_collection_core import (
     build_frame_record,
     get_vec_attr,
 )
-from expert_dataset import split_shards
+from data_pipeline.expert_dataset import split_shards
 from highway_env.envs.scenarios.curved_lane_change_env import CurvedLaneChangeEnv
 from highway_env.envs.scenarios.merge_in_env import MergeInEnv
 from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
@@ -41,7 +49,7 @@ SCENARIOS = {
 # SCENARIO-DIRECT EXPERT COLLECTOR V1
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "expert_dataset"
 
 
@@ -607,7 +615,7 @@ def write_manifest(
         "repo_commit": resolve_git_commit(),
         "pilot_source_commit_constant": PILOT_SOURCE_COMMIT,
         "collector_contract_source": (
-            "expert_collection_core.build_frame_record + "
+            "data_pipeline.expert_collection_core.build_frame_record + "
             "latest_planner_features/latest_expert_alignment"
         ),
         "expert_type": "Polynomial",
