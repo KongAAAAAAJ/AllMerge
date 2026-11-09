@@ -189,3 +189,25 @@ def find_brake_edge(v):
     return a_b_max * 9.8  # [m/s^2]
 
 
+
+
+def inverse_steering_dynamics(delta_ref_rad, steering_ratio, *,
+                              previous_ref_rad=None, dt=None, steering_tau_s=0.0):
+    """Road-wheel angle -> steering-wheel command, in degrees.
+
+    Steering gear ratio provides the static inverse. Optionally, a first-order
+    steering actuator inverse adds tau * d(delta_ref)/dt as feedforward.
+    This is *not* a calibrated TruckSim steering inverse until tau is identified.
+    All angles in this interface are road-wheel radians except the result.
+    """
+    values = [delta_ref_rad, steering_ratio, steering_tau_s]
+    if not np.all(np.isfinite(values)) or steering_ratio <= 0 or steering_tau_s < 0:
+        raise ValueError('Invalid steering target, ratio or actuator time constant')
+    commanded_rad = float(delta_ref_rad)
+    if steering_tau_s > 0:
+        if previous_ref_rad is None or dt is None or dt <= 0:
+            raise ValueError('Steering actuator inverse requires previous_ref_rad and dt > 0')
+        if not np.isfinite(previous_ref_rad) or not np.isfinite(dt):
+            raise ValueError('Invalid steering actuator inverse history')
+        commanded_rad += steering_tau_s * (delta_ref_rad - previous_ref_rad) / dt
+    return float(np.rad2deg(commanded_rad) * steering_ratio)

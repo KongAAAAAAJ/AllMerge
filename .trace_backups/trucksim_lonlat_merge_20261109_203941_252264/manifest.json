@@ -1,0 +1,44 @@
+[
+  {
+    "path": "highway_env/vehicle/trucksim_simulation/Trucksim_Simulation_ltr.py",
+    "operation": "ADD",
+    "before_sha256": null,
+    "after_sha256": "4fa4c522cf99ed0abbc3e01b851f55211fe1fee7a6ec2d42f62773c3f49b402f"
+  },
+  {
+    "path": "highway_env/vehicle/trucksim_simulation/README_LTR.md",
+    "operation": "ADD",
+    "before_sha256": null,
+    "after_sha256": "e3e11e1b37579279f972f644c37a921405e2d21869421b27ef5fa4342c7d50a5"
+  },
+  {
+    "path": "highway_env/vehicle/trucksim_simulation/low_controller.py",
+    "operation": "UPDATE",
+    "before_sha256": "3c3e545cdf91628e49d7c377115437cafcb6eb003d30aa145a8ffbc1a58e0d96",
+    "after_sha256": "f27a8d0a2bc9925d7aab38ce957bdfd23042797724003ea6ff5b7f015c55d658"
+  },
+  {
+    "path": "highway_env/vehicle/trucksim_simulation/inverse_dynamics.py",
+    "operation": "UPDATE",
+    "before_sha256": "d9b957472a0dc18ee25f1bace015f60d02af2188117ca3c55123f3ef5eb81c1e",
+    "after_sha256": "a1f8e34840e929393a93b12c007d65a2a469bb6a1e7cf29542e00c69debe191f"
+  },
+  {
+    "path": "highway_env/vehicle/trucksim_dynamics.py",
+    "operation": "UPDATE",
+    "before_sha256": "c4c19825ce8d57b1028a9cc39b93377ab5173762168c57f92b81c88e653f66df",
+    "after_sha256": "b043325cd86b5ab8113ccdbe784a34b2f2d8d75735fc481c599ce0129378e4d2"
+  },
+  {
+    "path": "highway_env/envs/my_highway_env.py",
+    "operation": "UPDATE",
+    "before_sha256": "1414b8dff231414c5d316bc3715835d83264351d2f6d3cdc6154d4aebfc8839b",
+    "after_sha256": "e8aec33fb11393d3540a62914b9cb25577799523fec137c10a7cca1464b71a8e"
+  },
+  {
+    "path": "scripts/verify_trucksim_modes.py",
+    "operation": "ADD",
+    "before_sha256": null,
+    "after_sha256": "4ea8b27abe2a71d3a546e7c1db26bbe7e9f61d2299b8b0b335e6439aadcc2d13"
+  }
+]

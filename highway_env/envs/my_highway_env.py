@@ -188,6 +188,10 @@ class MyHighwayEnv(AbstractEnv):
                 },
 
                 "TruckSim": {
+                    # Legacy default: existing longitudinal low-level control + direct steering.
+                    # New dataset: set "longitudinal_lateral" and supply the explicit
+                    # signal_map and lateral_controller below (see patch README).
+                    "control_mode": "longitudinal",
                     "simfiles": [
                         f"D:/Users/Public/Documents/TruckSim2016.1_Data_now_using/truck_{i}_lon_lat.sim"
                         for i in range(1, 4)
@@ -263,9 +267,16 @@ class MyHighwayEnv(AbstractEnv):
         # Lazy imports keep the kinematics branch independent of native DLLs.
         from pathlib import Path
         from highway_env.vehicle.trucksim_dynamics import TrucksimVehicle, load_engine_map
-        from highway_env.vehicle.trucksim_simulation.Truck_Simulation import TrucksimSimulation
-
         config = self.config["TruckSim"]
+        control_mode = config.get('control_mode', 'longitudinal')
+        if control_mode == 'longitudinal':
+            from highway_env.vehicle.trucksim_simulation.Truck_Simulation import TrucksimSimulation
+            simulation_class = TrucksimSimulation
+        elif control_mode == 'longitudinal_lateral':
+            from highway_env.vehicle.trucksim_simulation.Trucksim_Simulation_ltr import TrucksimSimulationLTR
+            simulation_class = TrucksimSimulationLTR
+        else:
+            raise ValueError(f'Unknown TruckSim control_mode: {control_mode!r}')
         count = len(self.controlled_vehicles)
         simfiles, dlls = config["simfiles"], config["dlls"]
         if len(simfiles) != count or len(dlls) != count:
@@ -276,11 +287,12 @@ class MyHighwayEnv(AbstractEnv):
             if not Path(path).is_file():
                 raise FileNotFoundError(path)
         engine_map = load_engine_map(config)
-        signature = tuple(simfiles), tuple(dlls)
+        signature = tuple(simfiles), tuple(dlls), control_mode
         if getattr(self, "_trucksim_signature", None) != signature:
+            self._terminate_trucksim()
             self.trucksim_models = []
             for simfile, dll in zip(simfiles, dlls):
-                self.trucksim_models.append(TrucksimSimulation(simfile, dll))
+                self.trucksim_models.append(simulation_class(simfile, dll))
             self._trucksim_signature = signature
         for i, vehicle in enumerate(self.controlled_vehicles):
             model = self.trucksim_models[i]
