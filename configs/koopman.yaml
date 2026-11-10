@@ -86,7 +86,7 @@ units:
 
 excitation:
   mode: reference       # no direct actuation in training collection
-  patterns: [sine]  # [step, sine, chirp, prbs, combined]
+  patterns: [step, sine, chirp, prbs, combined]
   duration_s: 5.0
   warmup_s: 1.0
   controller_dt_s: 0.1
@@ -141,8 +141,8 @@ reference_controller:
     steering_tau_s: 0.0
 
 batch:
-  output_dir: 'outputs/koopman/data/sdk2016_smoke_01'
-  seeds: [0]
+  output_dir: 'outputs/koopman/data/sdk2016_smoke_02'
+  seeds: [0, 1]
   timeout_s_per_run: 120.0
   max_solver_steps_per_run: 100000
   plot_first_per_pattern: true

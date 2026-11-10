@@ -1,12 +1,10 @@
-"""TruckSim reference-command collection with one isolated subprocess per run for TRACE.
+"""TruckSim reference-command collection with one child process per trajectory.
 
-Each trajectory runs in a separate Python child process. The batch parent
-loads the fixed engine calibration CSV exactly once and passes its numeric
-matrix to workers in their job requests. For the user's one-shot per-process TruckSim setup, the native solver
-termination call is deliberately skipped after each completed run. The solver
-object must never be reused in the same Python process. Batch acceptance still
-requires a zero worker exit code and a valid dataset audit; no crash is
-converted into success.
+A process may crash during native DLL teardown even after producing all output.
+The parent therefore accepts only COMPLETE, independently audited artifacts,
+regardless of child exit status. Each child writes to an isolated staging
+folder; the parent alone publishes verified files to the training directory.
+This does not claim that the native heap defect has been repaired.
 """
 from __future__ import annotations
 
@@ -19,6 +17,8 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import zipfile
+import shutil
 
 import numpy as np
 
@@ -609,7 +609,10 @@ def run_worker(cfg, run, output_dir):
         # session. Follow the same sequence here. This worker has exactly one
         # TruckSim simulation and will exit without reinitializing the DLL.
         path = out / (run["id"] + ".npz")
-        np.savez_compressed(path,
+        # Write the NPZ archive to a temporary file, then publish atomically.
+        npz_temp = path.with_name(path.name + ".writing")
+        with npz_temp.open("wb") as npz_fh:
+            np.savez_compressed(npz_fh,
             t_raw_s=times, trucksim_raw=raw, u_native_raw=native, u_ref_raw_si=refs,
             state_raw_si=st, pose_raw_si=pose, ltr_raw=ltr,
             ax_raw_mps2=extra["ax_mps2"], ay_raw_mps2=extra["ay_mps2"],
@@ -624,10 +627,14 @@ def run_worker(cfg, run, output_dir):
             excitation_sha256=np.array(fingerprint),
             payload_kg=np.array(conditions["payload_kg"], dtype=float),
             road_mu=np.array(conditions["road_mu"], dtype=float))
+            npz_fh.flush()
+            os.fsync(npz_fh.fileno())
+        os.replace(npz_temp, path)
         # CSV is human-readable; row i contains state at t[i], and native
         # command applied over [t[i], t[i+1]). Last row has no outgoing input.
         csv_path = out / (run["id"] + ".csv")
-        with csv_path.open("w", newline="", encoding="utf-8") as f:
+        csv_temp = csv_path.with_name(csv_path.name + ".writing")
+        with csv_temp.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["time_s", *SIGNALS,
                         "u_to_next_throttle_pct", "u_to_next_brake_mpa", "u_to_next_steer_wheel_deg",
@@ -636,6 +643,9 @@ def run_worker(cfg, run, output_dir):
                 u = native[i].tolist() if i < len(native) else [""]*3
                 r = refs[i].tolist() if i < len(refs) else [""]*2
                 w.writerow([times[i], *raw[i].tolist(), *u, *r, ltr[i]])
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(csv_temp, csv_path)
         meta = {
             "run_id": run["id"], "model_id": model["id"],
             "pattern": run["pattern"], "seed": run["seed"],
@@ -665,31 +675,235 @@ def run_worker(cfg, run, output_dir):
             "sample_alignment": "raw control[k] acts from raw_state[k] to raw_state[k+1]; similarly at 10Hz",
         }
         json_write(path.with_suffix(".json"), meta)
-        if bool(run.get("plot", False)):
-            plot_all_exports(times, np.column_stack([raw, ltr]),
-                             out / (run["id"]+".png"),
-                             title=f"TruckSim TRACE | {run['id']} | {mode}")
         audit = audit_npz(path)
         if not audit["valid"]:
             raise RuntimeError(f"Dataset audit failed: {audit['issues']}")
-        # Complete all file I/O before ending this one-shot session.
-        # Do not call vs_terminate_run / vs_terminate / vs_free_all: those
-        # native calls have caused access violations with the user's DLL.
-        print(f"[WORKER] Data saved and audited; skipping native termination for {run['id']}", flush=True)
-        sim.stop(native_terminate=False)
-        result = {"status": "ok", "run_id": run["id"], "npz": str(path),
+        # Write the completion record BEFORE optional plotting and DLL shutdown.
+        # The parent independently audits all artifacts even if the worker
+        # terminates abnormally after this point.
+        result = {"status": "data_written", "run_id": run["id"], "npz": str(path),
                   "csv": str(csv_path), "duration_s": meta["duration_actual_s"],
                   "samples": len(times), "train_eligible": True,
                   "wall_time_s": round(time.monotonic()-t0_start,3),
-            "native_shutdown_mode": "skip_terminate_one_shot_process"}
+                  "native_shutdown_mode": "skip_terminate_one_shot_process"}
         json_write(out / (run["id"] + ".result.json"), result)
-        print(f"[OK] {run['id']} {len(times)} raw samples; {len(processed['t10_s'])} target samples", flush=True)
+        print(f"[WORKER] DATA COMPLETE {run['id']} {len(times)} raw / "
+              f"{len(processed['t10_s'])} target samples", flush=True)
+        # Plot is optional and cannot invalidate already-committed data.
+        if bool(run.get("plot", False)):
+            try:
+                plot_all_exports(times, np.column_stack([raw, ltr]),
+                                 out / (run["id"]+".png"),
+                                 title=f"TruckSim TRACE | {run['id']} | {mode}")
+            except Exception as exc:
+                print(f"[WORKER] WARNING: plot failed: {exc}", flush=True)
+        # Do not invoke vs_terminate_run, vs_terminate or vs_free_all. A worker
+        # is single-use; the parent still validates data after its process exits.
+        sim.stop(native_terminate=False)
+        print(f"[WORKER] One-shot data saved: {run['id']}", flush=True)
         return result
     finally:
         if started and sim.is_running:
             # Error-path cleanup must not call the known-failing native API.
-            # The parent will reject any worker with a nonzero exit status.
+            # The parent accepts only fully verified artifacts, not exit codes.
             sim.stop(native_terminate=False)
+
+
+def _decode_process_output(output):
+    if output is None:
+        return ""
+    return output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output)
+
+
+def verify_run_artifacts(directory, job, cfg):
+    """Check actual trajectory completeness independently of worker exit code.
+
+    Only a complete set of parseable NPZ/CSV/metadata files with the exact
+    requested settings can be accepted. PNG and worker result JSON are optional.
+    """
+    root = Path(directory)
+    rid = job["id"]
+    npz = root / (rid + ".npz")
+    csv_path = root / (rid + ".csv")
+    meta_path = root / (rid + ".json")
+    issues = []
+    names = (npz, csv_path, meta_path)
+    for item in names:
+        if not item.is_file() or item.stat().st_size == 0:
+            issues.append(f"missing/empty {item.name}")
+    if issues:
+        return {"valid": False, "issues": issues, "files": [], "samples": 0}
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        expected = job["expected_condition"]
+        if meta.get("run_id") != rid or meta.get("model_id") != job["model_id"]:
+            issues.append("metadata run/model ID mismatch")
+        if meta.get("pattern") != job["pattern"] or meta.get("seed") != job["seed"]:
+            issues.append("metadata excitation pattern/seed mismatch")
+        if meta.get("excitation_sha256") != job["excitation_sha256"]:
+            issues.append("metadata excitation hash mismatch")
+        if meta.get("engine_map_sha256") != job["engine_map_sha256"]:
+            issues.append("metadata engine calibration hash mismatch")
+        for label in ("payload_tier", "friction_tier", "speed_tier"):
+            if meta.get(label) != expected[label]:
+                issues.append(f"metadata {label} mismatch")
+        if meta.get("trucksim") != job["expected_signature"]:
+            issues.append("TruckSim model .sim/.dll signature mismatch")
+        if meta.get("model_units") != cfg["units"] or meta.get("mode") != "reference":
+            issues.append("units/mode mismatch")
+        if meta.get("train_eligible") is not True:
+            issues.append("metadata does not mark reference training data")
+        dt = float(meta["solver_dt_s"])
+        target_dt = float(cfg["excitation"]["target_dt_s"])
+        expected_duration = float(cfg["excitation"]["duration_s"])
+        expected_n = int(np.floor(expected_duration/dt + 1e-7)) + 1
+        expected_n10 = int(np.floor(expected_duration/target_dt+1e-7)) + 1
+        if not np.isfinite(dt) or dt <= 0:
+            issues.append("invalid solver step")
+        if int(meta.get("raw_samples", -1)) != expected_n:
+            issues.append("metadata raw sample count mismatch")
+        if int(meta.get("target_samples", -1)) != expected_n10:
+            issues.append("metadata 10Hz sample count mismatch")
+        if not np.isclose(float(meta.get("duration_actual_s", -1)), expected_duration,
+                          rtol=0, atol=max(dt, 1e-6)):
+            issues.append("incomplete simulation duration")
+        # np.load reads the real compressed archive. The archive test detects
+        # truncated ZIP members / CRC errors, not just a nominal file size.
+        with zipfile.ZipFile(npz, "r") as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                issues.append(f"NPZ CRC failed for {bad}")
+        with np.load(npz, allow_pickle=False) as z:
+            essential = ["t_raw_s", "trucksim_raw", "u_native_raw",
+                         "u_ref_raw_si", "state_raw_si", "pose_raw_si",
+                         "ltr_raw", "t10_s", "state10_si", "pose10_si",
+                         "ltr10", "u_native10", "u_ref10_si", "train_eligible",
+                         "model_id", "payload_tier", "friction_tier", "speed_tier",
+                         "payload_kg", "road_mu", "vx_init_kmh", "excitation_sha256"]
+            missing = [name for name in essential if name not in z.files]
+            if missing:
+                raise ValueError(f"NPZ missing keys: {missing}")
+            tr = z["t_raw_s"]
+            xr = z["trucksim_raw"]
+            un = z["u_native_raw"]
+            ur = z["u_ref_raw_si"]
+            t10 = z["t10_s"]
+            x10 = z["state10_si"]
+            p10 = z["pose10_si"]
+            u10 = z["u_native10"]
+            r10 = z["u_ref10_si"]
+            if tr.shape != (expected_n,) or xr.shape != (expected_n, 19):
+                issues.append("raw state count/shape mismatch")
+            if un.shape != (expected_n-1, 3) or ur.shape != (expected_n-1, 2):
+                issues.append("raw control count/shape mismatch")
+            if t10.shape != (expected_n10,) or x10.shape != (expected_n10, 5):
+                issues.append("10Hz state count/shape mismatch")
+            if p10.shape != (expected_n10, 3) or u10.shape != (expected_n10-1, 3) or r10.shape != (expected_n10-1, 2):
+                issues.append("10Hz pose/control count/shape mismatch")
+            if (z["state_raw_si"].shape != (expected_n, 5) or
+                z["pose_raw_si"].shape != (expected_n, 3) or
+                z["ltr_raw"].shape != (expected_n,) or
+                z["ltr10"].shape != (expected_n10,)):
+                issues.append("raw/10Hz auxiliary array shape mismatch")
+            for array in (tr, xr, un, ur, t10, x10, p10, u10, r10, z["ltr_raw"], z["ltr10"]):
+                if not np.isfinite(array).all():
+                    issues.append("nonfinite data")
+                    break
+            if not issues:
+                if not (np.all(np.diff(tr) > 0) and
+                        np.allclose(np.diff(tr), dt, rtol=0, atol=max(1e-7, dt*1e-3))):
+                    issues.append("raw simulation timeline is invalid")
+                if not (np.all(np.diff(t10) > 0) and
+                        np.allclose(np.diff(t10), target_dt, rtol=0, atol=1e-6)):
+                    issues.append("10Hz timeline is invalid")
+                if not np.isclose(tr[-1]-tr[0], expected_duration, atol=dt, rtol=0):
+                    issues.append("truncated raw timeline")
+                if not np.isclose(t10[-1]-t10[0], expected_duration, atol=target_dt/2, rtol=0):
+                    issues.append("truncated 10Hz timeline")
+                if not np.isclose(xr[0,2], expected["vx_init_kmh"], atol=float(cfg["trucksim"].get("initial_speed_tolerance_kmh",2)), rtol=0):
+                    issues.append("initial speed does not match model tier")
+            labels = {"model_id": job["model_id"], "payload_tier": expected["payload_tier"],
+                      "friction_tier": expected["friction_tier"],
+                      "speed_tier": expected["speed_tier"],
+                      "excitation_sha256": job["excitation_sha256"]}
+            for label, expected_value in labels.items():
+                if str(z[label].item()) != str(expected_value):
+                    issues.append(f"NPZ {label} mismatch")
+            for label in ("payload_kg", "road_mu", "vx_init_kmh"):
+                if float(z[label].item()) != float(expected[label]):
+                    issues.append(f"NPZ {label} mismatch")
+            if not bool(z["train_eligible"].item()):
+                issues.append("NPZ not marked train eligible")
+            samples = len(tr)
+            # CSV must actually contain every raw output row, not only a header.
+            with csv_path.open("r", newline="", encoding="utf-8") as fh:
+                reader = csv.reader(fh)
+                header = next(reader, None)
+                if header is None or header[:20] != ["time_s", *SIGNALS]:
+                    issues.append("raw CSV header mismatch")
+                count = 0
+                first_row = last_row = None
+                for row in reader:
+                    count += 1
+                    if len(row) != 26:
+                        issues.append(f"CSV row {count} has wrong column count")
+                        break
+                    if first_row is None:
+                        first_row = row
+                    last_row = row
+                if count != expected_n:
+                    issues.append("CSV sample count mismatch")
+                if first_row is not None and last_row is not None and not issues:
+                    for row, i in ((first_row, 0), (last_row, -1)):
+                        actual = np.asarray([float(v) for v in row[:20]], dtype=float)
+                        target = np.concatenate(([tr[i]], xr[i]))
+                        if not np.allclose(actual, target, rtol=1e-7, atol=1e-7):
+                            issues.append("CSV and NPZ raw data disagree")
+                            break
+        basic = audit_npz(npz)
+        if not basic["valid"]:
+            issues += basic["issues"]
+        # Worker marker is optional: an interpreter may fail after all data
+        # files are fully written but before writing the marker.
+        result_path = root / (rid + ".result.json")
+        if result_path.exists():
+            info = json.loads(result_path.read_text(encoding="utf-8"))
+            if info.get("run_id") != rid or info.get("train_eligible") is not True:
+                issues.append("worker result marker mismatch")
+        return {"valid": not issues, "issues": issues,
+                "files": [p.name for p in names], "samples": samples}
+    except Exception as exc:
+        issues.append(f"verification exception: {type(exc).__name__}: {exc}")
+        return {"valid": False, "issues": issues, "files": [], "samples": 0}
+
+
+def promote_verified_artifacts(staging, output, job, allow_overwrite):
+    """Expose verified files only after complete worker data validation."""
+    staging, output = Path(staging), Path(output)
+    rid = job["id"]
+    published = []
+    for ext in (".npz", ".csv", ".json", ".result.json", ".png"):
+        src = staging / (rid + ext)
+        if not src.is_file():
+            continue
+        dst = output / src.name
+        if dst.exists() and not allow_overwrite:
+            raise FileExistsError(f"Refusing overwrite: {dst}")
+        os.replace(src, dst)
+        published.append(dst.name)
+    # Validated data are now in output; leave other crash artifacts in staging.
+    try:
+        staging.rmdir()
+    except OSError:
+        pass
+    # The worker's result points at staging; update its file paths if present.
+    result_file = output / (rid + ".result.json")
+    if result_file.exists():
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        result["npz"] = str(output / (rid + ".npz"))
+        result["csv"] = str(output / (rid + ".csv"))
+        json_write(result_file, result)
+    return published
 
 
 def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, speed_tier=None):
@@ -737,15 +951,15 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
     timeout = float(cfg["batch"].get("timeout_s_per_run", 120))
     env = os.environ.copy()
     env["PYTHONPATH"] = str(project_root) + os.pathsep + env.get("PYTHONPATH", "")
-    for i, job in enumerate(jobs):
-        existing = output / (job["id"] + ".npz")
-        if existing.exists() and not bool(cfg["batch"].get("allow_overwrite", False)):
-            raise FileExistsError(f"Existing run will not be overwritten: {existing}")
-        # Validate all configured model files remain unchanged during the batch.
+    # Helpful for diagnosing native crashes; acceptance never depends on logs.
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
+    allow_overwrite = bool(cfg["batch"].get("allow_overwrite", False))
+    for i, initial_job in enumerate(jobs):
+        job = dict(initial_job)
         for mid, m in models.items():
             if model_signature(m) != signatures[mid]:
-                raise RuntimeError(f"TruckSim model {mid} file changed mid-batch; stop to relabel data")
-        job = dict(job)
+                raise RuntimeError(f"TruckSim model {mid} changed mid-batch")
         job["expected_signature"] = signatures[job["model_id"]]
         job["expected_condition"] = model_condition(models[job["model_id"]])
         job["engine_map_values"] = engine_map_values
@@ -754,50 +968,82 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
             int(job["seed"]) == int(cfg["batch"]["seeds"][0]))
         job_file = output / (job["id"] + ".request.json")
         json_write(job_file, job)
-        cmd = [sys.executable, str(script), "worker", "--config", str(Path(config_path).resolve()),
-               "--job", str(job_file), "--output", str(output)]
-        start = time.monotonic()
+        # Older runs may have completed data even when their worker crashed
+        # during interpreter shutdown. Adopt them only after FULL validation.
+        existing = output / (job["id"] + ".npz")
+        if existing.exists() and not allow_overwrite:
+            checked = verify_run_artifacts(output, job, cfg)
+            if checked["valid"]:
+                details = {"id": job["id"], "model_id": job["model_id"],
+                           "status": "ok", "source": "existing_verified",
+                           "worker_returncode": None, "data_verified": True,
+                           "artifacts": checked["files"], "samples": checked["samples"]}
+                json_write(output / (job["id"] + ".accepted.json"), details)
+                print(f"[RECOVER] {job['id']} existing dataset verified; no rerun", flush=True)
+                manifest.append(details)
+                json_write(summary_path, {"config": str(config_path), "runs": manifest})
+                continue
+            raise FileExistsError(
+                f"Run {job['id']} exists but cannot be verified: {checked['issues']}. "
+                "Set a new batch.output_dir or allow_overwrite=true to re-collect.")
+        # Each child writes ONLY to an isolated staging directory. An incomplete
+        # or crash-corrupted run can never appear in the final training folder.
+        stage = output / ".staging" / (job["id"] + "__" + str(time.time_ns()))
+        stage.mkdir(parents=True, exist_ok=False)
+        cmd = [sys.executable, str(script), "worker", "--config",
+               str(Path(config_path).resolve()), "--job", str(job_file),
+               "--output", str(stage)]
+        started = time.monotonic()
         print(f"[RUN {i+1}/{len(jobs)}] {job['id']} ({job['model_id']})", flush=True)
+        return_code = None
+        timed_out = False
+        stdout = ""
+        stderr = ""
         try:
             p = subprocess.run(cmd, cwd=str(project_root), env=env,
-                               timeout=timeout, capture_output=True, text=True)
-            status = "ok" if p.returncode == 0 else "failed"
-            details = {"id": job["id"], "model_id": job["model_id"],
-                       "status": status, "returncode": p.returncode,
-                       "wall_time_s": round(time.monotonic()-start,2)}
-            (output/(job["id"]+".stdout.log")).write_text(p.stdout, encoding="utf-8")
-            (output/(job["id"]+".stderr.log")).write_text(p.stderr, encoding="utf-8")
-            if p.returncode == 0:
-                result_path = output / (job["id"] + ".result.json")
-                npz_path = output / (job["id"] + ".npz")
-                if not result_path.is_file() or not npz_path.is_file():
-                    status = details["status"] = "missing_output"
-                else:
-                    result_info = json.loads(result_path.read_text(encoding="utf-8"))
-                    audit = audit_npz(npz_path)
-                    if result_info.get("run_id") != job["id"] or not audit["valid"]:
-                        status = details["status"] = "invalid_output"
-                        details["issues"] = audit["issues"]
-                    else:
-                        with np.load(npz_path, allow_pickle=False) as f:
-                            if (str(f["model_id"].item()) != job["model_id"] or
-                                str(f["payload_tier"].item()) != job["expected_condition"]["payload_tier"] or
-                                str(f["friction_tier"].item()) != job["expected_condition"]["friction_tier"] or
-                                str(f["speed_tier"].item()) != job["expected_condition"]["speed_tier"] or
-                                float(f["vx_init_kmh"].item()) != job["expected_condition"]["vx_init_kmh"] or
-                                str(f["excitation_sha256"].item()) != job["excitation_sha256"] or
-                                float(f["payload_kg"].item()) != job["expected_condition"]["payload_kg"] or
-                                float(f["road_mu"].item()) != job["expected_condition"]["road_mu"]):
-                                status = details["status"] = "wrong_model_label"
-            if status != "ok":
-                print("[FAILED]", job["id"], status, p.stderr[-1500:], flush=True)
-        except subprocess.TimeoutExpired:
-            details = {"id": job["id"], "model_id": job["model_id"],
-                       "status": "timeout", "wall_time_s": round(time.monotonic()-start,2)}
-            print("[TIMEOUT]", job["id"], flush=True)
+                               timeout=timeout, capture_output=True, text=True,
+                               errors="replace")
+            return_code = p.returncode
+            stdout, stderr = p.stdout, p.stderr
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = _decode_process_output(exc.stdout)
+            stderr = _decode_process_output(exc.stderr)
+        (output/(job["id"]+".stdout.log")).write_text(stdout, encoding="utf-8")
+        (output/(job["id"]+".stderr.log")).write_text(stderr, encoding="utf-8")
+        checked = verify_run_artifacts(stage, job, cfg)
+        details = {"id": job["id"], "model_id": job["model_id"],
+                   "worker_returncode": return_code, "worker_timed_out": timed_out,
+                   "wall_time_s": round(time.monotonic()-started, 2),
+                   "data_verified": checked["valid"],
+                   "samples": checked.get("samples"),
+                   "issues": checked["issues"]}
+        if checked["valid"]:
+            # Publish only after verifying the archived trajectory, raw samples,
+            # CSV rows, metadata, labels, units, timing and request fingerprint.
+            published = promote_verified_artifacts(stage, output, job, allow_overwrite)
+            details["status"] = "ok"
+            details["artifacts"] = published
+            details["source"] = "worker_verified"
+            details["native_exit_warning"] = (return_code != 0 or timed_out)
+            json_write(output / (job["id"] + ".accepted.json"), details)
+            if return_code == 0 and not timed_out:
+                print(f"[OK] {job['id']} verified dataset; worker exit=0", flush=True)
+            else:
+                print(f"[DATA OK] {job['id']} verified and published; "
+                      f"worker exit={return_code}, timeout={timed_out}. "
+                      "Native shutdown issue recorded; continuing.", flush=True)
+        else:
+            details["status"] = "timeout" if timed_out else "invalid_or_incomplete"
+            details["staging_dir"] = str(stage)
+            print(f"[FAILED DATA] {job['id']} exit={return_code} "
+                  f"issues={checked['issues'][:5]}; see staging/logs", flush=True)
+            if stderr:
+                print(stderr[-1200:], flush=True)
         manifest.append(details)
         json_write(summary_path, {"config": str(config_path), "runs": manifest})
         if details["status"] != "ok" and bool(cfg["batch"].get("stop_on_error", True)):
-            raise RuntimeError(f"Worker failure: {job['id']}; see {output} logs")
-    print(f"[DONE] {sum(x['status']=='ok' for x in manifest)}/{len(jobs)} runs OK; {summary_path}")
+            raise RuntimeError(f"Incomplete or corrupt dataset: {job['id']}; see {output} logs")
+    print(f"[DONE] {sum(x['status']=='ok' for x in manifest)}/{len(jobs)} "
+          f"datasets verified; {summary_path}", flush=True)
     return manifest
