@@ -18,13 +18,14 @@ from torch.utils.data import Dataset
 
 
 class Episode:
-    def __init__(self, path, states, controls, poses, time_s, info):
+    def __init__(self, path, states, controls, poses, time_s, info, ltr=None):
         self.path = Path(path)
         self.states = states
         self.controls = controls
         self.poses = poses
         self.time_s = time_s
         self.info = info
+        self.ltr = np.asarray(ltr, dtype=np.float32) if ltr is not None else np.full(len(states), np.nan, dtype=np.float32)
 
     @property
     def id(self):
@@ -62,16 +63,21 @@ def discover_episodes(roots, project_root, require_accepted=True, expected_dt=0.
                 controls = np.asarray(npz['u_ref10_si'], dtype=np.float32)
                 poses = np.asarray(npz['pose10_si'], dtype=np.float32)
                 ts = np.asarray(npz['t10_s'], dtype=np.float64)
+                if 'ltr10' not in npz:
+                    raise ValueError('Missing TruckSim LTR label ltr10; paper K0 requires LTR supervision')
+                ltr = np.asarray(npz['ltr10'], dtype=np.float32)
                 info = {k: npz[k].item() for k in ('model_id','payload_kg','road_mu','vx_init_kmh') if k in npz}
                 info['excitation_sha256'] = str(npz['excitation_sha256'].item()) if 'excitation_sha256' in npz else None
             if states.ndim != 2 or states.shape != (len(ts),5): raise ValueError('state shape')
             if poses.shape != (len(ts),3): raise ValueError('pose shape')
+            if ltr.shape != (len(ts),): raise ValueError('ltr shape')
+            if not np.isfinite(ltr).any(): raise ValueError('No valid LTR samples for supervised K0')
             if controls.shape != (len(ts)-1,2): raise ValueError('control alignment')
             if len(ts) < 2 or not np.allclose(np.diff(ts), expected_dt, rtol=0, atol=1e-5):
                 raise ValueError('time alignment / dt mismatch')
             if not (np.isfinite(states).all() and np.isfinite(controls).all() and np.isfinite(poses).all()):
                 raise ValueError('nonfinite states, controls, poses')
-            episodes.append(Episode(file.resolve(), states, controls, poses, ts, info))
+            episodes.append(Episode(file.resolve(), states, controls, poses, ts, info, ltr=ltr))
         except (OSError, KeyError, ValueError, RuntimeError, TypeError) as exc:
             skipped.append((str(file), str(exc)))
             if strict: raise ValueError(f"Rejected dataset {file}: {exc}") from exc
@@ -137,6 +143,8 @@ class KoopmanWindowDataset(Dataset):
             'future_controls': torch.from_numpy(ep.controls[k:k+t].copy()),
             'target_states': torch.from_numpy(ep.states[k:k+t+1].copy()),
             'target_poses': torch.from_numpy(ep.poses[k:k+t+1].copy()),
+            'target_ltr': torch.from_numpy(np.nan_to_num(ep.ltr[k:k+t+1], nan=0.0, posinf=0.0, neginf=0.0).copy()),
+            'ltr_valid': torch.from_numpy(np.isfinite(ep.ltr[k:k+t+1]).copy()),
         }
 
 

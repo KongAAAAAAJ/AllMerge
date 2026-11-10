@@ -43,6 +43,9 @@ class NeuralKoopmanK0(nn.Module):
                                                nn.Linear(hidden_dim, 5))
         nn.init.zeros_(self.decode_correction[-1].weight)
         nn.init.zeros_(self.decode_correction[-1].bias)
+        # Independently supervised LTR head. No ground-truth LTR is passed at inference.
+        self.ltr_head = nn.Sequential(nn.Linear(latent_dim, hidden_dim), nn.SiLU(),
+                                      nn.Linear(hidden_dim, 1))
 
     def normalize_state(self, states):
         return (states - self.state_mean) / self.state_std
@@ -84,9 +87,26 @@ class NeuralKoopmanK0(nn.Module):
         stack = torch.stack(zs, dim=1)
         return self.decode(stack), stack
 
+    def decode_ltr(self, latent):
+        """LTR prediction [B,T]. Requires a supervised LTR head."""
+        return torch.tanh(self.ltr_head(latent).squeeze(-1))
+
+    def predict_all(self, state_hist, control_hist, future_controls, initial_pose=None, dt=0.1):
+        """Unified K0/K1/K2-ready inference contract: [B,H+1,5], [B,H+1], [B,H+1,3].
+
+        `pose` is returned only when an initial world pose is supplied; no
+        TruckSim measurements beyond the initial observation are used.
+        """
+        states, latent = self.forward(state_hist, control_hist, future_controls)
+        result = {"states":states, "ltr":self.decode_ltr(latent), "latent":latent}
+        if initial_pose is not None:
+            result["pose"] = rollout_pose(states, initial_pose, dt)
+        return result
+
     def settings(self):
         return {"history_steps": self.history_steps, "latent_dim": self.latent_dim,
-                "hidden_dim": self.hidden_dim}
+                "hidden_dim": self.hidden_dim,
+                "output_ltr": True}
 
 
 def rollout_pose(states, initial_pose, dt):

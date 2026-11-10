@@ -1,7 +1,6 @@
-"""K0-only training, episode-held-out validation, and atomic checkpoints.
+"""Paper K0 training: episode-held-out validation, LTR supervision and checkpoints.
 
-No imports from TruckSim or the active collector. Stage B-1 does not perform
-standalone test-set evaluation; that belongs to Stage B-2.
+Does not load the TruckSim DLL or modify the running collector.
 """
 from __future__ import annotations
 
@@ -36,11 +35,11 @@ def load_config(filename):
         if not isinstance(cfg.get(name), dict):
             raise ValueError(f'Missing K0 config section {name}')
     if str(cfg['model'].get('type', 'K0')).upper() != 'K0':
-        raise ValueError('Stage B-1 supports K0 only')
+        raise ValueError('Koopman paper K0 trainer only supports model.type=K0')
     if abs(float(cfg['data'].get('dt_s', .1)) - .1) > 1e-8:
         raise ValueError('Current collected data and 4s horizon use 10Hz (dt_s=0.1)')
     if int(cfg['data'].get('horizon_steps', 40)) != 40:
-        raise ValueError('Stage B-1 acceptance uses 4s/40-step rollout')
+        raise ValueError('Koopman paper evaluation requires 4s/40-step rollout')
     return cfg
 
 
@@ -74,7 +73,10 @@ def make_dataset(episodes, cfg, stride):
 
 
 def loss_parts(model, batch, cfg):
-    states, _ = model(batch['state_hist'], batch['control_hist'], batch['future_controls'])
+    pred = model.predict_all(batch['state_hist'], batch['control_hist'],
+                             batch['future_controls'],batch['target_poses'][:,0],
+                             dt=float(cfg['data'].get('dt_s',.1)))
+    states, latent = pred['states'], pred['latent']
     target = batch['target_states']
     residual = (states - target) / model.state_std
     smooth = torch.nn.functional.smooth_l1_loss
@@ -82,8 +84,7 @@ def loss_parts(model, batch, cfg):
     one = smooth(residual[:, 1], zero(residual[:, 1]))
     multi = smooth(residual[:, 1:], zero(residual[:, 1:]))
     recon = smooth(residual[:, 0], zero(residual[:, 0]))
-    xy = rollout_pose(states, batch['target_poses'][:, 0], float(cfg['data'].get('dt_s', .1)))
-    pos_err = (xy[:, 1:, :2] - batch['target_poses'][:, 1:, :2]) / float(cfg['training'].get('position_scale_m', 5.))
+    pos_err = (pred['pose'][:, 1:, :2] - batch['target_poses'][:, 1:, :2]) / float(cfg['training'].get('position_scale_m', 5.))
     traj = smooth(pos_err, zero(pos_err))
     # Regularize toward the initialized near-identity dynamics; no spectral-radius guarantee.
     regularizer = (model.A - .995 * torch.eye(model.latent_dim, device=model.A.device)).square().mean()
@@ -91,6 +92,15 @@ def loss_parts(model, batch, cfg):
     total = (float(w.get('one_step', .2))*one + float(w.get('rollout', 1.))*multi +
              float(w.get('reconstruction', .1))*recon + float(w.get('trajectory', .05))*traj +
              float(w.get('matrix_regularization', 1e-4))*regularizer)
+    # LTR is independently supervised from TruckSim wheel loads.
+    # Invalid labels are masked, never replaced with predicted/truth surrogates.
+    mask = batch['ltr_valid'][:, 1:]
+    if mask.any():
+        ltr_scale = float(cfg['training'].get('ltr_scale', 0.1))
+        if ltr_scale <= 0: raise ValueError('ltr_scale must be positive')
+        ltr_resid = (pred['ltr'][:, 1:][mask] - batch['target_ltr'][:, 1:][mask]) / ltr_scale
+        ltr_loss = smooth(ltr_resid, torch.zeros_like(ltr_resid))
+        total = total + float(w.get('ltr', 0.15)) * ltr_loss
     return total
 
 
@@ -129,8 +139,6 @@ def load_checkpoint(path, device='cpu'):
         ckpt = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
         ckpt = torch.load(path, map_location=device)
-    if ckpt.get('architecture') != 'NeuralKoopmanK0_v1':
-        raise ValueError('Invalid or incompatible K0 checkpoint')
     model = NeuralKoopmanK0(**ckpt['model_kwargs'], **ckpt['normalization'])
     model.load_state_dict(ckpt['model_state'], strict=True)
     return model.to(device).eval(), ckpt
@@ -151,8 +159,11 @@ def train_k0(cfg, project_root, data_root=None, epochs=None, device=None):
     norm = compute_normalization(split['train'])
     kwargs = {'history_steps': int(dc.get('history_steps', 5)),
               'latent_dim': int(cfg['model'].get('latent_dim', 32)),
-              'hidden_dim': int(cfg['model'].get('hidden_dim', 128))}
+              'hidden_dim': int(cfg['model'].get('hidden_dim', 128)),
+              }
     model = NeuralKoopmanK0(**kwargs, **norm).to(device)
+    if not all(np.isfinite(ep.ltr).any() for ep in split['train']+split['val']):
+        raise ValueError('LTR is required for both training and validation; check NPZ ltr10')
     batch_size = int(train_cfg.get('batch_size', 64))
     if batch_size < 1: raise ValueError('batch_size must be >=1')
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -161,7 +172,7 @@ def train_k0(cfg, project_root, data_root=None, epochs=None, device=None):
                               weight_decay=float(train_cfg.get('weight_decay', 1e-5)))
     max_epochs = int(epochs if epochs is not None else train_cfg.get('epochs', 60))
     if max_epochs < 1: raise ValueError('epochs must be >=1')
-    out = resolve_path(project_root, cfg['outputs'].get('checkpoints', 'outputs/koopman/checkpoints/k0'))
+    out = resolve_path(project_root, cfg['outputs'].get('checkpoints', 'outputs/koopman/checkpoints/k0_paper'))
     out.mkdir(parents=True, exist_ok=True)
     report = describe_splits(split, kwargs['history_steps'], 40,
                              float(dc.get('warmup_s', 1.)), int(dc.get('train_stride', 2)), .1)
@@ -177,7 +188,7 @@ def train_k0(cfg, project_root, data_root=None, epochs=None, device=None):
         val_loss = run_epoch(model, val_loader, cfg, device)
         row = {'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss}
         history.append(row)
-        state = {'architecture':'NeuralKoopmanK0_v1', 'model_kwargs':kwargs,
+        state = {'architecture':'NeuralKoopmanK0_Paper_v3', 'model_kwargs':kwargs,
                  'normalization':norm, 'model_state':copy.deepcopy(model.state_dict()),
                  'epoch': epoch, 'train_config':cfg, 'split_manifest':report,
                  'history':copy.deepcopy(history)}
@@ -201,6 +212,7 @@ def train_k0(cfg, project_root, data_root=None, epochs=None, device=None):
             sample['control_hist'].to(device), sample['future_controls'].to(device))
     assert prediction.shape == (sample['state_hist'].shape[0], 41, 5)
     assert latent.shape == (sample['state_hist'].shape[0], 41, kwargs['latent_dim'])
+    assert best_model.decode_ltr(latent).shape == (sample['state_hist'].shape[0], 41)
     print(f'[K0 DONE] best={out/"best.pt"} last={out/"last.pt"} '
           f'prediction={tuple(prediction.shape)}',flush=True)
     return {'best':str(out/'best.pt'), 'last':str(out/'last.pt'),

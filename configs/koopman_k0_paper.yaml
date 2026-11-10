@@ -1,4 +1,4 @@
-# Stage B-1 ONLY. Keep configs/koopman.yaml UNMODIFIED during TruckSim collection.
+# Stage B-2 K0 with supervised LTR. Keep configs/koopman.yaml UNMODIFIED during TruckSim collection.
 # Path is relative to AllMerge-main project root (all_merge/ on your machine).
 # Set roots to the *current* accepted collection output to avoid mixed runs.
 data:
@@ -30,12 +30,14 @@ training:
   grad_clip: 1.0
   patience: 20
   position_scale_m: 5.0
+  ltr_scale: 0.1             # LTR regression normalization (NOT physical threshold)
   loss_weights:
     one_step: 0.2
     rollout: 1.0
     reconstruction: 0.1
     trajectory: 0.05
+    ltr: 0.15
     matrix_regularization: 0.0001
 
 outputs:
-  checkpoints: outputs/koopman/checkpoints/k0
+  checkpoints: outputs/koopman/checkpoints/k0_paper
