@@ -86,7 +86,7 @@ reference_controller:
 
 batch:
   output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1'
-  seeds: [0, 1]
+  seeds: [0, 1]  # 数据规模：一个seed对应 7个初始速度档位 * 7个附着系数档位 * 9个载荷档位 * 5个激励模式 = 2205 runs
   timeout_s_per_run: 120.0
   max_solver_steps_per_run: 100000
   plot_first_per_pattern: true
