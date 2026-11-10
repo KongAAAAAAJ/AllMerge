@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+from itertools import product
 import json
 import os
 import re
@@ -81,7 +82,7 @@ def _tier_table(trucksim, key):
 
 
 def mapped_models(cfg, model_id=None, speed_tier=None):
-    """Explicit 3D mapping (payload tier, friction tier, initial-speed tier) -> .sim/.dll.
+    """Resolve explicit or template-based payload/friction/speed model mappings.
 
     Operators configure and verify all physics in TruckSim. Python sets SV_VXS
     from the mapped speed tier at startup; it does not change load or friction.
@@ -94,6 +95,42 @@ def mapped_models(cfg, model_id=None, speed_tier=None):
     if speed_tier is not None and speed_tier not in speed_levels:
         raise ValueError(f"Unknown speed tier: {speed_tier}")
     models = trucksim.get("models", [])
+    if isinstance(models, dict):
+        defaults = models.get("defaults", {})
+        overrides = models.get("overrides", {})
+        if not isinstance(defaults, dict) or not isinstance(overrides, dict):
+            raise ValueError("Model defaults and overrides must be mappings")
+        templates = {}
+        for key in ("id", "simfile", "dll"):
+            template = models.get(f"{key}_template")
+            if not isinstance(template, str) or not template.strip():
+                raise ValueError(f"trucksim.models.{key}_template must be a nonempty string")
+            templates[key] = template
+        expanded = []
+        generated_ids = set()
+        for p, f, v in product(payload_levels, friction_levels, speed_levels):
+            fields = {"payload_tier": p, "friction_tier": f, "speed_tier": v}
+            try:
+                mid = templates["id"].format(**fields)
+                fields["id"] = mid
+                item = dict(defaults)
+                item.update(fields)
+                for key in ("simfile", "dll"):
+                    item[key] = templates[key].format(**fields)
+            except (KeyError, IndexError, ValueError, AttributeError) as exc:
+                raise ValueError(f"Invalid TruckSim model template: {exc}") from exc
+            override = overrides.get(mid, {})
+            if not isinstance(override, dict):
+                raise ValueError(f"Model override {mid} must be a mapping")
+            if set(override) & {"id", "payload_tier", "friction_tier", "speed_tier"}:
+                raise ValueError(f"Model override {mid} cannot change generated identity or tiers")
+            item.update(override)
+            generated_ids.add(mid)
+            expanded.append(item)
+        unknown = set(overrides) - generated_ids
+        if unknown:
+            raise ValueError(f"Unknown model override ids: {sorted(unknown, key=str)}")
+        models = expanded
     if not isinstance(models, list) or not models:
         raise ValueError("trucksim.models must contain at least one .sim/.dll model")
     seen_ids, seen_conditions, seen_sim, seen_dll = set(), set(), set(), set()
