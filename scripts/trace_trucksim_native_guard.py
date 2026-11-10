@@ -71,10 +71,9 @@ def frame_for(ctype, n: int, name: str):
 def guarded_ReadConfiguration(self, path):
     _COUNTS["ReadConfiguration"] += 1
     items = [
-        frame_for(ctypes.c_int32, 1, "vs_read_configuration.n_import"),
-        # Keep the current project's c_int64 assumption until verified
-        # against the exact TruckSim 2016.1 SDK header.
-        frame_for(ctypes.c_int64, 1, "vs_read_configuration.n_export"),
+        frame_for(ctypes.c_int, 1, "vs_read_configuration.n_import"),
+        # TruckSim 2016 SDK: both parameters are int* (not long long*).
+        frame_for(ctypes.c_int, 1, "vs_read_configuration.n_export"),
         frame_for(ctypes.c_double, 1, "vs_read_configuration.t_start"),
         frame_for(ctypes.c_double, 1, "vs_read_configuration.t_stop"),
         frame_for(ctypes.c_double, 1, "vs_read_configuration.t_step"),
@@ -166,7 +165,7 @@ def main():
     p.add_argument("--no-plot", action="store_true", help="A/B isolation: disable post-run matplotlib for this diagnostic")
     p.add_argument("--duration-s", type=float, help="Diagnostic duration override; reference fingerprint is recomputed")
     p.add_argument("--persistent-buffers", action="store_true", help="Reuse pinned C input/output buffers for entire VS session")
-    p.add_argument("--native-terminate", action="store_true", help="EXPERIMENTAL: call native vs_terminate_run after successful integration")
+    p.add_argument("--native-terminate", action="store_true", help="Compatibility flag; patched worker always requires native vs_terminate_run")
     args = p.parse_args()
     if args.self_test:
         self_test()
@@ -179,13 +178,11 @@ def main():
     global PERSISTENT_BUFFERS
     PERSISTENT_BUFFERS = bool(args.persistent_buffers)
     from highway_env.vehicle.trucksim_simulation import Simulation
+    # The patched production Worker now enforces normal SDK termination.
+    # Keep --native-terminate for compatibility with previously documented
+    # commands; no monkeypatch is needed to enable it.
     if args.native_terminate:
-        from highway_env.vehicle.trucksim_simulation.Trucksim_Simulation_ltr import TrucksimSimulationLTR
-        original_stop = TrucksimSimulationLTR.stop
-        def force_native_terminate(self, t_current=None, *, native_terminate=True):
-            log("Calling real vs_terminate_run; if this crashes, inspect exact SDK ABI")
-            return original_stop(self, t_current, native_terminate=True)
-        TrucksimSimulationLTR.stop = force_native_terminate
+        log("SDK-corrected worker uses normal native termination (strict mode)")
     # Monkeypatch only this diagnostic process, not the production files.
     cls = Simulation.VehicleSimulation
     cls.ReadConfiguration = guarded_ReadConfiguration
@@ -206,7 +203,7 @@ def main():
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     log(f"process pid={os.getpid()} model={job.get('model_id')} job={job.get('id')}")
-    log(f"Guarded VS API buffers active; persistent={PERSISTENT_BUFFERS}; native_terminate={args.native_terminate}; NO os._exit; NO production files changed")
+    log(f"Guarded VS API buffers active; persistent={PERSISTENT_BUFFERS}; native_terminate=required; NO os._exit; NO production files changed")
     started = time.monotonic()
     result = run_worker(cfg, job, out)
     log(f"Worker returned: {result}; API counts={_COUNTS}; wall_s={time.monotonic()-started:.2f}")

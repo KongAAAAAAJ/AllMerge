@@ -89,7 +89,9 @@ class TrucksimSimulationLTR:
             raise FileNotFoundError(self.dll_path)
         if not os.path.isfile(self.simfile_path):
             raise FileNotFoundError(self.simfile_path)
-        handle = ctypes.WinDLL(self.dll_path)
+        # VS SDK 2016 declares every API entry point with __cdecl.
+        # WinDLL uses stdcall on 32-bit Windows; use CDLL for the declared ABI.
+        handle = ctypes.CDLL(self.dll_path)
         if not self.vs.get_api(handle):
             raise RuntimeError('TruckSim DLL does not expose the required VS API')
         self._dll_ready = True

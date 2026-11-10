@@ -1,8 +1,9 @@
 """TruckSim reference-command collection with one isolated subprocess per run for TRACE.
 
-IMPORTANT: Every run gets its own Python child process. User's TruckSim 2016
-DLL has crashed in vs_terminate_run, so worker deliberately avoids native
-termination and NEVER tries to start another solver in that child process.
+Each trajectory runs in a separate Python child process. The batch parent
+loads the fixed engine calibration CSV exactly once and passes its numeric
+matrix to workers in their job requests. SDK solver termination is mandatory.
+No memory-corruption workaround is used.
 """
 from __future__ import annotations
 
@@ -398,16 +399,53 @@ def excitation_fingerprint(cfg, pattern, seed):
     return hashlib.sha256(np.round(u, 12).astype('<f8').tobytes()).hexdigest()
 
 
+def _validated_engine_map(value):
+    """A calibrated, finite RPM x 11-throttle map held in one NumPy array."""
+    data = np.asarray(value, dtype=np.float64)
+    if data.ndim != 2 or data.shape[0] < 2 or data.shape[1] != 12 or not np.isfinite(data).all():
+        raise ValueError("Engine map must have >=2 RPM rows and 12 columns, all finite")
+    if np.any(np.diff(data[:, 0]) <= 0):
+        raise ValueError("Engine map RPM rows must be strictly increasing")
+    data = np.ascontiguousarray(data)
+    data.setflags(write=False)
+    return data
+
+
+def _engine_map_sha256(data):
+    """Stable checksum of calibrated numeric values, independent of CSV formatting."""
+    canonical = np.asarray(data, dtype='<f8', order='C')
+    return hashlib.sha256(canonical.tobytes(order='C')).hexdigest()
+
+
+def load_engine_map_for_collection(config):
+    """Parse the shared engine CSV once in collect_batch, before starting workers.
+
+    A worker launched by collect_batch receives the parsed values in its job JSON
+    and therefore does not open the CSV. Direct standalone worker invocations
+    without a batch job payload parse the CSV once before loading TruckSim.
+    No import from trucksim_dynamics.py (which pulls in the simulator/SciPy).
+    """
+    path = config.get('engine_map_path')
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / 'trucksim_simulation' / 'engine_map_4455kg.csv'
+    else:
+        path = Path(path)
+        if not path.is_absolute():
+            # Relative paths in configs/koopman.yaml are relative to all_merge/.
+            path = Path(__file__).resolve().parents[3] / path
+    data = _validated_engine_map(np.loadtxt(path, delimiter=',', skiprows=1))
+    return data
+
+
 class ReferenceActuator:
     """Map [ax_ref, delta_ref] to native TruckSim actuation via existing controllers.
 
     Calibration must cover vehicle mass, engine map, steering ratio and gains.
     """
 
-    def __init__(self, cfg, units, dt):
+    def __init__(self, cfg, units, dt, engine_map=None):
         from highway_env.vehicle.trucksim_simulation.low_controller import (
             PIDController, acceleration_control, LateralSteeringController)
-        from highway_env.vehicle.trucksim_dynamics import load_engine_map
         c = cfg
         lat = c["lateral"]
         self.low = PIDController(**c["longitudinal_pid"], dt=dt)
@@ -418,7 +456,12 @@ class ReferenceActuator:
             max_rate_deg_s=lat["max_rate_deg_s"],
             steering_tau_s=lat["steering_tau_s"])
         self.acceleration_control = acceleration_control
-        self.engine_map = load_engine_map({"engine_map_path": c.get("engine_map_path")})
+        # The batch parent parses the CSV once. Every worker receives in-memory
+        # calibration values; the control loop must never do file I/O.
+        self.engine_map = _validated_engine_map(
+            engine_map if engine_map is not None else
+            load_engine_map_for_collection({"engine_map_path": c.get("engine_map_path")})
+        )
         self.max_rpm = float(c["max_rpm"])
         self.ctrl_state = "throttle"
         self.units = units
@@ -462,6 +505,26 @@ def run_worker(cfg, run, output_dir):
     fingerprint = excitation_fingerprint(cfg["excitation"], run["pattern"], run["seed"])
     if run.get("excitation_sha256", fingerprint) != fingerprint:
         raise RuntimeError(f"Run {run['id']} excitation settings changed since scheduling")
+    # Decode the calibration sent by the batch parent. No engine CSV reads in
+    # batch workers; direct standalone worker calls fall back to one CSV load.
+    serialized_map = run.get("engine_map_values")
+    if serialized_map is not None:
+        engine_map = _validated_engine_map(serialized_map)
+        expected_map_sha = run.get("engine_map_sha256")
+        if not expected_map_sha or _engine_map_sha256(engine_map) != expected_map_sha:
+            raise RuntimeError("Engine map checksum mismatch in worker request")
+        map_origin = "batch_parent_once"
+    else:
+        engine_map = load_engine_map_for_collection(cfg["reference_controller"])
+        expected_map_sha = _engine_map_sha256(engine_map)
+        map_origin = "standalone_worker_once"
+    # Construct all controller dependencies BEFORE loading the TruckSim DLL.
+    # Avoid importing trucksim_dynamics -> controller -> SciPy during solver use.
+    ctrl_dt = float(cfg["excitation"]["controller_dt_s"])
+    controller = ReferenceActuator(cfg["reference_controller"], cfg["units"],
+                                   ctrl_dt, engine_map=engine_map)
+    print(f"[WORKER] Controller ready; engine map={map_origin}, sha256={expected_map_sha[:12]}; "
+          f"native DLL not loaded yet: {run['id']}", flush=True)
     sim = TrucksimSimulationLTR(model["simfile"], model["dll"])
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -472,8 +535,10 @@ def run_worker(cfg, run, output_dir):
     us_native = []
     us_reference = []
     try:
+        print(f"[WORKER] Native TruckSim start: {run['id']}", flush=True)
         sim.start({"vx_init": conditions["vx_init_kmh"]})
         started = True
+        print(f"[WORKER] Native TruckSim initialized: {run['id']}", flush=True)
         nc = int(sim.configuration["n_import"])
         ne = int(sim.configuration["n_export"])
         if nc != 3 or ne != 19:
@@ -496,7 +561,6 @@ def run_worker(cfg, run, output_dir):
             raise ValueError(f"Invalid duration: tstop={tstop}, t0={t0}")
         if nsteps > int(cfg["batch"].get("max_solver_steps_per_run", 100000)):
             raise ValueError("Exceeded configured maximum solver steps")
-        controller = ReferenceActuator(cfg["reference_controller"], cfg["units"], ctrl_dt)
         x = np.asarray(sim.get_export_array(), dtype=float)
         if x.shape != (19,) or not np.isfinite(x).all():
             raise ValueError("Bad initial TruckSim exports")
@@ -538,6 +602,11 @@ def run_worker(cfg, run, output_dir):
             raise RuntimeError("Invalid wheel loads or undefined LTR; verify wheel load sign")
         processed = resample(times, st, pose, ltr, native, refs,
                              dt=float(cfg["excitation"]["target_dt_s"]))
+        # IMPORTANT: Shutdown must succeed BEFORE any file is marked train-eligible.
+        # Keep the trajectory in memory until the real solver termination returns.
+        print(f"[WORKER] Native TruckSim terminate: {run['id']}", flush=True)
+        sim.stop(native_terminate=True)
+        print(f"[WORKER] Native TruckSim terminated: {run['id']}", flush=True)
         path = out / (run["id"] + ".npz")
         np.savez_compressed(path,
             t_raw_s=times, trucksim_raw=raw, u_native_raw=native, u_ref_raw_si=refs,
@@ -570,6 +639,8 @@ def run_worker(cfg, run, output_dir):
             "run_id": run["id"], "model_id": model["id"],
             "pattern": run["pattern"], "seed": run["seed"],
             "excitation_sha256": fingerprint,
+            "engine_map_sha256": expected_map_sha,
+            "engine_map_source": map_origin,
             "excitation_config": cfg["excitation"],
             "mode": mode, "train_eligible": True,
             "duration_actual_s": float(times[-1]-times[0]),
@@ -608,8 +679,9 @@ def run_worker(cfg, run, output_dir):
         return result
     finally:
         if started and sim.is_running:
-            # NEVER call crashing native termination from this one-run child process.
-            sim.stop(native_terminate=False)
+            # Attempt SDK shutdown during an abnormal Python path as well.
+            # The worker remains failed if this native call raises or faults.
+            sim.stop(native_terminate=True)
 
 
 def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, speed_tier=None):
@@ -632,12 +704,21 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
                   "sha256=", run["excitation_sha256"][:12], "dll=", m["dll"])
         return []
     output.mkdir(parents=True, exist_ok=True)
+    # One CSV parse for the ENTIRE sequential batch; make the small 2D table
+    # part of each worker request so independent processes do not parse CSV.
+    batch_engine_map = load_engine_map_for_collection(cfg["reference_controller"])
+    engine_map_values = batch_engine_map.tolist()
+    engine_map_sha256 = _engine_map_sha256(batch_engine_map)
+    print(f"[ENGINE MAP] CSV parsed once for {len(jobs)} runs; "
+          f"shape={batch_engine_map.shape}, sha256={engine_map_sha256[:12]}", flush=True)
     # File signatures alone cannot capture linked TruckSim .par contents;
     # operator verifies every .sim and its referenced parameters manually.
     signatures = {mid: model_signature(m) for mid, m in models.items()}
     batch_name = model_id if model_id is not None else (f"speed_{speed_tier}" if speed_tier else "all")
     json_write(output / f"batch_config_{batch_name}.json", {
         "config": cfg, "model_signatures_before": signatures,
+        "engine_map_sha256": engine_map_sha256,
+        "engine_map_rows": len(batch_engine_map),
         "resolved_models": {mid: model_condition(m) for mid, m in models.items()},
         "runs": jobs})
     script = Path(project_root) / "scripts" / "run_koopman.py"
@@ -659,6 +740,8 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
         job = dict(job)
         job["expected_signature"] = signatures[job["model_id"]]
         job["expected_condition"] = model_condition(models[job["model_id"]])
+        job["engine_map_values"] = engine_map_values
+        job["engine_map_sha256"] = engine_map_sha256
         job["plot"] = bool(cfg["batch"].get("plot_first_per_pattern", False)) and (
             int(job["seed"]) == int(cfg["batch"]["seeds"][0]))
         job_file = output / (job["id"] + ".request.json")

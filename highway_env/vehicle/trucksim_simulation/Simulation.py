@@ -30,11 +30,11 @@ class VehicleSimulation:
 
             dll_handle.vs_read_configuration.argtypes = [
                 ctypes.c_char_p,
-                ctypes.POINTER(ctypes.c_int32),
-                ctypes.POINTER(ctypes.c_int64),
+                ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int),
                 ctypes.POINTER(ctypes.c_double),
                 ctypes.POINTER(ctypes.c_double),
-                ctypes.POINTER(ctypes.c_double)
+                ctypes.POINTER(ctypes.c_double),
             ]
             dll_handle.vs_read_configuration.restype = None
 
@@ -51,7 +51,7 @@ class VehicleSimulation:
             dll_handle.vs_terminate_run.argtypes = [ctypes.c_double]
             dll_handle.vs_terminate_run.restype = None
 
-            dll_handle.vs_set_sym_real.argtypes = [ctypes.c_char_p, ctypes.c_double]
+            dll_handle.vs_set_sym_real.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double]
             dll_handle.vs_set_sym_real.restype = ctypes.c_int
 
             dll_handle.vs_statement.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
@@ -162,11 +162,11 @@ class VehicleSimulation:
         platform = sys.platform
         if path_to_sim_file_ptr is not None:
             if platform == 'linux':
-              ref_n_import = ctypes.c_long()
-              ref_n_export = ctypes.c_longlong()
+              ref_n_import = ctypes.c_int()
+              ref_n_export = ctypes.c_int()
             else:
-              ref_n_import = ctypes.c_int32()
-              ref_n_export = ctypes.c_int64()
+              ref_n_import = ctypes.c_int()
+              ref_n_export = ctypes.c_int()
             ref_t_start = ctypes.c_double()
             ref_t_stop = ctypes.c_double()
             ref_t_step = ctypes.c_double()
