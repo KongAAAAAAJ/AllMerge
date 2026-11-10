@@ -51,6 +51,12 @@ class VehicleSimulation:
             dll_handle.vs_terminate_run.argtypes = [ctypes.c_double]
             dll_handle.vs_terminate_run.restype = None
 
+            # VS SDK 2016 external-simulation shutdown API.
+            dll_handle.vs_terminate.argtypes = [ctypes.c_double, ctypes.c_void_p]
+            dll_handle.vs_terminate.restype = None
+            dll_handle.vs_free_all.argtypes = []
+            dll_handle.vs_free_all.restype = None
+
             dll_handle.vs_set_sym_real.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_double]
             dll_handle.vs_set_sym_real.restype = ctypes.c_int
 
@@ -220,6 +226,15 @@ class VehicleSimulation:
         t_c_double = ctypes.c_double(t)
         # print("vs_terminate_run ptr:", hex(ctypes.cast(self.dll_handle.vs_terminate_run, ctypes.c_void_p).value))
         self.dll_handle.vs_terminate_run(t_c_double)
+
+    def TerminateExternal(self, t):
+        """VS SDK 2016 external integration cleanup; see vs_api.h.
+
+        Matched to vs_setdef_and_read() + vs_initialize() with NULL callbacks.
+        Never retry an already faulted native cleanup.
+        """
+        self.dll_handle.vs_terminate(ctypes.c_double(float(t)), None)
+        self.dll_handle.vs_free_all()
 
     def Statement(self, keyword: str, rest_of_line: str, stop_error: int = 1) -> int:
         """

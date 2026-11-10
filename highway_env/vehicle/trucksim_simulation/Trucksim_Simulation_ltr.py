@@ -188,7 +188,8 @@ class TrucksimSimulationLTR:
         self.is_running = False
         if should_terminate:
             try:
-                self.vs.TerminateRun(
+                # VS SDK 2016 external solver lifecycle: terminate + free_all.
+                self.vs.TerminateExternal(
                     self.current_time if t_current is None else t_current)
             except BaseException:
                 self._abandoned_native_session = True

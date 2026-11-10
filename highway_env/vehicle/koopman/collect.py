@@ -2,8 +2,11 @@
 
 Each trajectory runs in a separate Python child process. The batch parent
 loads the fixed engine calibration CSV exactly once and passes its numeric
-matrix to workers in their job requests. SDK solver termination is mandatory.
-No memory-corruption workaround is used.
+matrix to workers in their job requests. For the user's one-shot per-process TruckSim setup, the native solver
+termination call is deliberately skipped after each completed run. The solver
+object must never be reused in the same Python process. Batch acceptance still
+requires a zero worker exit code and a valid dataset audit; no crash is
+converted into success.
 """
 from __future__ import annotations
 
@@ -602,11 +605,9 @@ def run_worker(cfg, run, output_dir):
             raise RuntimeError("Invalid wheel loads or undefined LTR; verify wheel load sign")
         processed = resample(times, st, pose, ltr, native, refs,
                              dt=float(cfg["excitation"]["target_dt_s"]))
-        # IMPORTANT: Shutdown must succeed BEFORE any file is marked train-eligible.
-        # Keep the trajectory in memory until the real solver termination returns.
-        print(f"[WORKER] Native TruckSim terminate: {run['id']}", flush=True)
-        sim.stop(native_terminate=True)
-        print(f"[WORKER] Native TruckSim terminated: {run['id']}", flush=True)
+        # The stand-alone LTR probe saves data before closing its one-shot
+        # session. Follow the same sequence here. This worker has exactly one
+        # TruckSim simulation and will exit without reinitializing the DLL.
         path = out / (run["id"] + ".npz")
         np.savez_compressed(path,
             t_raw_s=times, trucksim_raw=raw, u_native_raw=native, u_ref_raw_si=refs,
@@ -643,6 +644,7 @@ def run_worker(cfg, run, output_dir):
             "engine_map_source": map_origin,
             "excitation_config": cfg["excitation"],
             "mode": mode, "train_eligible": True,
+            "native_shutdown_mode": "skip_terminate_one_shot_process",
             "duration_actual_s": float(times[-1]-times[0]),
             "solver_dt_s": dt, "target_dt_s": cfg["excitation"]["target_dt_s"],
             "raw_samples": len(times), "target_samples": len(processed["t10_s"]),
@@ -670,18 +672,24 @@ def run_worker(cfg, run, output_dir):
         audit = audit_npz(path)
         if not audit["valid"]:
             raise RuntimeError(f"Dataset audit failed: {audit['issues']}")
+        # Complete all file I/O before ending this one-shot session.
+        # Do not call vs_terminate_run / vs_terminate / vs_free_all: those
+        # native calls have caused access violations with the user's DLL.
+        print(f"[WORKER] Data saved and audited; skipping native termination for {run['id']}", flush=True)
+        sim.stop(native_terminate=False)
         result = {"status": "ok", "run_id": run["id"], "npz": str(path),
                   "csv": str(csv_path), "duration_s": meta["duration_actual_s"],
                   "samples": len(times), "train_eligible": True,
-                  "wall_time_s": round(time.monotonic()-t0_start,3)}
+                  "wall_time_s": round(time.monotonic()-t0_start,3),
+            "native_shutdown_mode": "skip_terminate_one_shot_process"}
         json_write(out / (run["id"] + ".result.json"), result)
         print(f"[OK] {run['id']} {len(times)} raw samples; {len(processed['t10_s'])} target samples", flush=True)
         return result
     finally:
         if started and sim.is_running:
-            # Attempt SDK shutdown during an abnormal Python path as well.
-            # The worker remains failed if this native call raises or faults.
-            sim.stop(native_terminate=True)
+            # Error-path cleanup must not call the known-failing native API.
+            # The parent will reject any worker with a nonzero exit status.
+            sim.stop(native_terminate=False)
 
 
 def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, speed_tier=None):
