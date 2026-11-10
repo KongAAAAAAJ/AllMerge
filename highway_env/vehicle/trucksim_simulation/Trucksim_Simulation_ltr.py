@@ -396,8 +396,10 @@ def main():
     # ================== Only edit these parameters ==================
     # Use paths to the NEW combined longitudinal/lateral TruckSim model.
     # The examples below match the old Truck_Simulation.py project layout.
-    simfile = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\truck_1_lon_lat.sim'
-    dll = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\s_s_1.dll'
+    # simfile = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\truck_1_lon_lat.sim'
+    # dll = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\s_s_1.dll'
+    simfile = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L0_MU08_V60.sim'
+    dll = r'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L0_MU08_V60.dll'
 
     vx_init_kmh = 60.0         # TruckSim SV_VXS, km/h; None = use .sim initial speed
     throttle = 0.0             # Expected TruckSim import 0

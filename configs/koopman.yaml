@@ -1,0 +1,150 @@
+# TRACE Koopman truck collection V4: payload x friction x initial-speed grid.
+# All .sim/.dll paths are placeholders. Confirm in TruckSim before enabling.
+# Native: throttle [%], brake [MPa], steering wheel [deg].
+# TruckSim exports: ax/ay [g], vx/vy [km/h], angles [deg], angular velocity [deg/s],
+# AV_Eng [rpm], loads [N]. Internally save training states and references in SI.
+trucksim:
+  payload_tiers_kg: {L0: 5000.0, L1: 8000.0}  # example ADDITIONAL payloads; edit
+  friction_tiers: {MU08: 0.8, MU05: 0.5}    # example, edit
+  speed_tiers_kmh: {V60: 60.0, V80: 80.0} # first verification: two initial-speed tiers
+  initial_speed_tolerance_kmh: 2.0        # check actual initial vx after TruckSim start
+  # Each enabled (payload_tier, friction_tier, speed_tier) needs separate .sim and .dll.
+  # Python sets initial SV_VXS using the mapped speed; load and road_mu are
+  # manually set in the corresponding TruckSim vehicle model.
+  require_complete_grid: false
+  models:
+    - id: L0_MU08_V60
+      enabled: true
+      payload_tier: L0
+      friction_tier: MU08
+      speed_tier: V60
+      simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L0_MU08_V60.sim'
+      dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L0_MU08_V60.dll'
+      verified_in_trucksim: true
+    # - id: L0_MU08_V80
+    #   enabled: false
+    #   payload_tier: L0
+    #   friction_tier: MU08
+    #   speed_tier: V80
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L0_MU08_V80.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L0_MU08_V80.dll'
+    #   verified_in_trucksim: false
+    # - id: L0_MU05_V60
+    #   enabled: false
+    #   payload_tier: L0
+    #   friction_tier: MU05
+    #   speed_tier: V60
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L0_MU05_V60.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L0_MU05_V60.dll'
+    #   verified_in_trucksim: false
+    # - id: L0_MU05_V80
+    #   enabled: false
+    #   payload_tier: L0
+    #   friction_tier: MU05
+    #   speed_tier: V80
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L0_MU05_V80.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L0_MU05_V80.dll'
+    #   verified_in_trucksim: false
+    # - id: L1_MU08_V60
+    #   enabled: false
+    #   payload_tier: L1
+    #   friction_tier: MU08
+    #   speed_tier: V60
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L1_MU08_V60.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L1_MU08_V60.dll'
+    #   verified_in_trucksim: false
+    # - id: L1_MU08_V80
+    #   enabled: false
+    #   payload_tier: L1
+    #   friction_tier: MU08
+    #   speed_tier: V80
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L1_MU08_V80.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L1_MU08_V80.dll'
+    #   verified_in_trucksim: false
+    # - id: L1_MU05_V60
+    #   enabled: false
+    #   payload_tier: L1
+    #   friction_tier: MU05
+    #   speed_tier: V60
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L1_MU05_V60.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L1_MU05_V60.dll'
+    #   verified_in_trucksim: false
+    # - id: L1_MU05_V80
+    #   enabled: false
+    #   payload_tier: L1
+    #   friction_tier: MU05
+    #   speed_tier: V80
+    #   simfile: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\L1_MU05_V80.sim'
+    #   dll: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\L1_MU05_V80.dll'
+    #   verified_in_trucksim: false
+
+units:
+  velocity: 'km/h'
+  position: 'm'         # verify Xo/Yo exported units on local model
+  engine_speed: 'rpm'
+  wheel_compression_sign: 1
+
+excitation:
+  mode: reference       # no direct actuation in training collection
+  patterns: [sine]  # [step, sine, chirp, prbs, combined]
+  duration_s: 5.0
+  warmup_s: 1.0
+  controller_dt_s: 0.1
+  target_dt_s: 0.1
+  reference:
+    ax_max_mps2: 0.7
+    front_steer_max_deg: 1.2
+  # All excitation shape parameters are configurable here.
+  # Step and chirp explicitly use seeded variations, avoiding V3 duplicate-seed signals.
+  pattern_params:
+    step:
+      period_s: 3.0
+      transition_s: 0.5
+      level_jitter: 0.06
+      levels: [[0.55, 0.0], [0.0, 0.60], [-0.55, -0.60], [0.35, 0.25]]
+    sine:
+      ax_frequency_hz: 0.12
+      steer_frequency_hz: 0.33
+      ax_scale: 0.75
+      steer_scale: 0.65
+    chirp:
+      start_frequency_hz: 0.05
+      frequency_slope_hz_per_s: 0.04
+      ax_scale: 0.55
+      steer_scale: 0.70
+    prbs:
+      period_s: 1.2
+      transition_s: 0.35
+      ax_scale: 0.55
+      steer_scale: 0.55
+    combined:
+      ax_frequencies_hz: [0.11, 0.26]
+      ax_scales: [0.48, 0.35]
+      steer_frequencies_hz: [0.15, 0.43]
+      steer_scales: [0.50, 0.30]
+      clip: 0.85
+
+reference_controller:
+  confirmed_calibrated: true  # enable after low-level reference tracking is verified
+  engine_map_path: null
+  max_rpm: 3000
+  throttle_limit_pct: 35.0
+  brake_limit_mpa: 2.0
+  longitudinal_pid: {kp: 12.0, ki: 12.0, kd: 0.15}
+  lateral:
+    steering_ratio: 25.0
+    kp: 0.3
+    ki: 0.0
+    kd: 0.0
+    max_wheel_deg: 100.0
+    max_rate_deg_s: 180.0
+    steering_tau_s: 0.0
+
+batch:
+  output_dir: 'outputs/koopman/data/sdk2016_smoke_01'
+  seeds: [0]
+  timeout_s_per_run: 120.0
+  max_solver_steps_per_run: 100000
+  plot_first_per_pattern: true
+  stop_on_error: true
+  allow_overwrite: false
