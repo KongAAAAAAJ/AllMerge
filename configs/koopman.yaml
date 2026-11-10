@@ -67,8 +67,8 @@ excitation:
   controller_dt_s: 0.1
   target_dt_s: 0.1
   reference:
-    ax_max_mps2: 0.7
-    front_steer_max_deg: 1.2
+    ax_max_mps2: 2
+    front_steer_max_deg: 30.0
   # All excitation shape parameters are configurable here.
   # Step and chirp explicitly use seeded variations, avoiding V3 duplicate-seed signals.
   pattern_params:
@@ -116,8 +116,8 @@ reference_controller:
     steering_tau_s: 0.0
 
 batch:
-  output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1_episode_random_v2'
-  seeds: [0, 1]  # 数据规模：一个seed对应 7个初始速度档位 * 7个附着系数档位 * 9个载荷档位 * 5个激励模式 = 2205 runs
+  output_dir: 'outputs/koopman/data/v0'
+  seeds: [0, 1, 2, 3, 4]  # 数据规模：一个seed对应 7个初始速度档位 * 7个附着系数档位 * 9个载荷档位 * 5个激励模式 = 2205 runs
   timeout_s_per_run: 120.0
   max_solver_steps_per_run: 100000
   plot_first_per_pattern: true
