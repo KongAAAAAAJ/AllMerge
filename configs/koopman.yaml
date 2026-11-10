@@ -29,6 +29,37 @@ units:
   wheel_compression_sign: 1
 
 excitation:
+  # Each episode (physical model + SV_VXS speed + waveform + user seed) is unique.
+  # The RNG is deterministic and sampled only once before TruckSim starts.
+  seed_scope: per_episode
+  randomized:
+    phase_range_rad: [0.0, 6.283185307179586]
+    step:
+      # Random nominal period, plus independent per-transition relative jitter.
+      period_s: [2.4, 3.6]
+      period_jitter_frac: 0.15
+      level_scale: [0.75, 1.0]
+    sine:
+      ax_frequency_hz: [0.07, 0.32]
+      steer_frequency_hz: [0.10, 0.46]
+      ax_scale: [0.30, 0.85]
+      steer_scale: [0.20, 0.75]
+    chirp:
+      # Longitudinal and lateral channels sample these intervals independently.
+      start_frequency_hz: [0.03, 0.12]
+      frequency_slope_hz_per_s: [0.008, 0.045]
+      ax_scale: [0.30, 0.75]
+      steer_scale: [0.20, 0.70]
+    prbs:
+      period_s: [0.75, 2.00]
+      period_jitter_frac: 0.20
+      amplitude_jitter_frac: 0.20
+      ax_scale: [0.25, 0.70]
+      steer_scale: [0.20, 0.65]
+    combined:
+      # Relative ± jitter around each YAML pattern_params frequency/amplitude.
+      frequency_jitter_frac: 0.30
+      amplitude_jitter_frac: 0.30
   mode: reference       # no direct actuation in training collection
   patterns: [step, sine, chirp, prbs, combined]
   duration_s: 15.0
@@ -85,7 +116,7 @@ reference_controller:
     steering_tau_s: 0.0
 
 batch:
-  output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1'
+  output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1_episode_random_v2'
   seeds: [0, 1]  # 数据规模：一个seed对应 7个初始速度档位 * 7个附着系数档位 * 9个载荷档位 * 5个激励模式 = 2205 runs
   timeout_s_per_run: 120.0
   max_solver_steps_per_run: 100000

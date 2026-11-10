@@ -1,0 +1,94 @@
+# TRACE Koopman: payload x friction physical models, initial speed set per run.
+# All .sim/.dll paths are placeholders. Confirm in TruckSim before enabling.
+# Native: throttle [%], brake [MPa], steering wheel [deg].
+# TruckSim exports: ax/ay [g], vx/vy [km/h], angles [deg], angular velocity [deg/s],
+# AV_Eng [rpm], loads [N]. Internally save training states and references in SI.
+trucksim:
+  payload_tiers_kg: {L0: 0, L1: 875, L2: 1750, L3: 2625, L4: 3500, L5: 4375, L6: 5250, L7: 6125, L8: 7000}  # 载荷分9档
+  friction_tiers: {MU08: 0.8, MU07: 0.7, MU06: 0.6, MU05: 0.5, MU04: 0.4, MU03: 0.3, MU02: 0.2}    # 附着系数分7档
+  speed_tiers_kmh: {V90: 90.0, V85: 85.0, V80: 80.0, V75: 75.0, V70: 70.0, V65: 65.0, V60: 60.0} # 初始速度每隔5km/h，分7档
+  initial_speed_tolerance_kmh: 2.0        # check actual initial vx after TruckSim start
+  # Each (payload_tier, friction_tier) needs one physical .sim/.dll.
+  # Every speed tier shares the same physical model; Worker calls VS Statement
+  # SV_VXS (km/h) after vs_setdef_and_read and BEFORE Initialize().
+  # Payload and road_mu must still be configured and verified in TruckSim.
+  require_complete_grid: false
+  models:
+    # Expand payload x friction ONLY; speed tiers are expanded into runs in Python.
+    id_template: '{payload_tier}_{friction_tier}'
+    simfile_template: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\{id}.sim'
+    dll_template: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\{id}.dll'
+    defaults:
+      enabled: true
+      verified_in_trucksim: true
+
+units:
+  velocity: 'km/h'
+  position: 'm'         # verify Xo/Yo exported units on local model
+  engine_speed: 'rpm'
+  wheel_compression_sign: 1
+
+excitation:
+  mode: reference       # no direct actuation in training collection
+  patterns: [step, sine, chirp, prbs, combined]
+  duration_s: 15.0
+  warmup_s: 1.0
+  controller_dt_s: 0.1
+  target_dt_s: 0.1
+  reference:
+    ax_max_mps2: 0.7
+    front_steer_max_deg: 1.2
+  # All excitation shape parameters are configurable here.
+  # Step and chirp explicitly use seeded variations, avoiding V3 duplicate-seed signals.
+  pattern_params:
+    step:
+      period_s: 3.0
+      transition_s: 0.5
+      level_jitter: 0.06
+      levels: [[0.55, 0.0], [0.0, 0.60], [-0.55, -0.60], [0.35, 0.25]]
+    sine:
+      ax_frequency_hz: 0.12
+      steer_frequency_hz: 0.33
+      ax_scale: 0.75
+      steer_scale: 0.65
+    chirp:
+      start_frequency_hz: 0.05
+      frequency_slope_hz_per_s: 0.04
+      ax_scale: 0.55
+      steer_scale: 0.70
+    prbs:
+      period_s: 1.2
+      transition_s: 0.35
+      ax_scale: 0.55
+      steer_scale: 0.55
+    combined:
+      ax_frequencies_hz: [0.11, 0.26]
+      ax_scales: [0.48, 0.35]
+      steer_frequencies_hz: [0.15, 0.43]
+      steer_scales: [0.50, 0.30]
+      clip: 0.85
+
+reference_controller:
+  confirmed_calibrated: true  # enable after low-level reference tracking is verified
+  engine_map_path: null
+  max_rpm: 3000
+  throttle_limit_pct: 35.0
+  brake_limit_mpa: 2.0
+  longitudinal_pid: {kp: 12.0, ki: 12.0, kd: 0.15}
+  lateral:
+    steering_ratio: 25.0
+    kp: 0.3
+    ki: 0.0
+    kd: 0.0
+    max_wheel_deg: 100.0
+    max_rate_deg_s: 180.0
+    steering_tau_s: 0.0
+
+batch:
+  output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1'
+  seeds: [0, 1]  # 数据规模：一个seed对应 7个初始速度档位 * 7个附着系数档位 * 9个载荷档位 * 5个激励模式 = 2205 runs
+  timeout_s_per_run: 120.0
+  max_solver_steps_per_run: 100000
+  plot_first_per_pattern: true
+  stop_on_error: false
+  allow_overwrite: false

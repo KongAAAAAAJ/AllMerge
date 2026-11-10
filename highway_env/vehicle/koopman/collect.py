@@ -266,7 +266,7 @@ def validate(cfg, require_local_files=False, model_id=None, speed_tier=None):
     validate_excitation_config(excite)
     # Catch duplicated reference sequences BEFORE launching expensive TruckSim workers.
     for pattern in patterns:
-        fingerprints = [excitation_fingerprint(excite, pattern, seed) for seed in seeds]
+        fingerprints = [excitation_fingerprint(excite, pattern, seed, episode_key=f"validation__{pattern}__seed{seed}") for seed in seeds]
         if len(fingerprints) != len(set(fingerprints)):
             raise ValueError(f"Duplicate excitation sequence across seeds for {pattern}")
     if not cfg["reference_controller"].get("confirmed_calibrated", False):
@@ -291,16 +291,16 @@ def build_runs(cfg, model_id=None, speed_tier=None):
         if speed_tier not in speeds:
             raise ValueError(f"Unknown speed tier: {speed_tier}")
         speeds = {speed_tier: speeds[speed_tier]}
-    signatures = {(p, seed): excitation_fingerprint(excite, p, seed)
-                  for p in excite["patterns"] for seed in cfg["batch"]["seeds"]}
     for model in mapped_models(cfg, model_id=model_id, speed_tier=speed_tier):
         for v in speeds:
             for pattern in excite["patterns"]:
                 for seed in cfg["batch"]["seeds"]:
-                    yield {"id": f"{model['id']}_{v}__{pattern}_seed{int(seed):03d}",
+                    rid = f"{model['id']}_{v}__{pattern}_seed{int(seed):03d}"
+                    yield {"id": rid,
                            "model_id": model["id"], "speed_tier": v,
                            "pattern": pattern, "seed": int(seed),
-                           "excitation_sha256": signatures[(pattern, seed)]}
+                           "excitation_sha256": excitation_fingerprint(excite, pattern, seed,
+                                                                         episode_key=rid)}
 
 
 def _number(seq, name, *, minimum=None, maximum=None):
@@ -313,141 +313,284 @@ def _number(seq, name, *, minimum=None, maximum=None):
     return n
 
 
+def _random_interval(random_cfg, pattern, name, default, *, minimum=0., maximum=None):
+    """Return range or fixed value; no RNG and no filesystem I/O."""
+    chosen = random_cfg.get(pattern, {}).get(name, default)
+    values = chosen if isinstance(chosen, (list, tuple)) else [chosen, chosen]
+    if len(values) != 2:
+        raise ValueError(f"randomized.{pattern}.{name} must be a [lo, hi] interval")
+    try:
+        lo, hi = (float(values[0]), float(values[1]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"randomized.{pattern}.{name}: expected numbers") from exc
+    if not (np.isfinite(lo) and np.isfinite(hi) and minimum <= lo <= hi):
+        raise ValueError(f"randomized.{pattern}.{name}: require {minimum} <= lo <= hi")
+    if maximum is not None and hi > maximum:
+        raise ValueError(f"randomized.{pattern}.{name}: maximum cannot exceed {maximum}")
+    return lo, hi
+
+
+def _random_scalar(random_cfg, pattern, name, default, rng, *, minimum=0., maximum=None):
+    lo, hi = _random_interval(random_cfg, pattern, name, default, minimum=minimum, maximum=maximum)
+    return float(lo) if lo == hi else float(rng.uniform(lo, hi))
+
+
+def _fraction(random_cfg, pattern, name, default=0.0):
+    value = float(random_cfg.get(pattern, {}).get(name, default))
+    if not np.isfinite(value) or not 0 <= value <= 0.5:
+        raise ValueError(f"randomized.{pattern}.{name} must be in [0, 0.5]")
+    return value
+
+
+def _effective_seed(seed, pattern, episode_key, cfg):
+    scope = cfg.get('seed_scope', 'shared_across_conditions')
+    if scope not in ('per_episode', 'shared_across_conditions'):
+        raise ValueError('excitation.seed_scope must be per_episode or shared_across_conditions')
+    if scope == 'per_episode' and not episode_key:
+        raise ValueError('per_episode excitation requires unique episode_key/run_id')
+    # Do not use Python's hash() because it changes across processes.
+    token = json.dumps([int(seed), str(pattern), str(episode_key) if scope == 'per_episode' else ''],
+                       ensure_ascii=True, separators=(',', ':'))
+    return int.from_bytes(hashlib.sha256(token.encode('utf-8')).digest()[:8], 'little')
+
+
 def validate_excitation_config(cfg):
-    """Validate explicitly configured frequency, timing, and amplitude for all patterns."""
-    ref = cfg.get("reference", {})
-    for k in ("ax_max_mps2", "front_steer_max_deg"):
-        _number(ref, k, minimum=0)
-    pars = cfg.get("pattern_params")
-    if not isinstance(pars, dict):
-        raise ValueError("excitation.pattern_params must be a YAML mapping")
-    for pattern in cfg["patterns"]:
-        d = pars.get(pattern)
+    """Check all fixed waveform values and optional bounded random ranges."""
+    ref = cfg.get('reference', {})
+    for key in ('ax_max_mps2', 'front_steer_max_deg'):
+        _number(ref, key, minimum=0)
+    params = cfg.get('pattern_params')
+    if not isinstance(params, dict):
+        raise ValueError('excitation.pattern_params must be a YAML mapping')
+    randomized = cfg.get('randomized', {})
+    safe_max_hz = 0.45 / float(cfg['target_dt_s'])
+    if not isinstance(randomized, dict):
+        raise ValueError('excitation.randomized must be a mapping')
+    if 'phase_range_rad' in randomized:
+        _random_interval({'global': randomized}, 'global', 'phase_range_rad', [0., 2*np.pi], minimum=-1000., maximum=1000.)
+    if cfg.get('seed_scope', 'shared_across_conditions') not in ('per_episode','shared_across_conditions'):
+        raise ValueError('excitation.seed_scope must be per_episode or shared_across_conditions')
+    allowed_randomized = {
+        'step': {'period_s','period_jitter_frac','level_scale'},
+        'sine': {'ax_frequency_hz','steer_frequency_hz','ax_scale','steer_scale'},
+        'chirp': {'start_frequency_hz','frequency_slope_hz_per_s','ax_scale','steer_scale'},
+        'prbs': {'period_s','period_jitter_frac','amplitude_jitter_frac','ax_scale','steer_scale'},
+        'combined': {'frequency_jitter_frac','amplitude_jitter_frac'},
+    }
+    for name, values in randomized.items():
+        if name == 'phase_range_rad':
+            continue
+        if name not in allowed_randomized or not isinstance(values, dict):
+            raise ValueError(f'Unknown excitation.randomized section: {name}')
+        unknown = set(values) - allowed_randomized[name]
+        if unknown:
+            raise ValueError(f'Unknown excitation.randomized.{name} keys: {sorted(unknown)}')
+    for pattern in cfg['patterns']:
+        d = params.get(pattern)
         if not isinstance(d, dict):
-            raise ValueError(f"Missing excitation.pattern_params.{pattern}")
-        if pattern == "step":
-            period = _number(d, "period_s", minimum=0)
-            fade = _number(d, "transition_s", minimum=0)
+            raise ValueError(f'Missing excitation.pattern_params.{pattern}')
+        if not isinstance(randomized.get(pattern, {}), dict):
+            raise ValueError(f'excitation.randomized.{pattern} must be a mapping')
+        if pattern == 'step':
+            period = _number(d, 'period_s', minimum=0)
+            fade = _number(d, 'transition_s', minimum=0)
             if fade > period:
-                raise ValueError("step.transition_s must not exceed step.period_s")
-            jitter = _number(d, "level_jitter", minimum=-1e-12, maximum=0.4)
-            lv = np.asarray(d.get("levels", []), dtype=float)
-            if lv.ndim != 2 or lv.shape[1] != 2 or len(lv) < 2 or not np.isfinite(lv).all() or np.any(np.abs(lv) > 1):
-                raise ValueError("step.levels must be >=2 bounded [a, steer] pairs within [-1,1]")
-        elif pattern == "sine":
-            for name in ("ax_frequency_hz", "steer_frequency_hz"):
-                _number(d, name, minimum=0)
-            for name in ("ax_scale", "steer_scale"):
-                _number(d, name, minimum=0, maximum=1)
-        elif pattern == "chirp":
-            _number(d, "start_frequency_hz", minimum=0)
-            _number(d, "frequency_slope_hz_per_s", minimum=-1e-12)
-            for name in ("ax_scale", "steer_scale"):
-                _number(d, name, minimum=0, maximum=1)
-        elif pattern == "prbs":
-            period = _number(d, "period_s", minimum=0)
-            fade = _number(d, "transition_s", minimum=0)
+                raise ValueError('step.transition_s must not exceed period_s')
+            _number(d, 'level_jitter', minimum=-1e-12, maximum=0.4)
+            levels = np.asarray(d.get('levels', []), dtype=float)
+            if (levels.ndim != 2 or levels.shape[1] != 2 or len(levels) < 2 or
+                    not np.isfinite(levels).all() or np.any(np.abs(levels) > 1)):
+                raise ValueError('step.levels must be >=2 bounded [a, steer] pairs')
+            lo, _ = _random_interval(randomized,pattern,'period_s',period,minimum=0.01)
+            if lo * (1 - _fraction(randomized,pattern,'period_jitter_frac')) < max(fade,float(cfg['controller_dt_s'])):
+                raise ValueError('step minimum randomized period must exceed transition_s')
+            _random_interval(randomized,pattern,'level_scale',1.,minimum=0.,maximum=1.)
+        elif pattern == 'sine':
+            for key in ('ax_frequency_hz','steer_frequency_hz'):
+                v=_number(d,key,minimum=0)
+                _random_interval(randomized,pattern,key,v,minimum=0.001,maximum=safe_max_hz)
+            for key in ('ax_scale','steer_scale'):
+                v=_number(d,key,minimum=0,maximum=1)
+                _random_interval(randomized,pattern,key,v,minimum=0.,maximum=1.)
+        elif pattern == 'chirp':
+            f0=_number(d,'start_frequency_hz',minimum=0)
+            slope=_number(d,'frequency_slope_hz_per_s',minimum=-1e-12)
+            _, fmax = _random_interval(randomized,pattern,'start_frequency_hz',f0,minimum=0.,maximum=safe_max_hz)
+            _, smax = _random_interval(randomized,pattern,'frequency_slope_hz_per_s',slope,minimum=0.)
+            if fmax + smax * max(0.,float(cfg['duration_s'])-float(cfg['warmup_s'])) > safe_max_hz:
+                raise ValueError('chirp randomized peak frequency exceeds 90% of Nyquist')
+            for key in ('ax_scale','steer_scale'):
+                v=_number(d,key,minimum=0,maximum=1)
+                _random_interval(randomized,pattern,key,v,minimum=0.,maximum=1.)
+        elif pattern == 'prbs':
+            period = _number(d,'period_s',minimum=0)
+            fade = _number(d,'transition_s',minimum=0)
             if fade > period:
-                raise ValueError("prbs.transition_s must not exceed prbs.period_s")
-            for name in ("ax_scale", "steer_scale"):
-                _number(d, name, minimum=0, maximum=1)
-        elif pattern == "combined":
-            for prefix in ("ax", "steer"):
-                freq = d.get(prefix+"_frequencies_hz")
-                amp = d.get(prefix+"_scales")
-                if (not isinstance(freq, list) or not isinstance(amp, list) or
-                    len(freq) == 0 or len(freq) != len(amp) or len(freq) > 4):
-                    raise ValueError(f"combined {prefix} frequencies and scales must be matching nonempty lists")
-                for f, a in zip(freq, amp):
-                    if not np.isfinite(float(f)) or float(f) <= 0 or not np.isfinite(float(a)) or float(a) < 0:
-                        raise ValueError(f"Invalid combined {prefix} frequency/amplitude")
-            _number(d, "clip", minimum=0, maximum=1)
+                raise ValueError('prbs transition_s cannot exceed period_s')
+            lo,_ = _random_interval(randomized,pattern,'period_s',period,minimum=0.01)
+            if lo * (1 - _fraction(randomized,pattern,'period_jitter_frac')) < max(fade,float(cfg['controller_dt_s'])):
+                raise ValueError('PRBS minimum randomized period must exceed transition_s')
+            _fraction(randomized,pattern,'amplitude_jitter_frac')
+            for key in ('ax_scale','steer_scale'):
+                v=_number(d,key,minimum=0,maximum=1)
+                _random_interval(randomized,pattern,key,v,minimum=0.,maximum=1.)
+        elif pattern == 'combined':
+            for prefix in ('ax','steer'):
+                freqs=d.get(prefix+'_frequencies_hz')
+                scales=d.get(prefix+'_scales')
+                if (not isinstance(freqs,list) or not isinstance(scales,list) or
+                    not freqs or len(freqs)!=len(scales) or len(freqs)>4):
+                    raise ValueError('combined frequencies/scales must be matched 1..4-element lists')
+                for f,a in zip(freqs,scales):
+                    if not (np.isfinite(float(f)) and float(f)>0 and np.isfinite(float(a)) and float(a)>=0):
+                        raise ValueError('combined frequency/amplitude invalid')
+            _number(d,'clip',minimum=0,maximum=1)
+            freq_jitter = _fraction(randomized,pattern,'frequency_jitter_frac')
+            _fraction(randomized,pattern,'amplitude_jitter_frac')
+            for prefix in ('ax','steer'):
+                if max(map(float,d[prefix+'_frequencies_hz']))*(1+freq_jitter) > safe_max_hz:
+                    raise ValueError('combined randomized frequencies exceed 90% of Nyquist')
     return True
 
 
 class Excitation:
-    """Seeded, reproducible [a_ref m/s², front steer rad] with YAML-driven waveforms."""
+    """Deterministically randomized control reference for ONE physical episode.
 
-    def __init__(self, cfg, pattern, seed):
-        self.cfg = cfg
-        self.pattern = pattern
-        self.seed = int(seed)
-        d = cfg["pattern_params"][pattern]
-        self.params = d
-        rng = np.random.default_rng(self.seed)
-        self.phases = rng.uniform(0, 2*np.pi, size=8)
-        if pattern == "step":
-            levels = np.asarray(d["levels"], dtype=float)
-            self.step_levels = levels[rng.permutation(len(levels))]
-            self.step_jitter = rng.uniform(-float(d["level_jitter"]),
-                                          float(d["level_jitter"]), size=(4096, 2))
-        if pattern == "prbs":
-            n = max(4096, int(np.ceil(float(cfg["duration_s"])/float(d["period_s"]))) + 4)
-            self.prbs_long = rng.choice([-1., 1.], size=n)
-            self.prbs_lat = rng.choice([-1., 1.], size=n)
+    Random parameters and switching schedules are sampled exactly once in
+    __init__. No RNG calls or disk access occur during targets() / TruckSim steps.
+    """
 
-    def targets(self, t):
-        after = float(t) - float(self.cfg["warmup_s"])
-        if after < 0:
-            return np.zeros(2, dtype=float)
-        amp = self.cfg["reference"]
-        wave = np.clip(self._wave(after), -1.0, 1.0)
-        return np.array([float(wave[0]) * float(amp["ax_max_mps2"]),
-                         np.deg2rad(float(wave[1]) * float(amp["front_steer_max_deg"]))],
-                        dtype=float)
+    def __init__(self, cfg, pattern, seed, *, episode_key=None):
+        self.cfg=cfg
+        self.pattern=pattern
+        self.seed=int(seed)
+        self.episode_key=episode_key
+        self.effective_seed=_effective_seed(self.seed,pattern,episode_key,cfg)
+        self.params=cfg['pattern_params'][pattern]
+        random_cfg=cfg.get('randomized',{})
+        d=self.params
+        rng=np.random.default_rng(self.effective_seed)
+        phlo, phhi = _random_interval({'global': random_cfg}, 'global', 'phase_range_rad',
+                                     [0., 2*np.pi], minimum=-1000., maximum=1000.)
+        self.phases=rng.uniform(phlo,phhi,size=8)
+        self.realized_params={'effective_seed':self.effective_seed, 'base_seed':self.seed,
+                              'seed_scope':cfg.get('seed_scope','shared_across_conditions'),
+                              'phase_range_rad':[float(phlo), float(phhi)]}
+        sample=lambda name,default,maximum=None: _random_scalar(random_cfg,pattern,name,default,rng,
+                                                                 maximum=maximum)
+        active=max(0.,float(cfg['duration_s'])-float(cfg['warmup_s']))
+        if pattern=='step':
+            period=sample('period_s',d['period_s'])
+            jitter=_fraction(random_cfg,pattern,'period_jitter_frac')
+            scale=sample('level_scale',1.,maximum=1.)
+            n=max(8,int(np.ceil(active/(period*(1-jitter))))+5)
+            steps=period*rng.uniform(1-jitter,1+jitter,size=n)
+            self.switch_times=np.concatenate(([0.],np.cumsum(steps)))
+            levels=np.asarray(d['levels'],dtype=float)
+            self.step_levels=scale*levels[rng.permutation(len(levels))]
+            self.step_jitter=rng.uniform(-float(d['level_jitter']),float(d['level_jitter']),size=(n+1,2))
+            self.realized_params.update({'period_s':period,'level_scale':scale,
+                'switch_times_s':[float(x) for x in self.switch_times if x<=active]})
+        elif pattern=='sine':
+            self.realized_params.update({k:sample(k,d[k],maximum=1. if k.endswith('_scale') else None)
+                for k in ('ax_frequency_hz','steer_frequency_hz','ax_scale','steer_scale')})
+            self.realized_params['phases_rad']=[float(self.phases[0]),float(self.phases[1])]
+        elif pattern=='chirp':
+            self.realized_params.update({
+                'ax_start_frequency_hz':sample('start_frequency_hz',d['start_frequency_hz']),
+                'steer_start_frequency_hz':sample('start_frequency_hz',d['start_frequency_hz']),
+                'ax_frequency_slope_hz_per_s':sample('frequency_slope_hz_per_s',d['frequency_slope_hz_per_s']),
+                'steer_frequency_slope_hz_per_s':sample('frequency_slope_hz_per_s',d['frequency_slope_hz_per_s']),
+                'ax_scale':sample('ax_scale',d['ax_scale'],maximum=1.),
+                'steer_scale':sample('steer_scale',d['steer_scale'],maximum=1.),
+                'phases_rad':[float(self.phases[0]),float(self.phases[1])]})
+        elif pattern=='prbs':
+            period=sample('period_s',d['period_s'])
+            period_jitter=_fraction(random_cfg,pattern,'period_jitter_frac')
+            amp_jitter=_fraction(random_cfg,pattern,'amplitude_jitter_frac')
+            ax_scale=sample('ax_scale',d['ax_scale'],maximum=1.)
+            steer_scale=sample('steer_scale',d['steer_scale'],maximum=1.)
+            n=max(8,int(np.ceil(active/(period*(1-period_jitter))))+5)
+            switch_periods=period*rng.uniform(1-period_jitter,1+period_jitter,size=n)
+            self.switch_times=np.concatenate(([0.],np.cumsum(switch_periods)))
+            signs=rng.choice([-1.,1.],size=(n+1,2))
+            amplitudes=rng.uniform(1-amp_jitter,1,size=(n+1,2))
+            self.prbs_levels=signs*amplitudes*np.array([ax_scale,steer_scale])
+            kmax=min(len(self.switch_times),int(np.searchsorted(self.switch_times,active,'right'))+1)
+            self.realized_params.update({'period_s':period,'ax_scale':ax_scale,'steer_scale':steer_scale,
+                'period_jitter_frac':period_jitter,'amplitude_jitter_frac':amp_jitter,
+                'switch_times_s':[float(x) for x in self.switch_times[:kmax]],
+                'levels':[row.tolist() for row in self.prbs_levels[:kmax]]})
+        elif pattern=='combined':
+            fj=_fraction(random_cfg,pattern,'frequency_jitter_frac')
+            aj=_fraction(random_cfg,pattern,'amplitude_jitter_frac')
+            self.combined={}
+            for prefix in ('ax','steer'):
+                f=np.asarray(d[prefix+'_frequencies_hz'],dtype=float)
+                a=np.asarray(d[prefix+'_scales'],dtype=float)
+                f=f*rng.uniform(1-fj,1+fj,size=len(f))
+                a=a*rng.uniform(1-aj,1+aj,size=len(a))
+                self.combined[prefix]=(f,a)
+                self.realized_params[prefix+'_frequencies_hz']=f.tolist()
+                self.realized_params[prefix+'_scales']=a.tolist()
+            self.realized_params['phases_rad']=self.phases.tolist()
+
+    def targets(self,t):
+        active=float(t)-float(self.cfg['warmup_s'])
+        if active<0:
+            return np.zeros(2,dtype=float)
+        max_ref=self.cfg['reference']
+        wave=np.clip(self._wave(active),-1.,1.)
+        return np.array([float(wave[0])*float(max_ref['ax_max_mps2']),
+            np.deg2rad(float(wave[1])*float(max_ref['front_steer_max_deg']))],dtype=float)
 
     @staticmethod
     def _smooth(x):
-        a = np.clip(x, 0., 1.)
+        a=np.clip(x,0.,1.)
         return a*a*(3-2*a)
 
-    def _wave(self, t):
-        d = self.params
-        ph = self.phases
-        if self.pattern == "step":
-            period = float(d["period_s"])
-            k = int(t // period)
-            level = self.step_levels[k % len(self.step_levels)] + self.step_jitter[k % len(self.step_jitter)]
-            previous = (np.zeros(2) if k == 0 else
-                        self.step_levels[(k-1) % len(self.step_levels)] +
-                        self.step_jitter[(k-1) % len(self.step_jitter)])
-            alpha = self._smooth((t % period) / float(d["transition_s"]))
-            return np.clip((1.-alpha)*previous + alpha*level, -1., 1.)
-        if self.pattern == "sine":
-            return np.array([float(d["ax_scale"])*np.sin(2*np.pi*float(d["ax_frequency_hz"])*t+ph[0]),
-                             float(d["steer_scale"])*np.sin(2*np.pi*float(d["steer_frequency_hz"])*t+ph[1])])
-        if self.pattern == "chirp":
-            phase = 2*np.pi*(float(d["start_frequency_hz"])*t +
-                             .5*float(d["frequency_slope_hz_per_s"])*t*t)
-            # Seeded phases ensure chirp does not repeat with different seeds.
-            return np.array([float(d["ax_scale"])*np.sin(phase+ph[0]),
-                             float(d["steer_scale"])*np.sin(phase+ph[1])])
-        if self.pattern == "prbs":
-            period = float(d["period_s"])
-            k = int(t // period)
-            alpha = self._smooth((t % period) / float(d["transition_s"]))
-            a = self.prbs_long[min(k, len(self.prbs_long)-2)]
-            b = self.prbs_long[min(k+1, len(self.prbs_long)-1)]
-            c = self.prbs_lat[min(k, len(self.prbs_lat)-2)]
-            e = self.prbs_lat[min(k+1, len(self.prbs_lat)-1)]
-            return np.array([float(d["ax_scale"])*((1-alpha)*a + alpha*b),
-                             float(d["steer_scale"])*((1-alpha)*c + alpha*e)])
-        if self.pattern == "combined":
-            v = []
-            for j, prefix in enumerate(("ax", "steer")):
-                fs = d[prefix+"_frequencies_hz"]
-                scales = d[prefix+"_scales"]
-                v.append(sum(float(a)*np.sin(2*np.pi*float(f)*t+ph[j*4+i])
-                             for i, (f, a) in enumerate(zip(fs, scales))))
-            return np.clip(np.asarray(v), -float(d["clip"]), float(d["clip"]))
-        raise ValueError(f"Unsupported excitation pattern: {self.pattern}")
+    def _switch(self,t):
+        return max(0,min(len(self.switch_times)-2,int(np.searchsorted(self.switch_times,t,side='right')-1)))
+
+    def _wave(self,t):
+        d=self.params
+        p=self.realized_params
+        ph=self.phases
+        if self.pattern=='step':
+            k=self._switch(t)
+            now=self.step_levels[k%len(self.step_levels)]+self.step_jitter[k]
+            prev=np.zeros(2) if k==0 else self.step_levels[(k-1)%len(self.step_levels)]+self.step_jitter[k-1]
+            fade=self._smooth((t-self.switch_times[k])/float(d['transition_s']))
+            return (1.-fade)*prev+fade*now
+        if self.pattern=='sine':
+            return np.array([p['ax_scale']*np.sin(2*np.pi*p['ax_frequency_hz']*t+ph[0]),
+                             p['steer_scale']*np.sin(2*np.pi*p['steer_frequency_hz']*t+ph[1])])
+        if self.pattern=='chirp':
+            phase_ax=2*np.pi*(p['ax_start_frequency_hz']*t+.5*p['ax_frequency_slope_hz_per_s']*t*t)
+            phase_st=2*np.pi*(p['steer_start_frequency_hz']*t+.5*p['steer_frequency_slope_hz_per_s']*t*t)
+            return np.array([p['ax_scale']*np.sin(phase_ax+ph[0]),
+                             p['steer_scale']*np.sin(phase_st+ph[1])])
+        if self.pattern=='prbs':
+            k=self._switch(t)
+            now=self.prbs_levels[k]
+            prev=np.zeros(2) if k==0 else self.prbs_levels[k-1]
+            fade=self._smooth((t-self.switch_times[k])/float(d['transition_s']))
+            return (1.-fade)*prev+fade*now
+        if self.pattern=='combined':
+            values=[]
+            for i,prefix in enumerate(('ax','steer')):
+                f,a=self.combined[prefix]
+                values.append(sum(float(amp)*np.sin(2*np.pi*float(freq)*t+ph[i*4+j])
+                                  for j,(freq,amp) in enumerate(zip(f,a))))
+            return np.clip(np.asarray(values,dtype=float),-float(d['clip']),float(d['clip']))
+        raise ValueError(f'Unsupported excitation pattern: {self.pattern}')
 
 
-def excitation_fingerprint(cfg, pattern, seed):
+def excitation_fingerprint(cfg, pattern, seed, episode_key=None):
     """Hash the precise scheduled 10 Hz reference sequence to prevent redundant seeds."""
     dt = float(cfg["controller_dt_s"])
     duration = float(cfg["duration_s"])
-    generator = Excitation(cfg, pattern, seed)
+    generator = Excitation(cfg, pattern, seed, episode_key=episode_key)
     n = int(np.floor(duration/dt+1e-8))
     u = np.stack([generator.targets(k*dt) for k in range(n)])
     return hashlib.sha256(np.round(u, 12).astype('<f8').tobytes()).hexdigest()
@@ -555,8 +698,10 @@ def run_worker(cfg, run, output_dir):
     if "expected_signature" in run and run["expected_signature"] != model_signature(model):
         raise RuntimeError(f"Run {run['id']} TruckSim model files differ from parent request")
     mode = "reference"
-    excite = Excitation(cfg["excitation"], run["pattern"], run["seed"])
-    fingerprint = excitation_fingerprint(cfg["excitation"], run["pattern"], run["seed"])
+    excite = Excitation(cfg["excitation"], run["pattern"], run["seed"],
+                        episode_key=run["id"])
+    fingerprint = excitation_fingerprint(cfg["excitation"], run["pattern"], run["seed"],
+                                          episode_key=run["id"])
     if run.get("excitation_sha256", fingerprint) != fingerprint:
         raise RuntimeError(f"Run {run['id']} excitation settings changed since scheduling")
     # Decode the calibration sent by the batch parent. No engine CSV reads in
@@ -676,6 +821,7 @@ def run_worker(cfg, run, output_dir):
             speed_tier=np.array(conditions["speed_tier"]),
             vx_init_kmh=np.array(conditions["vx_init_kmh"], dtype=float),
             excitation_sha256=np.array(fingerprint),
+            excitation_effective_seed=np.array(str(excite.effective_seed)),
             payload_kg=np.array(conditions["payload_kg"], dtype=float),
             road_mu=np.array(conditions["road_mu"], dtype=float))
             npz_fh.flush()
@@ -701,6 +847,8 @@ def run_worker(cfg, run, output_dir):
             "run_id": run["id"], "model_id": model["id"],
             "pattern": run["pattern"], "seed": run["seed"],
             "excitation_sha256": fingerprint,
+            "excitation_effective_seed": str(excite.effective_seed),
+            "excitation_realized_params": excite.realized_params,
             "engine_map_sha256": expected_map_sha,
             "engine_map_source": map_origin,
             "excitation_config": cfg["excitation"],
@@ -793,6 +941,11 @@ def verify_run_artifacts(directory, job, cfg):
             issues.append("metadata excitation pattern/seed mismatch")
         if meta.get("excitation_sha256") != job["excitation_sha256"]:
             issues.append("metadata excitation hash mismatch")
+        expected_ex = Excitation(cfg["excitation"], job["pattern"], job["seed"], episode_key=rid)
+        if meta.get("excitation_effective_seed") != str(expected_ex.effective_seed):
+            issues.append("effective episode seed mismatch")
+        if meta.get("excitation_realized_params") != expected_ex.realized_params:
+            issues.append("realized excitation parameters mismatch")
         if meta.get("engine_map_sha256") != job["engine_map_sha256"]:
             issues.append("metadata engine calibration hash mismatch")
         for label in ("payload_tier", "friction_tier", "speed_tier"):
