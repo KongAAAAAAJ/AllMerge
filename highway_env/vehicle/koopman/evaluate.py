@@ -15,11 +15,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from .dataset import discover_episodes, KoopmanWindowDataset
-from .model import rollout_pose
+from .base_model import rollout_pose
 from .metrics import (get_errors, summarize_episode_errors, summarize_all,
                       save_table_row, save_episodes, save_position_curve,
                       plot_errors, plot_chassis_examples)
-from .train import choose_device, load_checkpoint, resolve_path
+from .k0_train import choose_device, load_checkpoint, resolve_path
 
 
 def _key(path):

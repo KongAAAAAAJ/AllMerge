@@ -1,20 +1,22 @@
 """K0 paper B-2: new training/check/evaluation CLI (never loads B-1 checkpoints).
 
-Run from D:\KONG_Files\AllMerge, with --data-root relative to all_merge/.
+Run from the workspace root:
+    python all_merge/highway_env/vehicle/koopman/scripts/run_k0_train.py train
+Paths supplied with --data-root are relative to all_merge/.
 """
 from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
 
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path: sys.path.insert(0,str(ROOT))
 
 
 def main():
     p=argparse.ArgumentParser(description='TRACE Koopman paper K0: train, check, evaluate')
     p.add_argument('command', choices=['train','check','evaluate'])
-    p.add_argument('--config',default=str(ROOT/'configs'/'koopman_k0_paper.yaml'))
+    p.add_argument('--config',default=str(ROOT/'configs'/'koopman'/'k0_train.yaml'))
     p.add_argument('--checkpoint',default=None)
     p.add_argument('--data-root',default=None,help='Accepted NPZ root relative to all_merge/')
     p.add_argument('--epochs',type=int,default=None)
@@ -25,7 +27,7 @@ def main():
     p.add_argument('--examples',type=int,default=3)
     args=p.parse_args()
     import torch
-    from highway_env.vehicle.koopman.train import (load_config,train_k0,load_checkpoint,
+    from highway_env.vehicle.koopman.k0_train import (load_config,train_k0,load_checkpoint,
                                                     resolve_path,choose_device)
     cfg=load_config(args.config)
     default_ckpt=Path(cfg['outputs']['checkpoints'])/'best.pt'

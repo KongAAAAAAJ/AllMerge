@@ -18,7 +18,7 @@ import yaml
 
 from .dataset import (discover_episodes, episode_split, KoopmanWindowDataset,
                       compute_normalization, describe_splits)
-from .model import NeuralKoopmanK0, rollout_pose
+from .base_model import NeuralKoopmanK0, rollout_pose
 
 
 def resolve_path(project_root, path):
