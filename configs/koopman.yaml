@@ -1,4 +1,4 @@
-# TRACE Koopman truck collection V4: payload x friction x initial-speed grid.
+# TRACE Koopman: payload x friction physical models, initial speed set per run.
 # All .sim/.dll paths are placeholders. Confirm in TruckSim before enabling.
 # Native: throttle [%], brake [MPa], steering wheel [deg].
 # TruckSim exports: ax/ay [g], vx/vy [km/h], angles [deg], angular velocity [deg/s],
@@ -8,23 +8,19 @@ trucksim:
   friction_tiers: {MU08: 0.8, MU07: 0.7, MU06: 0.6, MU05: 0.5, MU04: 0.4, MU03: 0.3, MU02: 0.2}    # 附着系数分7档
   speed_tiers_kmh: {V90: 90.0, V85: 85.0, V80: 80.0, V75: 75.0, V70: 70.0, V65: 65.0, V60: 60.0} # 初始速度每隔5km/h，分7档
   initial_speed_tolerance_kmh: 2.0        # check actual initial vx after TruckSim start
-  # Each enabled (payload_tier, friction_tier, speed_tier) needs separate .sim and .dll.
-  # Python sets initial SV_VXS using the mapped speed; load and road_mu are
-  # manually set in the corresponding TruckSim vehicle model.
+  # Each (payload_tier, friction_tier) needs one physical .sim/.dll.
+  # Every speed tier shares the same physical model; Worker calls VS Statement
+  # SV_VXS (km/h) after vs_setdef_and_read and BEFORE Initialize().
+  # Payload and road_mu must still be configured and verified in TruckSim.
   require_complete_grid: false
   models:
-    # Expand all payload x friction x speed combinations from the tier tables.
-    id_template: '{payload_tier}_{friction_tier}_{speed_tier}'
+    # Expand payload x friction ONLY; speed tiers are expanded into runs in Python.
+    id_template: '{payload_tier}_{friction_tier}'
     simfile_template: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\{id}.sim'
     dll_template: 'D:\Users\Public\Documents\TruckSim2016.1_Data_now_using\Extensions\Multi_vehicle_lon_lat\{id}.dll'
     defaults:
-      enabled: false
-      verified_in_trucksim: false
-    # Enable each model only after its TruckSim files have been verified.
-    overrides:
-      L0_MU08_V60:
-        enabled: true
-        verified_in_trucksim: true
+      enabled: true
+      verified_in_trucksim: true
 
 units:
   velocity: 'km/h'
@@ -35,7 +31,7 @@ units:
 excitation:
   mode: reference       # no direct actuation in training collection
   patterns: [step, sine, chirp, prbs, combined]
-  duration_s: 5.0
+  duration_s: 15.0
   warmup_s: 1.0
   controller_dt_s: 0.1
   target_dt_s: 0.1
@@ -89,7 +85,7 @@ reference_controller:
     steering_tau_s: 0.0
 
 batch:
-  output_dir: 'outputs/koopman/data/sdk2016_smoke_02'
+  output_dir: 'outputs/koopman/data/dynamic_sv_vxs_grid_v1'
   seeds: [0, 1]
   timeout_s_per_run: 120.0
   max_solver_steps_per_run: 100000

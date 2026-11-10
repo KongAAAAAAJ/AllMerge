@@ -82,11 +82,12 @@ def _tier_table(trucksim, key):
 
 
 def mapped_models(cfg, model_id=None, speed_tier=None):
-    """Resolve explicit or template-based payload/friction/speed model mappings.
+    """Resolve physical TruckSim models from payload x friction ONLY.
 
-    Operators configure and verify all physics in TruckSim. Python sets SV_VXS
-    from the mapped speed tier at startup; it does not change load or friction.
-    Every enabled grid cell requires its own .sim and .dll as requested.
+    Each enabled (payload, friction) pair owns one .sim/.dll. Initial speed is
+    a per-run VS solver initialization parameter and never selects DLL paths.
+    ``speed_tier`` is accepted as a filter validation for the public CLI, but
+    filtering by speed happens in :func:`build_runs`.
     """
     trucksim = cfg.get("trucksim", {})
     payload_levels = _tier_table(trucksim, "payload_tiers_kg")
@@ -105,11 +106,14 @@ def mapped_models(cfg, model_id=None, speed_tier=None):
             template = models.get(f"{key}_template")
             if not isinstance(template, str) or not template.strip():
                 raise ValueError(f"trucksim.models.{key}_template must be a nonempty string")
+            if "speed_tier" in template or "vx_init" in template:
+                raise ValueError(f"trucksim.models.{key}_template must NOT contain speed: "
+                                 "speed is set with SV_VXS before Initialize()")
             templates[key] = template
         expanded = []
         generated_ids = set()
-        for p, f, v in product(payload_levels, friction_levels, speed_levels):
-            fields = {"payload_tier": p, "friction_tier": f, "speed_tier": v}
+        for p, f in product(payload_levels, friction_levels):
+            fields = {"payload_tier": p, "friction_tier": f}
             try:
                 mid = templates["id"].format(**fields)
                 fields["id"] = mid
@@ -118,77 +122,73 @@ def mapped_models(cfg, model_id=None, speed_tier=None):
                 for key in ("simfile", "dll"):
                     item[key] = templates[key].format(**fields)
             except (KeyError, IndexError, ValueError, AttributeError) as exc:
-                raise ValueError(f"Invalid TruckSim model template: {exc}") from exc
+                raise ValueError(f"Invalid TruckSim physical model template: {exc}") from exc
             override = overrides.get(mid, {})
             if not isinstance(override, dict):
                 raise ValueError(f"Model override {mid} must be a mapping")
-            if set(override) & {"id", "payload_tier", "friction_tier", "speed_tier"}:
-                raise ValueError(f"Model override {mid} cannot change generated identity or tiers")
+            if set(override) & {"id", "payload_tier", "friction_tier", "speed_tier", "vx_init_kmh"}:
+                raise ValueError(f"Model override {mid} cannot change model identity/tiers/speed")
             item.update(override)
             generated_ids.add(mid)
             expanded.append(item)
         unknown = set(overrides) - generated_ids
         if unknown:
-            raise ValueError(f"Unknown model override ids: {sorted(unknown, key=str)}")
+            raise ValueError(f"Unknown physical model override ids: {sorted(unknown, key=str)}")
         models = expanded
     if not isinstance(models, list) or not models:
-        raise ValueError("trucksim.models must contain at least one .sim/.dll model")
-    seen_ids, seen_conditions, seen_sim, seen_dll = set(), set(), set(), set()
+        raise ValueError("trucksim.models must contain at least one physical .sim/.dll model")
+    seen_ids, seen_pairs, seen_sim, seen_dll = set(), set(), set(), set()
     selected = []
     for item in models:
         if not isinstance(item, dict):
             raise ValueError("Every trucksim.models entry must be a mapping")
         mid = item.get("id", "")
         if not isinstance(mid, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", mid):
-            raise ValueError(f"Invalid model id {mid!r}; use letters/numbers/_/- only")
+            raise ValueError(f"Invalid physical model id {mid!r}")
         if mid in seen_ids:
-            raise ValueError(f"Duplicate TruckSim model id: {mid}")
+            raise ValueError(f"Duplicate physical model id: {mid}")
         seen_ids.add(mid)
         p_tier = item.get("payload_tier")
         f_tier = item.get("friction_tier")
-        v_tier = item.get("speed_tier")
-        if p_tier not in payload_levels or f_tier not in friction_levels or v_tier not in speed_levels:
-            raise ValueError(f"Model {mid}: unknown payload/friction/speed tier: "
-                             f"{p_tier!r}, {f_tier!r}, {v_tier!r}")
+        if p_tier not in payload_levels or f_tier not in friction_levels:
+            raise ValueError(f"Model {mid}: unknown payload/friction tier: {p_tier!r}, {f_tier!r}")
+        if "speed_tier" in item or "vx_init_kmh" in item:
+            raise ValueError(f"Physical model {mid} must not bind initial speed; "
+                             "set speed_tiers_kmh and let build_runs vary SV_VXS")
         if not isinstance(item.get("enabled", True), bool):
             raise ValueError(f"Model {mid}: enabled must be boolean")
         if not item.get("enabled", True):
             continue
-        combo = (p_tier, f_tier, v_tier)
-        if combo in seen_conditions:
-            raise ValueError(f"Duplicate enabled payload/friction/speed combination: {combo}")
-        seen_conditions.add(combo)
+        pair = (p_tier, f_tier)
+        if pair in seen_pairs:
+            raise ValueError(f"Duplicate enabled payload/friction pair: {pair}")
+        seen_pairs.add(pair)
         for key in ("simfile", "dll"):
             if not isinstance(item.get(key), str) or not item[key].strip():
-                raise ValueError(f"Enabled model {mid} needs nonempty {key}")
+                raise ValueError(f"Enabled physical model {mid} needs nonempty {key}")
         sim_path = str(Path(item["simfile"]).expanduser()).casefold()
         dll_path = str(Path(item["dll"]).expanduser()).casefold()
         if sim_path in seen_sim:
-            raise ValueError(f"Multiple enabled models reference the same .sim: {item['simfile']}")
+            raise ValueError(f"Different physical models reference the same .sim: {item['simfile']}")
         if dll_path in seen_dll:
-            raise ValueError(f"Multiple enabled models reference the same .dll: {item['dll']}")
+            raise ValueError(f"Different physical models reference the same .dll: {item['dll']}")
         seen_sim.add(sim_path)
         seen_dll.add(dll_path)
         normalized = dict(item)
         normalized["payload_kg"] = payload_levels[p_tier]
         normalized["road_mu"] = friction_levels[f_tier]
-        normalized["vx_init_kmh"] = speed_levels[v_tier]
         selected.append(normalized)
     if trucksim.get("require_complete_grid", False) and model_id is None:
-        missing = sorted((p, f, v) for p in payload_levels for f in friction_levels
-                         for v in speed_levels if (p, f, v) not in seen_conditions)
+        missing = sorted((p, f) for p in payload_levels for f in friction_levels
+                         if (p, f) not in seen_pairs)
         if missing:
-            raise ValueError(f"Missing enabled payload/friction/speed model combinations: {missing}")
+            raise ValueError(f"Missing enabled payload/friction models: {missing}")
     if model_id is not None:
         selected = [item for item in selected if item["id"] == model_id]
         if not selected:
-            raise ValueError(f"Unknown or disabled model id: {model_id}")
-    if speed_tier is not None:
-        selected = [item for item in selected if item["speed_tier"] == speed_tier]
-        if not selected:
-            raise ValueError(f"No enabled models for speed tier: {speed_tier}")
+            raise ValueError(f"Unknown or disabled physical model id: {model_id}")
     if not selected:
-        raise ValueError("No enabled TruckSim models available")
+        raise ValueError("No enabled physical TruckSim models available")
     return selected
 
 
@@ -204,28 +204,31 @@ def model_signature(model):
     return {key: file_signature(model[key]) for key in ("simfile", "dll")}
 
 
-def model_condition(model):
-    """Validate manually verified ground-truth condition labels."""
+def model_condition(model, cfg, speed_tier=None):
+    """Physical labels belong to .sim/.dll; initial speed belongs to a RUN."""
     mid = model["id"]
     if not model.get("verified_in_trucksim", False):
         raise ValueError(f"Confirm model {mid} payload/mu in TruckSim and set verified_in_trucksim=true")
     try:
         payload = float(model["payload_kg"])
         mu = float(model["road_mu"])
-        vx = float(model["vx_init_kmh"])
     except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"Model {mid} needs numeric payload_kg, road_mu, vx_init_kmh") from exc
+        raise ValueError(f"Model {mid} needs numeric payload_kg and road_mu") from exc
     if not np.isfinite(payload) or payload < 0:
         raise ValueError(f"Model {mid} payload_kg must be finite and >=0")
     if not np.isfinite(mu) or not 0 < mu <= 2:
         raise ValueError(f"Model {mid} road_mu must satisfy 0 < mu <= 2")
-    if not np.isfinite(vx) or not 0 < vx <= 180:
-        raise ValueError(f"Model {mid} vx_init_kmh must be within (0, 180]")
-    return {"model_id": mid, "payload_tier": model["payload_tier"],
-            "friction_tier": model["friction_tier"], "speed_tier": model["speed_tier"],
-            "payload_kg": payload, "road_mu": mu, "vx_init_kmh": vx,
-            "verified_in_trucksim": True,
-            "note": model.get("note", "")}
+    result = {"model_id": mid, "payload_tier": model["payload_tier"],
+              "friction_tier": model["friction_tier"],
+              "payload_kg": payload, "road_mu": mu,
+              "verified_in_trucksim": True, "note": model.get("note", "")}
+    if speed_tier is not None:
+        speeds = _tier_table(cfg["trucksim"], "speed_tiers_kmh")
+        if speed_tier not in speeds:
+            raise ValueError(f"Unknown initial speed tier for {mid}: {speed_tier}")
+        result["speed_tier"] = speed_tier
+        result["vx_init_kmh"] = speeds[speed_tier]
+    return result
 
 
 def validate(cfg, require_local_files=False, model_id=None, speed_tier=None):
@@ -272,21 +275,32 @@ def validate(cfg, require_local_files=False, model_id=None, speed_tier=None):
     if require_local_files:
         for model in models:
             model_signature(model)
-            model_condition(model)
+            model_condition(model, cfg)
     return True
 
 
 def build_runs(cfg, model_id=None, speed_tier=None):
-    """One trajectory for each (model, waveform family, distinct seed)."""
+    """One trajectory per physical model x initial speed x excitation x seed.
+
+    All initial speeds of one (payload, mu) physical model reuse the EXACT SAME
+    .sim/.dll, in separate fresh Python worker processes.
+    """
     excite = cfg["excitation"]
+    speeds = _tier_table(cfg["trucksim"], "speed_tiers_kmh")
+    if speed_tier is not None:
+        if speed_tier not in speeds:
+            raise ValueError(f"Unknown speed tier: {speed_tier}")
+        speeds = {speed_tier: speeds[speed_tier]}
     signatures = {(p, seed): excitation_fingerprint(excite, p, seed)
                   for p in excite["patterns"] for seed in cfg["batch"]["seeds"]}
     for model in mapped_models(cfg, model_id=model_id, speed_tier=speed_tier):
-        for pattern in excite["patterns"]:
-            for seed in cfg["batch"]["seeds"]:
-                yield {"id": f"{model['id']}__{pattern}_seed{int(seed):03d}",
-                       "model_id": model["id"], "pattern": pattern,
-                       "seed": int(seed), "excitation_sha256": signatures[(pattern, seed)]}
+        for v in speeds:
+            for pattern in excite["patterns"]:
+                for seed in cfg["batch"]["seeds"]:
+                    yield {"id": f"{model['id']}_{v}__{pattern}_seed{int(seed):03d}",
+                           "model_id": model["id"], "speed_tier": v,
+                           "pattern": pattern, "seed": int(seed),
+                           "excitation_sha256": signatures[(pattern, seed)]}
 
 
 def _number(seq, name, *, minimum=None, maximum=None):
@@ -532,7 +546,7 @@ def run_worker(cfg, run, output_dir):
 
     model = model_for_run(cfg, run)
     validate(cfg, require_local_files=True, model_id=model["id"])
-    conditions = model_condition(model)
+    conditions = model_condition(model, cfg, run["speed_tier"])
     # Bind worker to the exact file signatures/labels chosen by the parent.
     # This prevents a mid-batch YAML edit or .sim/.dll replacement from
     # silently putting a different load under the original run ID.
@@ -611,7 +625,7 @@ def run_worker(cfg, run, output_dir):
         if abs(vx_start_actual-conditions["vx_init_kmh"]) > speed_tol:
             raise ValueError(f"TruckSim initial vx={vx_start_actual:g} km/h does not match "
                              f"mapped {conditions['speed_tier']}={conditions['vx_init_kmh']:g} km/h; "
-                             "verify SV_VXS and the selected .sim/.dll model")
+                             "verify SV_VXS initialization; speed is not part of the .sim/.dll identity")
         times.append(t0)
         states.append(x.copy())
         last_native = np.zeros(3, dtype=float)
@@ -706,7 +720,7 @@ def run_worker(cfg, run, output_dir):
             "state_si_order": ["vx_mps", "vy_mps", "body_yaw_rate_radps", "roll_rad", "euler_roll_rate_radps"],
             "reference_si_order": ["ax_ref_mps2", "front_wheel_delta_ref_rad"],
             "manual_conditions": conditions,
-            "notes": "Payload/friction are fixed within selected .sim; initial speed is set from mapped speed tier via SV_VXS. "
+            "notes": "Payload/friction select a shared .sim/.dll; per-run speed is set by SV_VXS BEFORE Initialize(). "
                      "Native actuation is generated ONLY via low_controller.py + inverse_dynamics.py; "
                      "direct actuation diagnostic is exclusive to Trucksim_Simulation_ltr.py.",
             "sample_alignment": "raw control[k] acts from raw_state[k] to raw_state[k+1]; similarly at 10Hz",
@@ -858,7 +872,7 @@ def verify_run_artifacts(directory, job, cfg):
                 if not np.isclose(t10[-1]-t10[0], expected_duration, atol=target_dt/2, rtol=0):
                     issues.append("truncated 10Hz timeline")
                 if not np.isclose(xr[0,2], expected["vx_init_kmh"], atol=float(cfg["trucksim"].get("initial_speed_tolerance_kmh",2)), rtol=0):
-                    issues.append("initial speed does not match model tier")
+                    issues.append("initial speed does not match requested run speed tier")
             labels = {"model_id": job["model_id"], "payload_tier": expected["payload_tier"],
                       "friction_tier": expected["friction_tier"],
                       "speed_tier": expected["speed_tier"],
@@ -944,7 +958,7 @@ def promote_verified_artifacts(staging, output, job, allow_overwrite):
 
 
 def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, speed_tier=None):
-    """Spawn one isolated child per run; select exact .sim/.dll via model map."""
+    """Spawn one isolated child per run; .sim/.dll only depend on payload/mu."""
     validate(cfg, require_local_files=not dry_run, model_id=model_id, speed_tier=speed_tier)
     jobs = list(build_runs(cfg, model_id=model_id, speed_tier=speed_tier))
     models = {m["id"]: m for m in mapped_models(cfg, model_id=model_id, speed_tier=speed_tier)}
@@ -959,7 +973,8 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
             print("[PLAN]", run["id"], "->", m["simfile"],
                   "payload_tier=", m["payload_tier"], "payload_kg=", m["payload_kg"],
                   "friction_tier=", m["friction_tier"], "mu=", m["road_mu"],
-                  "speed_tier=", m["speed_tier"], "vx_init_kmh=", m["vx_init_kmh"],
+                  "speed_tier=", run["speed_tier"], "vx_init_kmh=",
+                  _tier_table(cfg["trucksim"], "speed_tiers_kmh")[run["speed_tier"]],
                   "sha256=", run["excitation_sha256"][:12], "dll=", m["dll"])
         return []
     output.mkdir(parents=True, exist_ok=True)
@@ -973,12 +988,14 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
     # File signatures alone cannot capture linked TruckSim .par contents;
     # operator verifies every .sim and its referenced parameters manually.
     signatures = {mid: model_signature(m) for mid, m in models.items()}
-    batch_name = model_id if model_id is not None else (f"speed_{speed_tier}" if speed_tier else "all")
+    batch_name = (f"{model_id}_{speed_tier}" if model_id is not None and speed_tier is not None
+                  else model_id if model_id is not None
+                  else f"speed_{speed_tier}" if speed_tier else "all")
     json_write(output / f"batch_config_{batch_name}.json", {
         "config": cfg, "model_signatures_before": signatures,
         "engine_map_sha256": engine_map_sha256,
         "engine_map_rows": len(batch_engine_map),
-        "resolved_models": {mid: model_condition(m) for mid, m in models.items()},
+        "resolved_models": {mid: model_condition(m, cfg) for mid, m in models.items()},
         "runs": jobs})
     script = Path(project_root) / "scripts" / "run_koopman.py"
     if not script.exists():
@@ -998,7 +1015,7 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
             if model_signature(m) != signatures[mid]:
                 raise RuntimeError(f"TruckSim model {mid} changed mid-batch")
         job["expected_signature"] = signatures[job["model_id"]]
-        job["expected_condition"] = model_condition(models[job["model_id"]])
+        job["expected_condition"] = model_condition(models[job["model_id"]], cfg, job["speed_tier"])
         job["engine_map_values"] = engine_map_values
         job["engine_map_sha256"] = engine_map_sha256
         job["plot"] = bool(cfg["batch"].get("plot_first_per_pattern", False)) and (

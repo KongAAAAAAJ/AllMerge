@@ -22,7 +22,7 @@ def main(argv=None):
     parser.add_argument("--config", default=str(ROOT / "configs" / "koopman.yaml"))
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--model", default=None, help="Collect/audit a single enabled trucksim.models id")
-    parser.add_argument("--speed-tier", default=None, help="Collect only enabled models of this speed tier, e.g. V60")
+    parser.add_argument("--speed-tier", default=None, help="Run only this SV_VXS initial speed tier (reuses the physical model), e.g. V60")
     parser.add_argument("--job", default=None, help="JSON job spec (worker mode only)")
     parser.add_argument("--output", default=None, help="Worker output directory")
     args = parser.parse_args(argv)
@@ -30,7 +30,9 @@ def main(argv=None):
     from highway_env.vehicle.koopman.collect import read_yaml, validate, collect_batch, run_worker
     from highway_env.vehicle.koopman.data import audit_npz
     if args.command == "smoke":
-        from tests.test_koopman import run_tests
+        # The uploaded project archive has no tests/test_koopman.py. Run the
+        # self-contained physical-model / SV_VXS scheduling regression suite.
+        from tests.test_koopman_speed_grid import run_tests
         run_tests()
         return 0
     if args.command == "audit":
@@ -39,7 +41,15 @@ def main(argv=None):
         d = Path(cfg["batch"]["output_dir"])
         if not d.is_absolute():
             d = ROOT/d
-        paths = sorted(d.glob(f"{args.model}__*.npz" if args.model else "*.npz"))
+        if args.model and args.speed_tier:
+            glob_pattern = f"{args.model}_{args.speed_tier}__*.npz"
+        elif args.model:
+            glob_pattern = f"{args.model}_*__*.npz"
+        elif args.speed_tier:
+            glob_pattern = f"*_{args.speed_tier}__*.npz"
+        else:
+            glob_pattern = "*.npz"
+        paths = sorted(d.glob(glob_pattern))
         if not paths:
             raise FileNotFoundError(f"No .npz files in {d}")
         errors = []
