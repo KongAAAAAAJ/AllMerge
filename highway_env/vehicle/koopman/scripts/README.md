@@ -5,7 +5,7 @@ python all_merge\highway_env\vehicle\koopman\scripts\run_dataset.py collect
 python all_merge\highway_env\vehicle\koopman\scripts\run_training.py split
 
 # 训练
-python all_merge\highway_env\vehicle\koopman\scripts\run_training.py train --model all --epochs 1
+python highway_env\vehicle\koopman\scripts\run_training.py train --model all --epochs 2
 
 # 评测
-python all_merge\highway_env\vehicle\koopman\scripts\run_evaluation.py compare --split val
+python highway_env\vehicle\koopman\scripts\run_evaluation.py compare --split val
