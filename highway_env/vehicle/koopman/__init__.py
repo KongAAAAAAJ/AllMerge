@@ -3,4 +3,4 @@
 No TruckSim DLL is loaded merely by importing this package.
 """
 
-__all__ = ["data", "collect"]
+__all__ = ["data", "models", "training", "evaluation", "scripts"]

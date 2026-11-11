@@ -1,6 +1,6 @@
 # Stage C unified six-model training and paper evaluation.
-# This file is SEPARATE from configs/koopman.yaml, which remains owned by running TruckSim collection.
-# Run `python scripts/run_koopman_train.py split` ONCE after selecting accepted dataset snapshot.
+# This file is SEPARATE from configs/koopman/collect.yaml, which remains owned by running TruckSim collection.
+# Run `python highway_env/vehicle/koopman/scripts/run_training.py split` ONCE after selecting accepted dataset snapshot.
 data:
   roots:
     - outputs/koopman/data/v0

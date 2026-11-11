@@ -1,9 +1,9 @@
 """EDMDc and Parametric EDMDc identification on frozen train episodes."""
 from pathlib import Path
 import torch
-from .edmd import PolynomialEDMDc,fit_edmd
-from .k0_train import save_checkpoint
-from .shared_split import resolve
+from highway_env.vehicle.koopman.models.edmd import PolynomialEDMDc,fit_edmd
+from highway_env.vehicle.koopman.training.base_train import save_checkpoint
+from highway_env.vehicle.koopman.data.shared_split import resolve
 
 
 def train_edmd(kind,cfg,project_root,splits,manifest):

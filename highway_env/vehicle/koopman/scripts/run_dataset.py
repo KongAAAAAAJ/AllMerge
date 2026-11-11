@@ -1,8 +1,8 @@
 """TRACE Stage 1 CLI: dry-run, collect, worker, audit.
 
 Run from AllMerge parent folder:
-    python all_merge/scripts/run_koopman.py collect --check-only
-    python all_merge/scripts/run_koopman.py collect
+    python all_merge/highway_env/vehicle/koopman/scripts/run_dataset.py collect --check-only
+    python all_merge/highway_env/vehicle/koopman/scripts/run_dataset.py collect
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 def main(argv=None):
     parser = argparse.ArgumentParser(description="TRACE Koopman TruckSim experiment collection")
     parser.add_argument("command", choices=["collect", "worker", "audit", "smoke"])
-    parser.add_argument("--config", default=str(ROOT / "configs" / "koopman.yaml"))
+    parser.add_argument("--config", default=str(ROOT / "configs" / "koopman" / "collect.yaml"))
     parser.add_argument("--check-only", action="store_true")
     parser.add_argument("--model", default=None, help="Collect/audit a single enabled trucksim.models id")
     parser.add_argument("--speed-tier", default=None, help="Run only this SV_VXS initial speed tier (reuses the physical model), e.g. V60")
@@ -27,8 +27,8 @@ def main(argv=None):
     parser.add_argument("--output", default=None, help="Worker output directory")
     args = parser.parse_args(argv)
 
-    from highway_env.vehicle.koopman.collect import read_yaml, validate, collect_batch, run_worker
-    from highway_env.vehicle.koopman.data import audit_npz
+    from highway_env.vehicle.koopman.data.collect import read_yaml, validate, collect_batch, run_worker
+    from highway_env.vehicle.koopman.data.processing import audit_npz
     if args.command == "smoke":
         # The uploaded project archive has no tests/test_koopman.py. Run the
         # self-contained physical-model / SV_VXS scheduling regression suite.

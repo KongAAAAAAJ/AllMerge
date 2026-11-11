@@ -1,14 +1,14 @@
 """Unified six-model evaluation and strictly controlled 3-case paper chart.
 
-  python scripts/run_koopman_evaluate.py compare --split val
-  python scripts/run_koopman_evaluate.py evaluate --model K2 --split test
-  python scripts/run_koopman_evaluate.py controlled --cases case_A.npz case_B.npz case_C.npz
+  python highway_env/vehicle/koopman/scripts/run_evaluation.py compare --split val
+  python highway_env/vehicle/koopman/scripts/run_evaluation.py evaluate --model K2 --split test
+  python highway_env/vehicle/koopman/scripts/run_evaluation.py controlled --cases case_A.npz case_B.npz case_C.npz
 """
 from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
-ROOT=Path(__file__).resolve().parents[1]
+ROOT=Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 
 
@@ -28,7 +28,7 @@ def main():
     args=p.parse_args()
     import yaml
     cfg=yaml.safe_load(Path(args.config).read_text(encoding='utf-8'))
-    from highway_env.vehicle.koopman.evaluate_unified import (evaluate_one,compare,controlled_chassis)
+    from highway_env.vehicle.koopman.evaluation.evaluate import (evaluate_one,compare,controlled_chassis)
     if args.command=='evaluate':
         evaluate_one(cfg,ROOT,args.model,args.split,args.data_root,args.device,args.batch_size)
     elif args.command=='compare':

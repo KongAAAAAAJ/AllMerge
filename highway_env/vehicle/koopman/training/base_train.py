@@ -1,4 +1,8 @@
-"""Paper K0 training: episode-held-out validation, LTR supervision and checkpoints.
+"""Shared training utilities and the standalone K0 training implementation.
+
+Path resolution, device selection, seeding and checkpoint saving are shared
+by the unified trainers and evaluators. The standalone K0 routines retain
+episode-held-out validation and LTR supervision for existing callers.
 
 Does not load the TruckSim DLL or modify the running collector.
 """
@@ -16,9 +20,9 @@ import torch
 from torch.utils.data import DataLoader
 import yaml
 
-from .dataset import (discover_episodes, episode_split, KoopmanWindowDataset,
+from highway_env.vehicle.koopman.data.dataset import (discover_episodes, episode_split, KoopmanWindowDataset,
                       compute_normalization, describe_splits)
-from .base_model import NeuralKoopmanK0, rollout_pose
+from highway_env.vehicle.koopman.models.base_model import NeuralKoopmanK0, rollout_pose
 
 
 def resolve_path(project_root, path):

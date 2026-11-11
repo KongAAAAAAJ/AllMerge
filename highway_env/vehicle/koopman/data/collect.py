@@ -23,7 +23,7 @@ import shutil
 
 import numpy as np
 
-from .data import SIGNALS, UNITS_RAW, audit_npz, ltr_from_fz, resample, to_si
+from highway_env.vehicle.koopman.data.processing import SIGNALS, UNITS_RAW, audit_npz, ltr_from_fz, resample, to_si
 
 
 def read_yaml(path):
@@ -628,8 +628,8 @@ def load_engine_map_for_collection(config):
     else:
         path = Path(path)
         if not path.is_absolute():
-            # Relative paths in configs/koopman.yaml are relative to all_merge/.
-            path = Path(__file__).resolve().parents[3] / path
+            # Relative paths in configs/koopman/collect.yaml are relative to all_merge/.
+            path = Path(__file__).resolve().parents[4] / path
     data = _validated_engine_map(np.loadtxt(path, delimiter=',', skiprows=1))
     return data
 
@@ -666,7 +666,7 @@ class ReferenceActuator:
         self.brake_limit_mpa = float(c.get("brake_limit_mpa", 2.0))
 
     def control(self, ref, raw):
-        from .data import G0
+        from highway_env.vehicle.koopman.data.processing import G0
         vx_mps = float(raw[2]) / 3.6 if self.units["velocity"] == "km/h" else float(raw[2])
         ax_mps2 = float(raw[0]) * G0
         engine_rpm = float(raw[12])/6 if self.units["engine_speed"] == "deg/s" else float(raw[12])
@@ -1150,7 +1150,7 @@ def collect_batch(cfg, config_path, project_root, dry_run=False, model_id=None, 
         "engine_map_rows": len(batch_engine_map),
         "resolved_models": {mid: model_condition(m, cfg) for mid, m in models.items()},
         "runs": jobs})
-    script = Path(project_root) / "scripts" / "run_koopman.py"
+    script = Path(__file__).resolve().parents[1] / "scripts" / "run_dataset.py"
     if not script.exists():
         raise FileNotFoundError(script)
     manifest = []

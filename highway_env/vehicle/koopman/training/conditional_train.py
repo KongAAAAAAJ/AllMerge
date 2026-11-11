@@ -1,5 +1,5 @@
 """Model-specific trainer: K1-P, K1-F and K2 neural Koopman variants."""
-from .neural_train import train_neural
+from highway_env.vehicle.koopman.training.neural_train import train_neural
 
 
 def train_conditioned(variant,cfg,project_root,splits,manifest,epochs=None,device=None):

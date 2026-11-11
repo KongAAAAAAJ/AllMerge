@@ -11,13 +11,13 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from .dataset import KoopmanWindowDataset, discover_episodes
-from .metrics import (PAPER_COLUMNS, MODELS, get_errors, summarize_all,
+from highway_env.vehicle.koopman.data.dataset import KoopmanWindowDataset, discover_episodes
+from highway_env.vehicle.koopman.evaluation.metrics import (PAPER_COLUMNS, MODELS, get_errors, summarize_all,
                       save_episodes, save_position_curve, save_table_row)
-from .neural_train import load_neural
-from .edmd_train import load_edmd
-from .k0_train import choose_device
-from .shared_split import resolve,load as load_shared
+from highway_env.vehicle.koopman.training.neural_train import load_neural
+from highway_env.vehicle.koopman.training.edmd_train import load_edmd
+from highway_env.vehicle.koopman.training.base_train import choose_device
+from highway_env.vehicle.koopman.data.shared_split import resolve,load as load_shared
 
 
 def slug(kind):return kind.lower().replace(' ','_').replace('-','_')
@@ -313,7 +313,7 @@ def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=Non
         if ck['split_sha256']!=manifest['sha256']:raise ValueError('Mismatch in training partitions')
         results=[]
         for ep in cases:
-            from .dataset import KoopmanWindowDataset
+            from highway_env.vehicle.koopman.data.dataset import KoopmanWindowDataset
             ds=KoopmanWindowDataset([ep],history_steps=history,horizon_steps=h,
                                     warmup_s=offset_s,window_stride=1,dt=dt)
             # Exact aligned window k, not merely first window if rounding differs.

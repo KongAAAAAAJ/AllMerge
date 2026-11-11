@@ -7,7 +7,7 @@ are conditioned on the operating condition. No condition leakage in K1-F.
 from __future__ import annotations
 import torch
 from torch import nn
-from .base_model import NeuralKoopmanK0, rollout_pose
+from highway_env.vehicle.koopman.models.base_model import NeuralKoopmanK0, rollout_pose
 
 VARIANTS={'K1-P':(0,), 'K1-F':(1,), 'K2':(0,1)}
 

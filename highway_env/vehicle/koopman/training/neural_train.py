@@ -10,11 +10,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from .base_model import NeuralKoopmanK0
-from .conditional_model import ConditionalKoopman
-from .dataset import KoopmanWindowDataset
-from .k0_train import set_seed, choose_device, save_checkpoint
-from .shared_split import resolve
+from highway_env.vehicle.koopman.models.base_model import NeuralKoopmanK0
+from highway_env.vehicle.koopman.models.conditional_model import ConditionalKoopman
+from highway_env.vehicle.koopman.data.dataset import KoopmanWindowDataset
+from highway_env.vehicle.koopman.training.base_train import set_seed, choose_device, save_checkpoint
+from highway_env.vehicle.koopman.data.shared_split import resolve
 
 NEURAL_NAMES=('K0','K1-P','K1-F','K2')
 

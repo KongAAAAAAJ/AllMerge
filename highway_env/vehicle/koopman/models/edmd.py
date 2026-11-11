@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 from torch import nn
-from .base_model import rollout_pose
+from highway_env.vehicle.koopman.models.base_model import rollout_pose
 
 NAMES=('EDMDc','Parametric EDMDc')
 

@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import numpy as np
-from .dataset import discover_episodes, episode_split, compute_normalization, describe_splits
+from highway_env.vehicle.koopman.data.dataset import discover_episodes, episode_split, compute_normalization, describe_splits
 
 
 def resolve(project_root, name):
