@@ -32,7 +32,7 @@ def main(argv=None):
         tr = cfg['training']
         root = resolve_repo_file(args.dataset_root or tr['dataset_root'])
         output = resolve_repo_file(args.output_dir or tr['output_dir'])
-        print('[DIFFUSION MODE] control (40-step acceleration/steering; trajectory loss ONLY)', flush=True)
+        print('[DIFFUSION MODE] control (40-step acceleration/steering; configurable dynamics and objectives)', flush=True)
         train(cfg, root=root, output_dir=output, max_steps=args.max_steps,
               max_epochs=args.max_epochs, limit_samples=args.limit_samples,
               device=args.device)

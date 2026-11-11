@@ -1,0 +1,71 @@
+# Unified diffusion configuration. Select trajectory or control with output_space.
+# Paths remain relative to all_merge/. Each mode keeps independent training settings.
+output_space: control
+trajectory:
+  model:
+    reg_head_type: gru
+  training:
+    dataset_root: outputs/expert_dataset/allmerge_expert_50k_dense10hz_v2
+    output_dir: outputs/diffusion_pretrain
+    train_split: train
+    val_split: val
+    batch_size: 64
+    num_workers: 8
+    persistent_workers: true
+    prefetch_factor: 2
+    pin_memory: auto
+    max_epochs: 50
+    max_steps: -1
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+    min_lr: 1.0e-06
+    warmup_epochs: 3
+    device: auto
+    precision: auto
+    grad_clip: 5.0
+    check_val_every_n_epoch: 1
+    log_every_n_steps: 10
+    seed: 0
+    dense_loss_enabled: false
+    dense_loss_lambda_p: 0.0
+    dense_loss_type: smooth_l1
+    dense_loss_terminal_only: true
+    dense_loss_weight_mode: terminal_constant
+    dense_loss_terminal_timestep: 0
+    dense_loss_terminal_weight: 1.0
+    dense_loss_dense_dt: 0.1
+control:
+  model:
+    reg_head_type: mlp
+  dynamics:
+    horizon_steps: 40
+    dt: 0.1
+    wheelbase_m: 5.5
+    max_accel_mps2: 2.5
+    max_steer_rad: 0.08
+    num_train_timesteps: 1000
+    inference_steps: 8
+    position_scale_m: 10.0
+    loss_position: 1.0
+  training:
+    dataset_root: outputs/expert_dataset/allmerge_expert_50k_dense10hz_v2
+    output_dir: outputs/diffusion_control_d1_trajectory_only
+    train_split: train
+    val_split: val
+    batch_size: 8
+    num_workers: 0
+    max_epochs: 50
+    lr: 0.0001
+    weight_decay: 0.0001
+    grad_clip: 1.0
+    patience: 15
+    device: auto
+    seed: 0
+runtime:
+  device: auto
+  deterministic_seed: 0
+  checkpoint:
+    trajectory: outputs/diffusion_pretrain/YOUR_TRAJECTORY_CHECKPOINT.pt
+    control: outputs/diffusion_control_d1_trajectory_only/best.pt
+  diffusion_spline_enabled: false
+  diffusion_execution_enabled: false

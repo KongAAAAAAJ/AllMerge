@@ -1,7 +1,7 @@
-"""Train 40-step direct-control diffusion ONLY with expert trajectory loss.
+"""Train TRACE control-space diffusion with configurable execution and losses.
 
-Input: expert future_trajectory_dense [B,40,2]. No inverse dynamics, pseudo
-control labels, control regression loss or mode classification loss.
+Input: expert future_trajectory_dense [B,40,2]. No inverse dynamics or
+pseudo controls. K2 requires observed history, payload and road friction.
 """
 from __future__ import annotations
 
@@ -30,8 +30,10 @@ def unpack(batch, device):
     features = {k: v.to(device, non_blocking=True) for k, v in features.items()}
     if 'trajectory_dense' not in targets:
         raise RuntimeError('Control-space training requires future_trajectory_dense [40,2]')
-    # Explicitly ignore target_mode: this training path uses ONLY trajectory GT.
-    return features, targets['trajectory_dense'].to(device)
+    # No inverse-control labels or mode CE target. K2 context remains observed input.
+    context = {k: v.to(device, non_blocking=True) for k, v in targets.items()
+               if k.startswith('koopman_') and isinstance(v, torch.Tensor)}
+    return features, targets['trajectory_dense'].to(device), context
 
 
 def _make_loader(dataset_root, split, batch_size, workers, max_samples, shuffle):
@@ -45,7 +47,8 @@ def _make_loader(dataset_root, split, batch_size, workers, max_samples, shuffle)
 def _run_pass(model, loader, optimizer, device, max_batches=None, clip_norm=1.0):
     training = optimizer is not None
     model.train(training)
-    totals = {'loss': 0.0, 'position_loss': 0.0}
+    totals = {k: 0.0 for k in ('loss', 'position_loss', 'trajectory_loss',
+                                  'ltr_loss', 'fuel_loss', 'progress_loss')}
     # Fixed validation noise gives comparable model-selection scores per epoch.
     val_generator = None
     if not training:
@@ -55,9 +58,9 @@ def _run_pass(model, loader, optimizer, device, max_batches=None, clip_norm=1.0)
     for j, batch in enumerate(loader):
         if max_batches is not None and j >= max_batches:
             break
-        features, xy = unpack(batch, device)
+        features, xy, context = unpack(batch, device)
         with torch.set_grad_enabled(training):
-            result = model.forward_train(features, xy, generator=val_generator)
+            result = model.forward_train(features, xy, generator=val_generator, context=context)
             loss = result['loss']
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError('Non-finite trajectory-only training loss')
@@ -87,14 +90,29 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
     if device_name == 'auto':
         device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
     selected_device = torch.device(device_name)
-    model = ControlDiffusionPlanner(cfg.get('model'), cfg.get('control')).to(selected_device)
+    model = ControlDiffusionPlanner(
+        cfg.get('model'), cfg.get('control'),
+        execution_config=cfg.get('execution'), loss_config=cfg.get('losses'),
+    ).to(selected_device)
+    # Explicitly exclude frozen K2 parameters from the optimizer.
+    trainable_parameters = [p for p in model.parameters() if p.requires_grad]
     batch_size = int(tr.get('batch_size', 8))
     workers = int(tr.get('num_workers', 0))
     train_loader = _make_loader(root, train_split or tr.get('train_split', 'train'),
                                 batch_size, workers, limit_samples, True)
     val_loader = _make_loader(root, val_split or tr.get('val_split', 'val'),
                               batch_size, workers, limit_samples, False)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(tr.get('lr', 1e-4)),
+    # Audit the selected dataset before the first optimizer step. Older
+    # kinematic expert shards are legal only when K2/fuel are not requested.
+    from highway_env.planner.diffusion.common.execution import K2_CONTEXT
+    first_targets = train_loader.dataset[0][1]
+    required = K2_CONTEXT if model.vehicle_model.kind == 'koopman_k2' else ()
+    if model._weight('fuel') > 0:
+        required = tuple(set(required) | {'koopman_payload_kg'})
+    missing = [key for key in required if key not in first_targets]
+    if missing:
+        raise KeyError(f'Selected expert shard is incompatible with execution/loss config: missing {missing}')
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=float(tr.get('lr', 1e-4)),
                                   weight_decay=float(tr.get('weight_decay', 1e-4)))
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -114,8 +132,13 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
                **{f'val_{k}': v for k, v in val_metrics.items()}}
         history.append(row)
         ckpt = {
-            'architecture': 'TRACE_control_diffusion_D1_trajectory_only',
+            'architecture': ('TRACE_control_diffusion_D1_trajectory_only'
+                             if model.vehicle_model.kind == 'kinematic' and not cfg.get('losses')
+                             else 'TRACE_control_diffusion_D2'),
             'model_config': cfg.get('model', {}), 'control_config': cfg.get('control', {}),
+            'execution_config': model.execution_config,
+            'loss_config': model.loss_config,
+            'koopman_metadata': model.vehicle_model.koopman_metadata,
             'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict(),
             'epoch': epoch, 'history': history,
         }
@@ -123,9 +146,13 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         if val_metrics['loss'] < best:
             best = val_metrics['loss']; best_epoch = epoch
             torch.save(ckpt, output / 'best.pt')
-        print(f'[D1 TRAJ ONLY] epoch={epoch}/{epochs} '
-              f'train_xy={train_metrics["loss"]:.6f} '
-              f'val_xy={val_metrics["loss"]:.6f}', flush=True)
+        print(f'[TRACE CONTROL] epoch={epoch}/{epochs} '
+              f'train_total={train_metrics["loss"]:.6f} '
+              f'val_total={val_metrics["loss"]:.6f} '
+              f'traj={val_metrics["trajectory_loss"]:.6f} '
+              f'ltr={val_metrics["ltr_loss"]:.6f} '
+              f'fuel={val_metrics["fuel_loss"]:.6f} '
+              f'prog={val_metrics["progress_loss"]:.6f}', flush=True)
         if int(tr.get('patience', 0)) > 0 and epoch - best_epoch >= int(tr['patience']):
             break
     with (output / 'loss.csv').open('w', newline='', encoding='utf-8') as f:
@@ -137,7 +164,12 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
 
 def load_control_checkpoint(checkpoint, device='cpu'):
     payload = torch.load(checkpoint, map_location=device, weights_only=True)
-    model = ControlDiffusionPlanner(payload['model_config'], payload['control_config'])
+    model = ControlDiffusionPlanner(
+        payload['model_config'], payload['control_config'],
+        execution_config=payload.get('execution_config'),
+        loss_config=payload.get('loss_config'),
+        koopman_metadata=payload.get('koopman_metadata'),
+    )
     model.load_state_dict(payload['model_state'])
     return model.to(device).eval(), payload
 

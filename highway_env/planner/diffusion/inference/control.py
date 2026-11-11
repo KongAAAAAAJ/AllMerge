@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from highway_env.planner.diffusion.models.control import ControlDiffusionPlanner
+from scripts.training.train_diffusion_control import load_control_checkpoint
+from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 
 
@@ -17,9 +18,7 @@ class ControlDiffusionRuntime:
         path = Path(checkpoint)
         if not path.exists():
             raise FileNotFoundError(path)
-        payload = torch.load(path, map_location='cpu', weights_only=True)
-        self.model = ControlDiffusionPlanner(payload['model_config'], payload['control_config'])
-        self.model.load_state_dict(payload['model_state'])
+        self.model, payload = load_control_checkpoint(path, device='cpu')
         self.model.to(self.device).eval()
         self.adapter = PlannerTensorAdapter(self.model.scene_config, self.device)
         self.deterministic_seed = deterministic_seed
@@ -36,8 +35,16 @@ class ControlDiffusionRuntime:
         if self.device.type == 'cuda':
             torch.cuda.synchronize(self.device)
         start = time.perf_counter()
+        context = {}
+        if self.model.vehicle_model.kind == 'koopman_k2':
+            absent = [k for k in K2_CONTEXT if k not in numpy_features]
+            if absent:
+                raise KeyError(f'K2 runtime requires synchronized observed context: {absent}')
+            context = {k: torch.as_tensor(numpy_features[k], dtype=torch.float32,
+                                           device=self.device) for k in K2_CONTEXT}
         prediction = self.model.infer_multimodal(features, generator=generator,
-                                                 num_steps=self.inference_steps)
+                                                 num_steps=self.inference_steps,
+                                                 context=context)
         if self.device.type == 'cuda':
             torch.cuda.synchronize(self.device)
         self.last_latency_ms = (time.perf_counter() - start) * 1000

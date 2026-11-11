@@ -1,5 +1,12 @@
-# Unified diffusion configuration. Select trajectory or control with output_space.
-# Paths remain relative to all_merge/. Each mode keeps independent training settings.
+# Unified trajectory/control diffusion configuration (D1 and Koopman D2).
+# Current defaults retain kinematic execution and legacy_smooth_l1 loss.
+# To run the Koopman paper experiment, change these four settings together:
+#   control.execution.model: koopman_k2
+#   control.losses.trajectory.type: paper_mse
+#   control.training.output_dir: outputs/trace_control_koopman_d2
+#   runtime.checkpoint.control: outputs/trace_control_koopman_d2/best.pt
+# K2 requires a trained checkpoint and expert shards with synchronized K2 context.
+# LTR/fuel/progress remain disabled until limits/calibration and weights are supplied.
 output_space: control
 trajectory:
   model:
@@ -61,6 +68,22 @@ control:
     patience: 15
     device: auto
     seed: 0
+  execution:
+    model: kinematic
+    checkpoint: outputs/koopman/checkpoints/v0/k2/best.pt
+  losses:
+    trajectory:
+      type: legacy_smooth_l1
+      weight: 1.0
+    ltr:
+      weight: 0.0
+      limit: null
+    fuel:
+      weight: 0.0
+      parameters: null
+    progress:
+      weight: 0.0
+      minimum_progress_m: null
 runtime:
   device: auto
   deterministic_seed: 0

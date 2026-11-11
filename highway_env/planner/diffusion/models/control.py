@@ -22,7 +22,9 @@ from highway_env.planner.diffusion.models.schedule import TruncatedDDIMSchedule
 from highway_env.planner.diffusion.common.encoders import StructuredSceneEncoder
 from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 from .blocks import CrossAttentionBlock, SinusoidalTimeEmbedding
-from highway_env.planner.diffusion.common.kinematics import rollout_bicycle
+from highway_env.planner.diffusion.common.execution import VehicleExecution
+from highway_env.planner.diffusion.common.fuel import FuelParameters, vt_cpfm_from_states
+from highway_env.planner.diffusion.common.progress import centerline_progress
 
 
 @dataclass
@@ -87,7 +89,8 @@ class ControlDiffusionPlanner(nn.Module):
     infer_multimodal: same DDIM schedule, mode chosen by goal endpoint distance.
     """
 
-    def __init__(self, model_config=None, control_config=None):
+    def __init__(self, model_config=None, control_config=None, *,
+                 execution_config=None, loss_config=None, koopman_metadata=None):
         super().__init__()
         self.scene_config = build_structured_diffusion_config(**(model_config or {}))
         self.ctrl_cfg = ControlSpaceConfig(**(control_config or {}))
@@ -98,6 +101,14 @@ class ControlDiffusionPlanner(nn.Module):
         self.schedule = TruncatedDDIMSchedule(self.ctrl_cfg.num_train_timesteps)
         self.register_buffer('control_limits', torch.tensor(
             [self.ctrl_cfg.max_accel_mps2, self.ctrl_cfg.max_steer_rad], dtype=torch.float32))
+        self.execution_config = dict(execution_config or {'model': 'kinematic'})
+        self.loss_config = dict(loss_config or {})
+        self.vehicle_model = VehicleExecution(
+            self.execution_config, dt=self.ctrl_cfg.dt,
+            wheelbase_m=self.ctrl_cfg.wheelbase_m,
+            koopman_metadata=koopman_metadata,
+        )
+        self._validate_objectives()
 
     def _encode_scene(self, features):
         device = features['ego_state'].device
@@ -129,51 +140,130 @@ class ControlDiffusionPlanner(nn.Module):
             sample = self.schedule.step_predict_x0(sample, x0, t, next_t)
         return sample * self.control_limits
 
-    def _all_poses(self, controls, features):
-        B, M, H, _ = controls.shape
-        initial_vx = features['ego_state'][:, 0].repeat_interleave(M)
-        poses, speeds = rollout_bicycle(controls.reshape(B * M, H, 2),
-                                        initial_vx, self.ctrl_cfg.dt,
-                                        self.ctrl_cfg.wheelbase_m)
-        return poses.reshape(B, M, H + 1, 3), speeds.reshape(B, M, H + 1)
+    def _validate_objectives(self):
+        cfg = self.loss_config
+        trajectory = cfg.get('trajectory', {})
+        if trajectory.get('type', 'legacy_smooth_l1') not in ('legacy_smooth_l1', 'paper_mse'):
+            raise ValueError('trajectory.type: legacy_smooth_l1 or paper_mse')
+        for name in ('trajectory', 'ltr', 'fuel', 'progress'):
+            weight = float(cfg.get(name, {}).get('weight',
+                self.ctrl_cfg.loss_position if name == 'trajectory' else 0.0))
+            if weight < 0:
+                raise ValueError(f'{name}.weight must be nonnegative')
+        if self._weight('ltr') > 0:
+            if self.vehicle_model.kind != 'koopman_k2':
+                raise ValueError('LTR penalty requires Koopman K2; kinematic model has no LTR')
+            limit = cfg.get('ltr', {}).get('limit')
+            if limit is None or not 0 < float(limit) < 1:
+                raise ValueError('LTR limit must be explicitly set in (0,1)')
+        if self._weight('fuel') > 0:
+            self._fuel_parameters()  # Fail fast on missing calibration.
+        if self._weight('progress') > 0:
+            minimum = cfg.get('progress', {}).get('minimum_progress_m')
+            if minimum is None or float(minimum) < 0:
+                raise ValueError('progress.minimum_progress_m must be >=0')
 
-    def forward_train(self, features, target_dense_xy, target_mode=None, *, generator=None):
-        """Trajectory-only supervision: NO inverse controls, NO control/CE loss."""
+    def _weight(self, name):
+        default = self.ctrl_cfg.loss_position if name == 'trajectory' else 0.0
+        return float(self.loss_config.get(name, {}).get('weight', default))
+
+    def _fuel_parameters(self):
+        values = self.loss_config.get('fuel', {}).get('parameters')
+        if not isinstance(values, dict):
+            raise ValueError('Positive fuel weight requires calibrated fuel.parameters')
+        return FuelParameters(**values)
+
+    def _all_predictions(self, controls, features, context=None):
+        return self.vehicle_model(controls, features, context)
+
+    def _all_poses(self, controls, features, context=None):
+        # Legacy helper retained for external D1 callers.
+        result = self._all_predictions(controls, features, context)
+        return result['poses'], result['speeds']
+
+    def forward_train(self, features, target_dense_xy, target_mode=None, *,
+                      generator=None, context=None):
+        """Expert XY supervision; no pseudo controls or inverse dynamics.
+
+        Best-of-M assignment is based on *trajectory error alone*. Auxiliary
+        LTR/fuel/progress terms apply only to the selected mode, so they do
+        not create a reward-based oracle that changes supervision labels.
+        """
         cfg = self.ctrl_cfg
         B = features['ego_state'].shape[0]
         if target_dense_xy.shape != (B, cfg.horizon_steps, 2):
             raise ValueError('Expert trajectory_dense must be [B,40,2]')
         controls_all = self._sample_controls(features, generator=generator)
-        poses_all, speeds_all = self._all_poses(controls_all, features)
-        errors = F.smooth_l1_loss(
-            poses_all[:, :, 1:, :2] / cfg.position_scale_m,
-            target_dense_xy[:, None].expand_as(poses_all[:, :, 1:, :2]) / cfg.position_scale_m,
-            reduction='none').mean(dim=(-2, -1))
+        pred = self._all_predictions(controls_all, features, context)
+        poses_all, speeds_all = pred['poses'], pred['speeds']
+        predicted_xy = poses_all[:, :, 1:, :2]
+        truth = target_dense_xy[:, None].expand_as(predicted_xy)
+        if self.loss_config.get('trajectory', {}).get('type', 'legacy_smooth_l1') == 'paper_mse':
+            # Paper: (1/H) sum_j ||p_j - p^GT_j||_2^2 in physical m^2.
+            errors = (predicted_xy - truth).square().sum(dim=-1).mean(dim=-1)
+        else:
+            # Bit-for-bit equivalent to the original D1 SmoothL1 regression.
+            errors = F.smooth_l1_loss(predicted_xy / cfg.position_scale_m,
+                truth / cfg.position_scale_m, reduction='none').mean(dim=(-2, -1))
         valid = features['mode_valid_mask'].bool()
         if not valid.any(dim=1).all():
             raise ValueError('Each episode needs at least one valid mode')
         oracle_err, selected = errors.masked_fill(~valid, float('inf')).min(dim=1)
-        loss = cfg.loss_position * oracle_err.mean()
         batch_ix = torch.arange(B, device=controls_all.device)
-        return {
-            'loss': loss, 'position_loss': oracle_err.mean(),
-            'controls': controls_all[batch_ix, selected],
-            'poses': poses_all[batch_ix, selected],
-            'speeds': speeds_all[batch_ix, selected],
-            'selected_mode': selected,
+        selected_controls = controls_all[batch_ix, selected]
+        selected_poses = poses_all[batch_ix, selected]
+        selected_speeds = speeds_all[batch_ix, selected]
+        z = oracle_err.new_zeros(())
+        ltr_loss, fuel_loss, progress_loss = z, z, z
+        fuel_total = None
+        if self._weight('ltr') > 0:
+            selected_ltr = pred['ltr'][batch_ix, selected, 1:]
+            limit = float(self.loss_config['ltr']['limit'])
+            ltr_loss = torch.relu(selected_ltr.abs() - limit).square().mean()
+        if self._weight('fuel') > 0:
+            if context is None or 'koopman_payload_kg' not in context:
+                raise KeyError('Fuel loss needs physical koopman_payload_kg [B] in expert context')
+            payload = context['koopman_payload_kg'].to(selected_speeds).reshape(B)
+            if (payload < 0).any() or not torch.isfinite(payload).all():
+                raise ValueError('Invalid fuel payload_kg')
+            fuel_result = vt_cpfm_from_states(
+                selected_speeds, payload, self._fuel_parameters(), dt=cfg.dt)
+            fuel_total = fuel_result['fuel_total']
+            fuel_loss = fuel_total.mean()
+        if self._weight('progress') > 0:
+            # Paper: road progress along the reference target lane (not ego x).
+            min_progress = float(self.loss_config['progress']['minimum_progress_m'])
+            delta_s = centerline_progress(selected_poses[:, -1], features['target_lane_polyline'])
+            progress_loss = torch.relu(min_progress - delta_s).square().mean()
+        trajectory_loss = oracle_err.mean()
+        total = (self._weight('trajectory') * trajectory_loss +
+                 self._weight('ltr') * ltr_loss +
+                 self._weight('fuel') * fuel_loss +
+                 self._weight('progress') * progress_loss)
+        output = {
+            'loss': total, 'position_loss': trajectory_loss,
+            'trajectory_loss': trajectory_loss, 'ltr_loss': ltr_loss,
+            'fuel_loss': fuel_loss, 'progress_loss': progress_loss,
+            'controls': selected_controls, 'poses': selected_poses,
+            'speeds': selected_speeds, 'selected_mode': selected,
         }
+        if pred['ltr'] is not None:
+            output['ltr'] = pred['ltr'][batch_ix, selected]
+            output['states'] = pred['states'][batch_ix, selected]
+        if fuel_total is not None:
+            output['fuel_total'] = fuel_total
+        return output
 
     def infer_multimodal(self, features, generator: Optional[torch.Generator] = None,
-                         num_steps: Optional[int] = None):
+                         num_steps: Optional[int] = None, context=None):
         cfg = self.ctrl_cfg
         controls_all = self._sample_controls(features, generator=generator,
                                              num_steps=num_steps)
-        poses_all, speeds_all = self._all_poses(controls_all, features)
+        pred = self._all_predictions(controls_all, features, context)
+        poses_all, speeds_all = pred['poses'], pred['speeds']
         valid = features['mode_valid_mask'].bool()
         if not valid.any(dim=1).all():
             raise ValueError('Every episode needs at least one valid mode')
-        # Geometric endpoint matching is an inference heuristic, not a trained
-        # classifier, safety scoring network or imitation-control label.
         target = features['target_point'][:, None, :]
         scores = -(poses_all[:, :, -1, :2] - target).square().sum(dim=-1)
         mode = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
@@ -182,14 +272,18 @@ class ControlDiffusionPlanner(nn.Module):
         poses = poses_all[idx, mode]
         speeds = speeds_all[idx, mode]
         future_xy = poses[:, 1:, :2]
-        return {
+        result = {
             'control': controls,
             'control_candidates': controls_all,
             'pose': poses,
             'trajectory_dense': future_xy,
             'trajectory': future_xy[:, 4::5, :],
             'trajectory_candidates': poses_all[:, :, 5::5, :2],
-            'trajectory_mode_logits': scores,  # Geometric, NOT learned logits.
+            'trajectory_mode_logits': scores,
             'trajectory_mode_idx': mode,
             'speeds': speeds,
         }
+        if pred['ltr'] is not None:
+            result['ltr'] = pred['ltr'][idx, mode]
+            result['states'] = pred['states'][idx, mode]
+        return result
