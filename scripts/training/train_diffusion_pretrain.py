@@ -55,7 +55,7 @@ def validate_dataset_root(dataset_root: Path, splits: tuple[str, ...]) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Pretrain AllMerge StructuredDiffusionPlanner.")
-    parser.add_argument("--config", default="configs/diffusion_pretrain.json")
+    parser.add_argument("--config", default="configs/train/diffusion.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--train-split", choices=("all", "train", "val", "test"), default=None)

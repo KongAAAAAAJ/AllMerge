@@ -6,9 +6,9 @@ from typing import Any, Dict, Iterable, Tuple
 
 import torch
 
-from .objective import group_relative_advantage, grpo_clipped_objective
-from .reward_adapter import CandidateRewardAdapter
-from .sampling import DiffusionTrace, GroupDiffusionSampler
+from highway_env.planner.diffusion.grpo.objective import group_relative_advantage, grpo_clipped_objective
+from highway_env.planner.diffusion.grpo.reward_adapter import CandidateRewardAdapter
+from highway_env.planner.diffusion.grpo.sampling import DiffusionTrace, GroupDiffusionSampler
 
 
 @dataclass

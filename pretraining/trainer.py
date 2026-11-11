@@ -14,9 +14,9 @@ from typing import Dict, Optional
 import numpy as np
 import torch
 
-from highway_env.planner.diffusion.config import build_structured_diffusion_config
-from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
-from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
+from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
+from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
+from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 
 from .checkpoint_io import load_checkpoint_file
 from .contract import (

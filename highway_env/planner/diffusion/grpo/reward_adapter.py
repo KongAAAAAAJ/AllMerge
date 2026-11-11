@@ -25,8 +25,8 @@ import torch
 
 
 AUTO_REWARD_CANDIDATES = (
-    "highway_env.planner.diffusion.trajectory_mode_reward:evaluate_candidates",
-    "highway_env.planner.diffusion.trajectory_mode_reward.evaluator:evaluate_candidates",
+    "highway_env.planner.diffusion.rewards.trajectory_mode:evaluate_candidates",
+    "highway_env.planner.diffusion.rewards.trajectory_mode.evaluator:evaluate_candidates",
 )
 
 _W4_PARAMETERS = frozenset(

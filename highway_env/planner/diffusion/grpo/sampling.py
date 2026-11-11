@@ -5,7 +5,7 @@ from typing import Dict, Iterable, Tuple
 
 import torch
 
-from .scheduler import StochasticDDIMTransition
+from highway_env.planner.diffusion.grpo.scheduler import StochasticDDIMTransition
 
 
 @dataclass

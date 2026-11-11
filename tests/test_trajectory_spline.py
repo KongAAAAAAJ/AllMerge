@@ -6,7 +6,7 @@ import math
 import pytest
 import torch
 
-from highway_env.planner.diffusion.trajectory_spline import (
+from highway_env.planner.diffusion.common.spline import (
     ClampedCubicTrajectorySpline,
 )
 

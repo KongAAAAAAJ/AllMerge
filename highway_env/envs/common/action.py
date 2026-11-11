@@ -616,7 +616,7 @@ class MultiAgentAction(ActionType):
                 "Diffusion execution requires diffusion_spline_enabled=True"
             )
 
-        from highway_env.planner.diffusion.runtime import (
+        from highway_env.planner.diffusion.inference.runtime import (
             DiffusionPlannerRuntime,
         )
 

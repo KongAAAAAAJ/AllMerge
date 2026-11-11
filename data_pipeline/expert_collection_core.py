@@ -41,7 +41,7 @@ from decide.decide import decide  # noqa: E402
 from simulation.env_reset import env_reset  # noqa: E402
 from mode_selector.mode_selector import set_platoon_mode  # noqa: E402
 
-from highway_env.planner.diffusion.mode_assignment import (  # noqa: E402
+from highway_env.planner.diffusion.common.mode_assignment import (  # noqa: E402
     SEMANTIC_KEEP,
     SEMANTIC_LEFT_LC,
     SEMANTIC_RIGHT_LC,

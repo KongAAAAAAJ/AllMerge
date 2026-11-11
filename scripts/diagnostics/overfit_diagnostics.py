@@ -25,9 +25,9 @@ from typing import Dict, Iterable, List, Mapping, Optional
 
 import torch
 
-from highway_env.planner.diffusion.config import build_structured_diffusion_config
-from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
-from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
+from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
+from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
+from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 from pretraining.checkpoint_io import load_checkpoint_file
 from pretraining.config_io import load_config, resolve_pin_memory
 from pretraining.contract import validate_model_schema
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         description="Diagnose W2 diffusion 100-sample trajectory overfit."
     )
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--config", default="configs/diffusion_pretrain.json")
+    parser.add_argument("--config", default="configs/train/diffusion.yaml")
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument(
         "--split", choices=("all", "train", "val", "test"), default="all"

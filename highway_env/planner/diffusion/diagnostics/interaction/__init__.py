@@ -1,0 +1,1 @@
+"""Diffusion diagnostics interaction components."""

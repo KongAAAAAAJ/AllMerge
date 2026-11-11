@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from highway_env.planner.diffusion.runtime import DiffusionPlannerRuntime
+from highway_env.planner.diffusion.inference.runtime import DiffusionPlannerRuntime
 
 
 def _features(batch=2, modes=10, horizon=8):

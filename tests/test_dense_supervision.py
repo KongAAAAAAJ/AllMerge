@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import torch
 
-from highway_env.planner.diffusion.config import build_structured_diffusion_config
-from highway_env.planner.diffusion.structured_model import StructuredDiffusionPlanner
-from highway_env.planner.diffusion.tensor_adapter import PlannerTensorAdapter
+from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
+from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
+from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 
 
 def _synthetic_features(cfg, device):

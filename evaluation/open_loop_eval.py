@@ -25,10 +25,10 @@ from evaluation.open_loop_visualization import (
     plot_random_trajectory_gallery,
     plot_training_loss_curve,
 )
-from highway_env.planner.diffusion.mode_assignment import (
+from highway_env.planner.diffusion.common.mode_assignment import (
     assign_expert_mode,
 )
-from highway_env.planner.diffusion.runtime import (
+from highway_env.planner.diffusion.inference.runtime import (
     DiffusionPlannerRuntime,
 )
 from pretraining.dataset_adapter import (

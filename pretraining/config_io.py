@@ -17,7 +17,7 @@ def load_config(path: str | Path) -> dict:
         except ImportError as exc:
             raise RuntimeError(
                 f"{path} is YAML but PyYAML is not installed. "
-                "Use configs/diffusion_pretrain.json instead."
+                "Install PyYAML to read this configuration."
             ) from exc
         with path.open("r", encoding="utf-8") as fp:
             data = yaml.safe_load(fp) or {}
@@ -25,6 +25,12 @@ def load_config(path: str | Path) -> dict:
         raise ValueError(f"Unsupported config format: {path.suffix}")
     if not isinstance(data, dict):
         raise TypeError(f"Config root must be a mapping: {path}")
+    if 'output_space' in data and 'trajectory' in data:
+        # This loader serves trajectory pretraining/evaluation, irrespective of
+        # the mode selected for the unified training/runtime entry point.
+        data = data['trajectory']
+        if not isinstance(data, dict) or not all(isinstance(data.get(k), dict) for k in ('model', 'training')):
+            raise ValueError('trajectory must contain model and training mappings')
     return data
 
 

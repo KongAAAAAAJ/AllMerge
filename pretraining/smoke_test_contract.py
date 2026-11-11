@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 
-from highway_env.planner.diffusion.config import build_structured_diffusion_config
+from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
 from pretraining.contract import validate_training_batch
 from pretraining.dataset_adapter import build_w1_dataloader
 
