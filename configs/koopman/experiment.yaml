@@ -1,0 +1,51 @@
+# Stage C unified six-model training and paper evaluation.
+# This file is SEPARATE from configs/koopman.yaml, which remains owned by running TruckSim collection.
+# Run `python scripts/run_koopman_train.py split` ONCE after selecting accepted dataset snapshot.
+data:
+  roots:
+    - outputs/koopman/data/v0
+  accepted_only: true
+  strict: false
+  dt_s: 0.1
+  history_steps: 5
+  horizon_steps: 40
+  warmup_s: 1.0
+  train_stride: 2
+  eval_stride: 5
+  val_fraction: 0.15
+  test_fraction: 0.10
+
+split:
+  path: outputs/koopman/splits/v0.json
+
+model:
+  latent_dim: 32
+  hidden_dim: 128
+  condition_hidden: 64
+
+edmd:
+  ridge: 0.001
+
+training:
+  device: auto
+  seed: 2026
+  epochs: 60
+  batch_size: 64
+  lr: 0.0003
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  patience: 20
+  position_scale_m: 5.0
+  ltr_scale: 0.1
+  loss_weights:
+    reconstruction: 0.1
+    one_step: 0.2
+    rollout: 1.0
+    dynamics: 0.05
+    trajectory: 0.05
+    ltr: 0.15
+    matrix_regularization: 0.0001
+
+outputs:
+  checkpoints: outputs/koopman/checkpoints/v0
+  evaluation: outputs/koopman/evaluation/v0

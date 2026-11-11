@@ -143,6 +143,7 @@ class KoopmanWindowDataset(Dataset):
             'future_controls': torch.from_numpy(ep.controls[k:k+t].copy()),
             'target_states': torch.from_numpy(ep.states[k:k+t+1].copy()),
             'target_poses': torch.from_numpy(ep.poses[k:k+t+1].copy()),
+            'conditions': torch.tensor([float(ep.info['payload_kg']), float(ep.info['road_mu'])], dtype=torch.float32),
             'target_ltr': torch.from_numpy(np.nan_to_num(ep.ltr[k:k+t+1], nan=0.0, posinf=0.0, neginf=0.0).copy()),
             'ltr_valid': torch.from_numpy(np.isfinite(ep.ltr[k:k+t+1]).copy()),
         }
