@@ -4,10 +4,6 @@ from pathlib import Path
 MODEL_PATH = (
     Path(__file__).resolve().parents[1]
     / "ckpts"
-    / "ckpt_decision"
-    / "case_1_Risk-aware_Attention_PPO"
-    / "slow_down_1"
-    / "logs"
     / "slow_down_1_best_model.zip"
 )
 

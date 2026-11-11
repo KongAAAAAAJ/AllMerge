@@ -77,8 +77,21 @@ class TrucksimVehicle(FOLLOWVehicle):
             raise ValueError('TruckSim steering_ratio must be positive')
         result.engine_map = engine_map
         result.max_rpm = float(config['max_rpm'])
+        # Optional alignment with the calibrated 10-Hz Koopman data collector.
+        # Legacy TruckSim controllers retain their original solver-step gains.
+        result.expert_koopman_aligned = bool(config.get('expert_koopman_aligned', False))
+        result.actuator_update_dt_s = (float(config.get('actuator_update_dt_s', 0.1))
+                                       if result.expert_koopman_aligned else result.solver_dt)
+        if result.actuator_update_dt_s < result.solver_dt - 1e-9:
+            raise ValueError('actuator_update_dt_s cannot be smaller than solver dt')
+        result._next_actuator_update_time = None
+        result.throttle_limit_pct = float(config.get('throttle_limit_pct', 35.0))
+        result.brake_limit_mpa = float(config.get('brake_limit_mpa', 2.0))
         result.lower_ctrl_state = 'throttle'
-        result.low_controller = PIDController(kp=12, ki=12, kd=0.15, dt=result.solver_dt)
+        gains = config.get('longitudinal_pid', {}) if result.expert_koopman_aligned else {}
+        result.low_controller = PIDController(
+            kp=float(gains.get('kp',12)), ki=float(gains.get('ki',12)),
+            kd=float(gains.get('kd',0.15)), dt=result.actuator_update_dt_s)
         result.lateral_controller = None
         if result.control_mode == 'longitudinal_lateral':
             lat = config.get('lateral_controller', {})
@@ -87,7 +100,7 @@ class TrucksimVehicle(FOLLOWVehicle):
                 raise ValueError(f'TruckSim.lateral_controller requires {sorted(required)}')
             result.lateral_controller = LateralSteeringController(
                 steering_ratio=result.steering_ratio,
-                dt=result.solver_dt,
+                dt=result.actuator_update_dt_s,
                 kp=lat['kp'], ki=lat['ki'], kd=lat['kd'],
                 max_wheel_deg=lat['max_wheel_deg'],
                 max_rate_deg_s=lat['max_rate_deg_s'],
@@ -150,42 +163,56 @@ class TrucksimVehicle(FOLLOWVehicle):
         # every call. At 15 Hz with 0.0025 s steps this yields 26,27,27,... steps.
         self.solver_target_time += dt
         while self.trucksim_model.current_time + self.solver_dt <= self.solver_target_time + 1e-10:
-            export = self.export_array
-            if self.control_mode == 'longitudinal':
-                vx_mps = export[2] / 3.6
-                engine_rpm = export[12]
-                ax_mps2 = export[0] * 9.8
-            else:
-                e = self.signal_map['exports']
-                vx_mps = export[e['vx_kmh']] / 3.6
-                engine_rpm = export[e['engine_rpm']]
-                ax_mps2 = export[e['ax_g']] * 9.8
-            throttle, brake, self.lower_ctrl_state = acceleration_control(
-                vx=vx_mps, ax_ref=desired_acceleration,
-                engine_rpm=engine_rpm, ax_actual=ax_mps2,
-                state=self.lower_ctrl_state, low_controller=self.low_controller,
-                engine_map=self.engine_map, max_rpm=self.max_rpm,
-            )
-            if self.control_mode == 'longitudinal_lateral':
-                e = self.signal_map['exports']
-                measured_delta_rad = np.deg2rad((export[e['steer_left_deg']] +
-                                                  export[e['steer_right_deg']]) / 2)
-                steering_wheel_deg = self.lateral_controller.control(
-                    desired_steering_rad, measured_delta_rad)
-                self.trucksim_inputs = np.zeros(self.trucksim_model.configuration['n_import'])
-                u = self.signal_map['imports']
-                self.trucksim_inputs[u['throttle']] = throttle
-                self.trucksim_inputs[u['brake']] = brake
-                self.trucksim_inputs[u['steering_wheel_deg']] = steering_wheel_deg
-            else:
-                # Exact legacy I/O mapping and open-loop steering path.
-                self.trucksim_inputs = np.array([throttle, brake, steering_wheel_deg])
+            # Koopman collection holds native inputs for 0.1 s.  Apply exactly
+            # the same update cadence in expert scenes, including PID dt and
+            # steering rate limits.  Original mode still updates every step.
+            update_native = (not self.expert_koopman_aligned or
+                             self._next_actuator_update_time is None or
+                             self.trucksim_model.current_time >= self._next_actuator_update_time - 1e-9)
+            if update_native:
+                self._next_actuator_update_time = (
+                    self.trucksim_model.current_time + self.actuator_update_dt_s)
+            if update_native:
+                export = self.export_array
+                if self.control_mode == 'longitudinal':
+                    vx_mps = export[2] / 3.6
+                    engine_rpm = export[12]
+                    ax_mps2 = export[0] * 9.8
+                else:
+                    e = self.signal_map['exports']
+                    vx_mps = export[e['vx_kmh']] / 3.6
+                    engine_rpm = export[e['engine_rpm']]
+                    ax_mps2 = export[e['ax_g']] * 9.8
+                throttle, brake, self.lower_ctrl_state = acceleration_control(
+                    vx=vx_mps, ax_ref=desired_acceleration,
+                    engine_rpm=engine_rpm, ax_actual=ax_mps2,
+                    state=self.lower_ctrl_state, low_controller=self.low_controller,
+                    engine_map=self.engine_map, max_rpm=self.max_rpm,
+                )
+                if self.control_mode == 'longitudinal_lateral':
+                    e = self.signal_map['exports']
+                    measured_delta_rad = np.deg2rad((export[e['steer_left_deg']] +
+                                                      export[e['steer_right_deg']]) / 2)
+                    steering_wheel_deg = self.lateral_controller.control(
+                        desired_steering_rad, measured_delta_rad)
+                    self.trucksim_inputs = np.zeros(self.trucksim_model.configuration['n_import'])
+                    u = self.signal_map['imports']
+                    self.trucksim_inputs[u['throttle']] = (
+                        float(np.clip(100.0 * throttle, 0.0, self.throttle_limit_pct))
+                        if self.expert_koopman_aligned else throttle)
+                    self.trucksim_inputs[u['brake']] = (
+                        float(np.clip(brake, 0.0, self.brake_limit_mpa))
+                        if self.expert_koopman_aligned else brake)
+                    self.trucksim_inputs[u['steering_wheel_deg']] = steering_wheel_deg
+                else:
+                    # Exact legacy I/O mapping and open-loop steering path.
+                    self.trucksim_inputs = np.array([throttle, brake, steering_wheel_deg])
             status, self.export_array = self.trucksim_model.run(
                 self.trucksim_model.current_time + self.solver_dt,
                 self.trucksim_inputs, self.export_array,
             )
             if status:
-                self.trucksim_model.stop()
+                self.trucksim_model.stop(native_terminate=not self.expert_koopman_aligned)
                 raise RuntimeError(f"TruckSim solver stopped with status {status}")
         # Keep command and measurement separate: action is the requested input.
         self._sync_state()

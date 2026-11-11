@@ -256,6 +256,21 @@ class AllMergeExpertShardDataset(Dataset):
             ),
         }
 
+        # TruckSim expert episodes expose the exact K2 context.  Older
+        # kinematic-only shards remain readable by the original D1 trainer.
+        if "koopman_state_hist_si" in shard:
+            for key in (
+                "koopman_state_hist_si", "koopman_control_hist_si",
+                "koopman_pose0_si", "koopman_ltr0",
+                "koopman_payload_kg", "koopman_road_mu",
+                "koopman_vx_init_kmh",
+            ):
+                if key not in shard:
+                    raise KeyError(f"Missing paired TruckSim context {key}")
+                targets[key] = torch.from_numpy(
+                    np.asarray(shard[key][sample_idx], dtype=np.float32).copy()
+                )
+
         # STAGE3_DENSE_EXPERT_V2: optional for backward compatibility with v1 shards.
         if "future_trajectory_dense" in shard:
             required_dense_keys = (

@@ -94,6 +94,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-split-ratio", type=float, default=0.1)
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--max-consecutive-empty-episodes", type=int, default=20)
+    # The TruckSim expert dataset uses a new output directory, and a fresh
+    # subprocess for EACH episode to isolate native VehicleSim DLLs.
+    parser.add_argument("--trucksim-koopman-config", type=Path, default=None,
+                        help="Enable TruckSim expert collection with this existing Koopman YAML")
+    parser.add_argument("--engine-map-cache", type=Path, default=None,
+                        help="Pre-parsed engine map .npy shared by native workers")
+    parser.add_argument("--copy-trucksim-dll-instances", action="store_true",
+                        help="Create distinct per-ego DLL images beside each source DLL")
+    parser.add_argument("--max-episodes", type=int, default=None,
+                        help="Limit this invocation to one episode for native worker isolation")
+    parser.add_argument("--episode-index", type=int, default=None,
+                        help="Explicit episode index used by the external batch runner")
+    parser.add_argument("--defer-split", action="store_true",
+                        help="Do not recreate train/val/test splits after each worker")
     args = parser.parse_args()
 
     if args.target_samples <= 0:
@@ -631,7 +645,11 @@ def write_manifest(
             "horizon_sec": 4.0,
         },
         "schema": infer_schema(shard_dir),
-        "dataset_schema_version": "allmerge_expert_dense10hz_v2",
+        "dataset_schema_version": (
+            "allmerge_expert_trucksim_k2_context_v1"
+            if args.trucksim_koopman_config is not None
+            else "allmerge_expert_dense10hz_v2"
+        ),
         "dense_trajectory_contract": {
             "field": "future_trajectory_dense",
             "shape": [40, 2],
@@ -655,6 +673,11 @@ def write_manifest(
             "allow_contract_mismatch": bool(args.allow_contract_mismatch),
             "save_episode_videos": bool(args.save_episode_videos),
             "split_seed": int(args.split_seed),
+            "trucksim_koopman_config": (
+                str(args.trucksim_koopman_config)
+                if args.trucksim_koopman_config is not None else None
+            ),
+            "native_episode_isolation": bool(args.trucksim_koopman_config is not None),
             "split_ratios": [
                 float(args.train_split_ratio),
                 float(args.val_split_ratio),
@@ -698,6 +721,16 @@ def main() -> None:
         using_cuda=torch.cuda.is_available(),
     )
 
+    trucksim_cfg = None
+    if args.trucksim_koopman_config is not None:
+        from data_pipeline.expert_trucksim import load_collection_config
+        trucksim_cfg = load_collection_config(args.trucksim_koopman_config)
+        if args.max_episodes != 1:
+            raise ValueError(
+                "Native TruckSim collection requires --max-episodes 1, "
+                "with a fresh child process per episode. Use "
+                "scripts/data/run_expert_trucksim_collection.py for batches.")
+
     selected_scenarios = (
         list(SCENARIOS.items())
         if args.scenario == "all"
@@ -733,6 +766,14 @@ def main() -> None:
         }
 
     resumed_from_samples = int(state["total_samples"])
+    if trucksim_cfg is not None and resumed_from_samples:
+        first_shard = next(iter(sorted(shard_dir.glob('shard_*.npz'))), None)
+        if first_shard is not None:
+            with np.load(first_shard, allow_pickle=False) as prior:
+                if 'koopman_state_hist_si' not in prior.files:
+                    raise RuntimeError(
+                        'Cannot resume TruckSim experts into an old kinematic dataset. '
+                        'Select a new --dataset-name.')
 
     if resumed_from_samples >= args.target_samples:
         print(
@@ -763,7 +804,9 @@ def main() -> None:
     )
 
     total_samples = int(state["total_samples"])
-    episode_index = int(state["next_episode_index"])
+    episode_index = (int(args.episode_index) if args.episode_index is not None
+                     else int(state["next_episode_index"]))
+    episodes_run = 0
     frame_index = int(state["next_frame_index"])
     next_sample_index = int(state["next_sample_index"])
 
@@ -785,7 +828,9 @@ def main() -> None:
     print("dataset root:", dataset_root)
     print("=" * 108)
 
-    while total_samples < args.target_samples:
+    while total_samples < args.target_samples and (
+        args.max_episodes is None or episodes_run < args.max_episodes
+    ):
         scenario_name, env_cls = selected_scenarios[
             episode_index % len(selected_scenarios)
         ]
@@ -800,15 +845,40 @@ def main() -> None:
             "truncated": False,
         }
 
-        try:
-            env = env_cls(
-                config={
-                    "duration": float(args.duration),
-                    "offscreen_rendering": False,
-                },
-                render_mode=None,
+        case = None
+        if trucksim_cfg is not None:
+            from data_pipeline.expert_trucksim import (
+                select_case, scenario_trucksim_config, HistoricalContexts,
+                check_context,
             )
+            case = select_case(trucksim_cfg, episode_index)
+        history = None
+        try:
+            env_config = {
+                "duration": float(args.duration),
+                "offscreen_rendering": False,
+            }
+            if case is not None:
+                # Preload pure Python Koopman data conversions before the DLL.
+                # Previous SDK builds showed heap-corruption during late imports.
+                from highway_env.vehicle.koopman.data import processing as _processing
+                # The three controlled trucks use the same physical operating
+                # condition but three independently loaded native DLL images.
+                env_config.update(scenario_trucksim_config(
+                    trucksim_cfg, case, num_egos=3,
+                    copy_instances=args.copy_trucksim_dll_instances))
+                if args.engine_map_cache is not None:
+                    env_config['TruckSim']['engine_map_cache_npy'] = str(
+                        args.engine_map_cache.resolve())
+            env = env_cls(config=env_config, render_mode=None)
             _obs, _reset_info = env.reset(seed=int(episode_seed))
+            if case is not None:
+                history = HistoricalContexts(
+                    env.controlled_vehicles,
+                    compression_sign=trucksim_cfg['units'].get('wheel_compression_sign', 1.0))
+                print(f"[TRUCKSIM CASE] episode={episode_index} "
+                      f"scenario={scenario_name} model={case['model_id']} "
+                      f"payload={case['payload_kg']} kg mu={case['road_mu']}", flush=True)
 
             planner_cfg = env.config.get("Planner", {})
             if not planner_cfg.get("state", False):
@@ -835,10 +905,21 @@ def main() -> None:
             max_steps = int(np.ceil(float(args.duration) * policy_frequency))
 
             for _ in range(max_steps):
+                # The polynomial planner publishes its features/labels during
+                # Road.act() BEFORE Road.step().  The previous history window
+                # is the one aligned with those labels.
+                pre_step_contexts = None
+                if history is not None and history.ready():
+                    pre_step_contexts = [
+                        history.at_planning_time(i, case)
+                        for i in range(len(env.controlled_vehicles))
+                    ]
                 _obs, _reward, terminated, truncated, info = env.step(
                     int(args.group_action)
                 )
                 episode_step += 1
+                if history is not None:
+                    history.append_executed_transition(env.controlled_vehicles)
 
                 if bool(terminated) or bool(truncated):
                     skipped_done_steps += 1
@@ -863,6 +944,10 @@ def main() -> None:
                         "Check Planner.ExpertAlignment.enabled and aligned "
                         "Polynomial output."
                     )
+
+                if history is not None and pre_step_contexts is None:
+                    # Do not pad missing histories with fictitious zero states.
+                    continue
 
                 frame_record = build_frame_record(
                     frame_index=frame_index,
@@ -893,6 +978,9 @@ def main() -> None:
                     sample["expert_trajectory_10hz_time_s"] = (
                         dense_gt_time_s.astype(np.float32, copy=True)
                     )
+                    if pre_step_contexts is not None:
+                        sample.update(pre_step_contexts[ego_idx])
+                        check_context(sample)
 
                 remaining = args.target_samples - total_samples
                 samples = samples[:remaining]
@@ -958,16 +1046,24 @@ def main() -> None:
             )
 
         episode_index += 1
+        episodes_run += 1
 
     writer.close()
+    if args.defer_split:
+        # Parent batch runner owns the final split/manifest.  Do not scan every
+        # shard O(n^2) when one short native process collects one episode.
+        print(f"[EPISODE SAVED] index={episode_index-1} samples={episode_added} "
+              f"dataset={dataset_root}", flush=True)
+        return
 
-    split_summary = split_shards(
-        dataset_root=dataset_root,
-        train_ratio=args.train_split_ratio,
-        val_ratio=args.val_split_ratio,
-        test_ratio=args.test_split_ratio,
-        seed=args.split_seed,
-    )
+    split_summary = ({"train": [], "val": [], "test": []} if args.defer_split
+                     else split_shards(
+                         dataset_root=dataset_root,
+                         train_ratio=args.train_split_ratio,
+                         val_ratio=args.val_split_ratio,
+                         test_ratio=args.test_split_ratio,
+                         seed=args.split_seed,
+                     ))
 
     wall_time = time.time() - start_time
     manifest_path = write_manifest(

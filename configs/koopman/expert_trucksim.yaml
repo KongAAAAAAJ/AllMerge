@@ -1,0 +1,29 @@
+# New dataset: preserve Polynomial scenes and data features, swap ONLY ego plants.
+# The source of truth for 63 .sim/.dll models and payload/friction values remains
+# configs/koopman/collect.yaml. Speed is set by the scenario's sampled speed via
+# SV_VXS (km/h) before TruckSim Initialize(), never by changing import_array.
+koopman_collection_config: configs/koopman/collect.yaml
+vehicle_model: trucksim
+scenarios: [straight, curved, merge_in, merge_out]
+platoon_egos: 3
+control_mode: longitudinal_lateral
+history_length: 5
+control_history_length: 4
+history_dt_s: 0.1
+expert_horizon_s: 4.0
+expert_dt_s: 0.1
+conditions:
+  selection: round_robin_payload_friction
+  operating_condition_per_episode: true
+  independent_dll_images: true
+  copy_instances_beside_source_dll: true
+# Start with a small pilot.  If the 3-solver native DLL system is unstable,
+# do not mark interrupted or partial episodes as training data.
+collection:
+  dataset_name: allmerge_expert_trucksim_k2_v1
+  target_samples: 1000
+  episode_duration_s: 5.0
+  max_episodes: 10000
+  timeout_s: 300
+  worker_retries: 2
+  resume: true
