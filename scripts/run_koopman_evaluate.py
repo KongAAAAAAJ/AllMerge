@@ -21,6 +21,7 @@ def main():
     p.add_argument('--data-root',default=None)
     p.add_argument('--device',choices=('auto','cpu','cuda'),default='auto')
     p.add_argument('--batch-size',type=int,default=128)
+    p.add_argument('--chassis-seed',type=int,default=None,help='Reproducible 3-window chassis plot sampling seed')
     p.add_argument('--cases',nargs=3,default=None,metavar=('CASE_A','CASE_B','CASE_C'))
     p.add_argument('--output',default=None)
     p.add_argument('--offset-s',type=float,default=None)
@@ -31,7 +32,7 @@ def main():
     if args.command=='evaluate':
         evaluate_one(cfg,ROOT,args.model,args.split,args.data_root,args.device,args.batch_size)
     elif args.command=='compare':
-        compare(cfg,ROOT,args.split,args.data_root,args.device,args.batch_size)
+        compare(cfg,ROOT,args.split,args.data_root,args.device,args.batch_size,args.chassis_seed)
     else:
         if not args.cases:p.error('--cases CASE_A CASE_B CASE_C is required for controlled')
         controlled_chassis(cfg,ROOT,args.cases,args.device,args.output,args.offset_s)

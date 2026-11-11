@@ -89,6 +89,7 @@ def evaluate_one(cfg,project_root,kind,split='test',data_root=None,device='auto'
     out=resolve(project_root,Path(cfg['outputs']['evaluation'])/split/slug(kind))
     out.mkdir(parents=True,exist_ok=True)
     save_table_row(out/'table.csv',kind,summary)
+    save_table_row(out/'summary.csv',kind,summary)
     save_episodes(out/'episode_metrics.csv',rows)
     save_position_curve(out/'position_curve_k0_compatible.csv',curve,float(cfg['data'].get('dt_s',.1)))
     (out/'summary.json').write_text(json.dumps({'model':kind,'split':split,
@@ -100,7 +101,7 @@ def evaluate_one(cfg,project_root,kind,split='test',data_root=None,device='auto'
     return {'summary':summary,'curve':curve,'episodes':rows,'split_sha256':manifest['sha256']}
 
 
-def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128):
+def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128,chassis_seed=None):
     output={}
     for kind in MODELS:
         output[kind]=evaluate_one(cfg,project_root,kind,split,data_root,device,batch_size)
@@ -115,6 +116,8 @@ def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_siz
         for j in range(len(output['K0']['curve'])):
             w.writerow([j*dt,*[output[kind]['curve'][j] for kind in MODELS]])
     plot_six_models(out/'koopman_prediction_errors.pdf',output,dt)
+    plot_chassis_comparison(cfg, project_root, out, split=split, data_root=data_root,
+                            device=device, seed=chassis_seed)
     print(f'[COMPARE] Six models tested on SAME {split} episodes; paper table and PDF -> {out}',flush=True)
     return output
 
@@ -139,6 +142,139 @@ def plot_six_models(path,output,dt):
     axs[1].grid(axis='y',alpha=.25)
     fig.tight_layout();fig.savefig(path,bbox_inches='tight');plt.close(fig)
 
+
+
+
+def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
+                            data_root=None, device='auto', seed=None):
+    """One 3x3 PDF: three reproducibly sampled held-out 4s windows x three responses.
+
+    Every model receives the SAME history and future controls for a given row.
+    This plot is exploratory/diagnostic: sampled episodes need not have matching
+    input sequences across rows, so it is not a controlled payload/mu comparison.
+    """
+    data = cfg['data']
+    h = int(data.get('horizon_steps', 40))
+    dt = float(data.get('dt_s', .1))
+    splits, manifest = load_shared(cfg, project_root, data_root)
+    selected = splits[split]
+    if not selected:
+        raise ValueError(f'No episodes in frozen {split} split for chassis comparison')
+    ds = KoopmanWindowDataset(selected,
+        history_steps=int(data.get('history_steps', 5)), horizon_steps=h,
+        warmup_s=float(data.get('warmup_s', 1.0)),
+        window_stride=1, dt=dt)
+    if len(ds) < 3:
+        raise ValueError(f'Chassis comparison needs >=3 complete windows in {split}; found {len(ds)}')
+
+    rng = np.random.default_rng(int(cfg.get('training', {}).get('seed', 2026) if seed is None else seed))
+    grouped = {}
+    for idx, (episode_idx, _) in enumerate(ds.keys):
+        grouped.setdefault(episode_idx, []).append(idx)
+    # Prefer three independent episodes, falling back to distinct windows if needed.
+    if len(grouped) >= 3:
+        episode_indices = rng.choice(list(grouped), size=3, replace=False)
+        chosen = [int(rng.choice(grouped[int(ei)])) for ei in episode_indices]
+    else:
+        chosen = [int(i) for i in rng.choice(len(ds), size=3, replace=False)]
+
+    device = choose_device(device)
+    models = {}
+    for kind in MODELS:
+        model, ck = load_model(kind, model_checkpoint(cfg, project_root, kind), device)
+        if ck.get('split_sha256') != manifest['sha256']:
+            raise ValueError(f'{kind} checkpoint uses a different frozen partition')
+        models[kind] = model
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    fig, axs = plt.subplots(3, 3, figsize=(13.6, 9.8), sharex=True,
+                            gridspec_kw={'wspace': .22, 'hspace': .25})
+    headings = ('Yaw rate (rad/s)', 'Roll angle (deg)', 'LTR')
+    for col, heading in enumerate(headings):
+        axs[0, col].set_title(heading, fontsize=11, pad=9)
+    time_s = np.arange(h + 1, dtype=np.float64) * dt
+    styles = {
+        'EDMDc': ('#6b6b6b', ':'),
+        'Parametric EDMDc': ('#aa5f35', '--'),
+        'K0': ('#286fb7', '--'),
+        'K1-P': ('#3c9953', '-.'),
+        'K1-F': ('#b77713', '-.'),
+        'K2': ('#903f9a', '--'),
+    }
+    records = []
+    try:
+        for row, index in enumerate(chosen):
+            ei, start = ds.keys[index]
+            ep = ds.episodes[ei]
+            item = ds[index]
+            batch = {k: v.unsqueeze(0) for k, v in item.items()}
+            true_states = item['target_states'].numpy()
+            true_ltr = item['target_ltr'].numpy().astype(np.float64)
+            true_ltr[~item['ltr_valid'].numpy()] = np.nan
+            gt = (true_states[:, 2], np.rad2deg(true_states[:, 3]), true_ltr)
+            for col, values in enumerate(gt):
+                axs[row, col].plot(time_s, values, label='TruckSim', color='black',
+                                   linewidth=1.85, zorder=10)
+            for kind in MODELS:
+                with torch.inference_mode():
+                    prediction = _run_model(models[kind], kind, batch, device, dt)
+                states = prediction['states'][0].detach().cpu().numpy()
+                ltr = prediction['ltr'][0].detach().cpu().numpy()
+                if states.shape != (h + 1, 5) or ltr.shape != (h + 1,):
+                    raise ValueError(f'{kind} prediction shape mismatch on {ep.id}')
+                if not (np.isfinite(states).all() and np.isfinite(ltr).all()):
+                    raise ValueError(f'{kind} predicted nonfinite chassis response on {ep.id}')
+                channel_data = (states[:, 2], np.rad2deg(states[:, 3]), ltr)
+                color, ls = styles[kind]
+                for col, values in enumerate(channel_data):
+                    axs[row, col].plot(time_s, values, label=kind, color=color,
+                                       linestyle=ls, linewidth=1.15, alpha=.92)
+            note = (f'Example {row+1}\n'
+                    f'load={float(ep.info["payload_kg"]):g} kg, '
+                    f'mu={float(ep.info["road_mu"]):g}\n'
+                    f'v0={float(ep.info["vx_init_kmh"]):g} km/h')
+            axs[row, 0].set_ylabel(note, fontsize=7.8, labelpad=8)
+            for col in range(3):
+                axs[row, col].grid(alpha=.22, linewidth=.6)
+                axs[row, col].tick_params(labelsize=8)
+                if row == 2:
+                    axs[row, col].set_xlabel('Prediction horizon (s)', fontsize=9)
+            records.append({
+                'example': row + 1,
+                'episode_id': ep.id,
+                'episode_path': str(ep.path),
+                'start_index': int(start),
+                'start_time_s': float(ep.time_s[start]),
+                'payload_kg': float(ep.info['payload_kg']),
+                'road_mu': float(ep.info['road_mu']),
+                'vx_init_kmh': float(ep.info['vx_init_kmh']),
+                'split': split,
+                'sample_seed': int(cfg.get('training', {}).get('seed', 2026) if seed is None else seed),
+            })
+        handles, labels = axs[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5, .025),
+                   ncol=7, fontsize=8.2, frameon=False, columnspacing=1.35)
+        fig.suptitle('Chassis response prediction: six Koopman models vs TruckSim',
+                     fontsize=12, y=.991)
+        # Different rows can have different inputs: this is NOT a controlled
+        # comparison between conditions, even though each row is fair across models.
+        fig.text(.5, .085, 'Each row uses one held-out sequence; all models share its history and controls.',
+                 ha='center', va='center', fontsize=8, color='#555555')
+        fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.27)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = output_dir / 'koopman_chassis_responses.pdf'
+        fig.savefig(pdf_path, bbox_inches='tight')
+    finally:
+        plt.close(fig)
+    with (output_dir / 'koopman_chassis_examples.csv').open('w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.DictWriter(f, fieldnames=list(records[0]))
+        writer.writeheader()
+        writer.writerows(records)
+    print(f'[CHASSIS] 3 sampled {split} windows; 6 models + TruckSim -> {pdf_path}', flush=True)
+    return pdf_path
 
 def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=None,offset_s=None):
     """Controlled Fig. only with three independently recorded, matching input episodes.
