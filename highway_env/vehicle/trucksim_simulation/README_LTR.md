@@ -112,7 +112,7 @@ rewrites are required.
 ## Step 4: local checks
 
 ```bash
-python scripts/verify_trucksim_modes.py
+python tests/verify_trucksim_modes.py
 ```
 
 This runs **without a native DLL** and checks basic mode selection, legacy

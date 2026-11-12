@@ -28,10 +28,10 @@ import torch
 from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
 from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
 from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
-from pretraining.checkpoint_io import load_checkpoint_file
-from pretraining.config_io import load_config, resolve_pin_memory
-from pretraining.contract import validate_model_schema
-from pretraining.dataset_adapter import (
+from learning.checkpoint import load_checkpoint_file
+from learning.config import load_config, resolve_pin_memory
+from learning.contracts import validate_model_schema
+from learning.dataset_adapter import (
     build_w1_dataloader,
     metadata_item,
     unpack_w1_batch,

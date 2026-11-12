@@ -20,9 +20,9 @@ class DataSaver:
 
     def __init__(self, plot_dir=None, output_root=None):
         self.plot_dir = (Path(plot_dir) if plot_dir is not None else
-                         Path(__file__).resolve().parents[1] / "infos" / "result_plots")
+                         Path(__file__).resolve().parents[1] / "outputs" / "simulation" / "result_plots")
         self.output_root = (Path(output_root) if output_root is not None else
-                            Path(__file__).resolve().parents[1] / "infos")
+                            Path(__file__).resolve().parents[1] / "outputs" / "simulation")
         self.episode_artifacts = []
         self.front_wheel_angles = [[], [], []]
         self.all_front_wheel_angles = [[], [], []]
@@ -245,8 +245,9 @@ class DataSaver:
         self.actions = []
         return summary
 
-    def save(self, output_root="all_merge/infos"):
+    def save(self, output_root=None):
         """保存评价指标和逐步明细，依次返回两份 CSV 的路径。"""
+        output_root = self.output_root if output_root is None else Path(output_root)
         evaluate_data = {
             'collision': self.collision,
             'Episode steps': self.episode_steps,

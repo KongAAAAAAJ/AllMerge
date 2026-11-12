@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from scripts.training.train_diffusion_control import load_control_checkpoint
+from highway_env.planner.diffusion.training.control import load_control_checkpoint
 from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 

@@ -529,7 +529,7 @@ def main() -> int:
     parser.add_argument(
         "--json-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "real_env_validation.json"
         ),
     )

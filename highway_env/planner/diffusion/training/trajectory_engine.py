@@ -18,14 +18,14 @@ from highway_env.planner.diffusion.config.model import build_structured_diffusio
 from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
 from highway_env.planner.diffusion.common.tensor_adapter import PlannerTensorAdapter
 
-from .checkpoint_io import load_checkpoint_file
-from .contract import (
+from learning.checkpoint import load_checkpoint_file
+from learning.contracts import (
     validate_dense_supervision_batch,
     validate_model_schema,
     validate_training_batch,
 )
-from .dataset_adapter import unpack_w1_batch
-from .warmup_cos_lr import WarmupCosLR
+from learning.dataset_adapter import unpack_w1_batch
+from learning.lr_schedule import WarmupCosLR
 
 
 

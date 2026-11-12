@@ -353,14 +353,14 @@ def main() -> int:
     parser.add_argument(
         "--json-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "polynomial_baseline.json"
         ),
     )
     parser.add_argument(
         "--markdown-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "POLYNOMIAL_BASELINE_REPORT.md"
         ),
     )

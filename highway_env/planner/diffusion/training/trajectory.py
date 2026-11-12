@@ -1,14 +1,6 @@
 """AllMerge diffusion pretraining entrypoint using only repository dependencies."""
 from __future__ import annotations
 
-# Allow direct execution from any working directory.
-if __package__ in (None, ""):
-    import sys
-    from pathlib import Path as _Path
-
-    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
-
-
 import argparse
 import json
 import re
@@ -16,10 +8,10 @@ from pathlib import Path
 
 import torch
 
-from pretraining.checkpoint_io import export_runtime_checkpoint
-from pretraining.config_io import load_config, resolve_pin_memory
-from pretraining.dataset_adapter import build_w1_dataloader
-from pretraining.trainer import DiffusionPretrainer, seed_everything
+from learning.checkpoint import export_runtime_checkpoint
+from learning.config import load_config, resolve_pin_memory
+from learning.dataset_adapter import build_w1_dataloader
+from highway_env.planner.diffusion.training.trajectory_engine import DiffusionPretrainer, seed_everything
 
 RUN_DIR_PATTERN = re.compile(r"^run_(\d+)$")
 

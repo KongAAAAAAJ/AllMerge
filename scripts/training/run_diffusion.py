@@ -28,7 +28,7 @@ def main(argv=None):
     cfg = load_mode_yaml(args.config)
     mode = cfg['output_space']
     if mode == 'control':
-        from scripts.training.train_diffusion_control import train
+        from highway_env.planner.diffusion.training.control import train
         tr = cfg['training']
         root = resolve_repo_file(args.dataset_root or tr['dataset_root'])
         output = resolve_repo_file(args.output_dir or tr['output_dir'])
@@ -39,7 +39,7 @@ def main(argv=None):
         return 0
 
     original = resolve_repo_file(args.config)
-    command = [sys.executable, str(ROOT / 'scripts/training/train_diffusion_pretrain.py'),
+    command = [sys.executable, '-m', 'highway_env.planner.diffusion.training.trajectory',
                '--config', str(original)]
     for field, value in [('dataset-root', args.dataset_root),
                          ('output-dir', args.output_dir), ('max-steps', args.max_steps),

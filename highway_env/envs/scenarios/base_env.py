@@ -237,14 +237,14 @@ class BaseScenarioEnv(AbstractEnv, ABC):
         # Optional expert-data plant replacement.  Ordinary scenario planning,
         # traffic and rule decision logic are identical to kinematics mode.
         if self.config.get("Controller", {}).get("vehicle_model") == "trucksim":
-            from data_pipeline.expert_trucksim import attach_scenario_trucksim
+            from data_pipeline.expert_collection.trucksim import attach_scenario_trucksim
             attach_scenario_trucksim(self)
         self._create_background_traffic()
         self._after_scene_created()
 
     def close(self) -> None:
         if self.config.get("Controller", {}).get("vehicle_model") == "trucksim":
-            from data_pipeline.expert_trucksim import stop_scenario_trucksim
+            from data_pipeline.expert_collection.trucksim import stop_scenario_trucksim
             stop_scenario_trucksim(self)
         super().close()
 

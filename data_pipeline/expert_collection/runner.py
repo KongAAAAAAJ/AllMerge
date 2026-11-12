@@ -6,7 +6,6 @@ shard is never accepted. No os._exit, no reusing VehicleSim sessions.
 """
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import os
@@ -16,54 +15,17 @@ import sys
 import time
 
 import numpy as np
-import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data_pipeline.expert_trucksim import load_collection_config, physical_cases
+from data_pipeline.expert_collection.trucksim import load_collection_config, physical_cases
 
 
-def parser():
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('--config', type=Path,
-                     default=Path('configs/koopman/expert_trucksim.yaml'))
-    first, _ = pre.parse_known_args()
-    config_path = (ROOT / first.config).resolve()
-    with config_path.open('r', encoding='utf-8') as handle:
-        expert_cfg = yaml.safe_load(handle)
-    collection = expert_cfg.get('collection', {})
-    conditions = expert_cfg.get('conditions', {})
-    p = argparse.ArgumentParser(description=__doc__, parents=[pre])
-    p.add_argument('--koopman-config', type=Path,
-                   default=Path(expert_cfg.get('koopman_collection_config',
-                           'configs/koopman/collect.yaml')))
-    p.add_argument('--target-samples', type=int, default=1000)
-    p.add_argument('--output-root', type=Path, default=Path('outputs/expert_dataset'))
-    p.add_argument('--dataset-name', default='allmerge_expert_trucksim_k2_v1')
-    p.add_argument('--duration', type=float, default=5.0)
-    p.add_argument('--scenario', choices=['all','straight','curved','merge_in','merge_out'], default='all')
-    p.add_argument('--start-seed', type=int, default=1)
-    p.add_argument('--start-episode-index', type=int, default=0)
-    p.add_argument('--max-episodes', type=int, default=10000)
-    p.add_argument('--timeout-s', type=int, default=300)
-    p.add_argument('--retries', type=int, default=2)
-    p.add_argument('--samples-per-shard', type=int, default=2048)
-    p.add_argument('--prepare-dll-instances', action='store_true')
-    p.add_argument('--check-only', action='store_true')
-    p.add_argument('--resume', action='store_true')
-    p.set_defaults(
-        target_samples=int(collection.get('target_samples', 1000)),
-        duration=float(collection.get('episode_duration_s', 5.0)),
-        dataset_name=collection.get('dataset_name','allmerge_expert_trucksim_k2_v1'),
-        max_episodes=int(collection.get('max_episodes', 10000)),
-        timeout_s=int(collection.get('timeout_s', 300)),
-        retries=int(collection.get('worker_retries', 2)),
-        prepare_dll_instances=bool(conditions.get('copy_instances_beside_source_dll', False)),
-        resume=bool(collection.get('resume', False)),
-    )
-    return p.parse_args()
+def parser(argv=None):
+    from .config import parse_args
+    return parse_args(argv)
 
 
 def validate_shards(root: Path):
@@ -102,8 +64,8 @@ def _dump_json_atomic(path, value):
     os.replace(tmp, path)
 
 
-def main():
-    args = parser()
+def main(args=None):
+    args = args if args is not None else parser()
     if args.target_samples <= 0 or args.duration <= 0 or args.max_episodes <= 0:
         raise ValueError('target_samples, duration and max_episodes must be positive')
     if args.retries < 1:
@@ -171,18 +133,23 @@ def main():
     while accepted < args.target_samples and attempts < args.max_episodes:
         episode = next_episode
         case = models[episode % len(models)]
-        scenarios = ['straight','curved','merge_in','merge_out']
+        scenarios = getattr(args, 'scenarios', ['straight','curved','merge_in','merge_out'])
         scenario = scenarios[episode % len(scenarios)] if args.scenario == 'all' else args.scenario
         ok = False
         final_status = 'failed'
         for attempt in range(1, args.retries+1):
             cmd = [sys.executable, '-u', '-X', 'faulthandler',
-                   str(ROOT/'scripts/data/collect_expert_dataset.py'),
+                   str(ROOT/'scripts/data/collect_expert_dataset.py'), '--worker',
                    '--trucksim-koopman-config', str(koopman_path),
                    '--max-episodes','1', '--episode-index',str(episode), '--defer-split',
-                   '--scenario',args.scenario,'--duration',str(args.duration),
+                   '--scenario',scenario,'--duration',str(args.duration),
                    '--start-seed',str(args.start_seed),'--target-samples',str(args.target_samples),
                    '--samples-per-shard',str(args.samples_per_shard),
+                   '--group-action',str(getattr(args, 'group_action', 3)),
+                   '--train-split-ratio',str(getattr(args, 'train_split_ratio', .8)),
+                   '--val-split-ratio',str(getattr(args, 'val_split_ratio', .1)),
+                   '--test-split-ratio',str(getattr(args, 'test_split_ratio', .1)),
+                   '--split-seed',str(getattr(args, 'split_seed', 0)),
                    '--output-root',str((ROOT/args.output_root).resolve()),
                    '--engine-map-cache',str(cache_path),
                    '--dataset-name',args.dataset_name,'--resume']
@@ -226,7 +193,11 @@ def main():
     if shards:
         # Each shard contains one episode (worker writes then exits).
         splits_cmd=[sys.executable,str(ROOT/'scripts/data/split_expert_dataset.py'),
-                    '--dataset-root',str(dataset)]
+                    '--dataset-root',str(dataset),
+                    '--train-ratio',str(getattr(args, 'train_split_ratio', .8)),
+                    '--val-ratio',str(getattr(args, 'val_split_ratio', .1)),
+                    '--test-ratio',str(getattr(args, 'test_split_ratio', .1)),
+                    '--seed',str(getattr(args, 'split_seed', 0))]
         split_run=subprocess.run(splits_cmd,cwd=ROOT,check=False)
         if split_run.returncode:
             raise RuntimeError('Could not create final episode-disjoint shard splits')

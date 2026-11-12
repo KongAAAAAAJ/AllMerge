@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 
 from highway_env.planner.diffusion.inference.runtime import DiffusionPlannerRuntime
-from pretraining.dataset_adapter import build_w1_dataloader, unpack_w1_batch
+from learning.dataset_adapter import build_w1_dataloader, unpack_w1_batch
 
 
 def main() -> int:

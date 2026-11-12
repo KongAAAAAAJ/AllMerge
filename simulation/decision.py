@@ -3,12 +3,10 @@ from pathlib import Path
 
 MODEL_PATH = (
     Path(__file__).resolve().parents[1]
-    / "ckpts"
+    / "outputs"
+    / "checkpoints"
     / "slow_down_1_best_model.zip"
 )
-
-if not MODEL_PATH.is_file():
-    raise FileNotFoundError(f"模型文件不存在：{MODEL_PATH}")
 
 _model = None
 
@@ -18,6 +16,8 @@ def decide(obs, mode):
     global _model
     if mode == 2:
         if _model is None:
+            if not MODEL_PATH.is_file():
+                raise FileNotFoundError(f"PPO checkpoint not found: {MODEL_PATH}")
             _model = PPO.load(MODEL_PATH)
         action, _ = _model.predict(obs, deterministic=True)
     else:

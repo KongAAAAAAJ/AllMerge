@@ -31,7 +31,7 @@ from highway_env.planner.diffusion.common.mode_assignment import (
 from highway_env.planner.diffusion.inference.runtime import (
     DiffusionPlannerRuntime,
 )
-from pretraining.dataset_adapter import (
+from learning.dataset_adapter import (
     build_w1_dataloader,
     metadata_item,
     unpack_w1_batch,

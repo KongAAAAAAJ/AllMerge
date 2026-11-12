@@ -322,14 +322,14 @@ def main() -> int:
     parser.add_argument(
         "--json-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "interaction_diagnostics.json"
         ),
     )
     parser.add_argument(
         "--markdown-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "INTERACTION_DIAGNOSTICS.md"
         ),
     )

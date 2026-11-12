@@ -10,8 +10,8 @@ import highway_env
 def env_reset(env_name, seed=None):
     """创建所选环境和离屏录像器，返回向量环境、录像器和初始观测。"""
     video_folders = {
-        "merge-platoon-v0": "all_merge/infos/videos/merge/",
-        "highway-platoon-v0": "all_merge/infos/videos/slow-down/",
+        "merge-platoon-v0": "all_merge/outputs/simulation/videos/merge/",
+        "highway-platoon-v0": "all_merge/outputs/simulation/videos/slow-down/",
     }
     video_folder = str(Path(__file__).resolve().parents[2] / video_folders[env_name])
     highway_env.register_highway_envs()

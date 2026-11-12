@@ -300,14 +300,14 @@ def main() -> int:
     parser.add_argument(
         "--json-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "background_prediction_diagnostics.json"
         ),
     )
     parser.add_argument(
         "--markdown-out",
         default=(
-            "infos/reward_validation/"
+            "outputs/simulation/reward_validation/"
             "BACKGROUND_PREDICTION_DIAGNOSTICS.md"
         ),
     )

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "allmerge"
+version = "0.1.0"
+description = "Vehicle simulation, expert data collection, diffusion planning and Koopman prediction"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["highway_env*", "data_pipeline*", "learning*", "simulation*", "evaluation*", "scripts*"]
+exclude = ["tests*", "outputs*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.csv", "*.yaml"]

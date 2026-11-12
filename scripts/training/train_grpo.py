@@ -22,7 +22,7 @@ from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
 from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChangeEnv
 from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
 from highway_env.planner.diffusion.models.trajectory import StructuredDiffusionPlanner
-from pretraining.checkpoint_io import load_checkpoint_file
+from learning.checkpoint import load_checkpoint_file
 from highway_env.planner.diffusion.common.tensor_adapter import BOOL_KEYS, FLOAT_KEYS, PlannerTensorAdapter
 from highway_env.planner.diffusion.grpo import (
     CandidateRewardAdapter,
