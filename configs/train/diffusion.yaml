@@ -8,6 +8,7 @@
 # K2 requires a trained checkpoint and expert shards with synchronized K2 context.
 # LTR/fuel/progress remain disabled until limits/calibration and weights are supplied.
 output_space: control
+
 trajectory:
   model:
     reg_head_type: gru
