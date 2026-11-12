@@ -435,7 +435,7 @@ class MultiAgentAction(ActionType):
     }
     LANE_WIDTH = 4
 
-    ACC_MAX = 6
+    ACC_MAX = 2
     ACC_MIN = -6
 
     TTC_MIN = 0  # 0.2

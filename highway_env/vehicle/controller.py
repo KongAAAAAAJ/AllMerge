@@ -352,7 +352,7 @@ class MDPVehicle(ControlledVehicle):
     """A controlled vehicle with a specified discrete range of allowed target speeds."""
 
     # Longitudinal policy parameters
-    ACC_MAX = 6.0  # [m/s2]
+    ACC_MAX = 2.0  # [m/s2]
     """Maximum acceleration."""
 
     DEFAULT_TARGET_SPEEDS = np.linspace(20, 30, 3)
@@ -522,13 +522,13 @@ class LEADVehicle(ControlledVehicle):
     """A leader vehicle in a platoon or a group"""
 
     # Longitudinal policy parameters
-    ACC_MAX = 6.0  # [m/s2]
+    ACC_MAX = 2.0  # [m/s2]
     """Maximum acceleration."""
 
     DEFAULT_TARGET_SPEEDS = np.linspace(20, 30, 3)
     LANE_CHANGE_DELAY = 1  # 1 [s]
 
-    COMFORT_ACC_MAX = 3.0  # [m/s2]
+    COMFORT_ACC_MAX = 1.0  # [m/s2]
     """Desired maximum acceleration."""
 
     COMFORT_ACC_MIN = -5  # [m/s2]
@@ -1462,7 +1462,7 @@ class FOLLOWVehicle(ControlledVehicle):
     """A leader vehicle in a platoon or a group"""
 
     # Longitudinal policy parameters
-    ACC_MAX = 6.0  # [m/s2]
+    ACC_MAX = 2.0  # [m/s2]
     """Maximum acceleration."""
 
     DEFAULT_TARGET_SPEEDS = np.linspace(20, 30, 3)

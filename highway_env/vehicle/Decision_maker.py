@@ -26,7 +26,7 @@ class COALITION_GAME_MAKER:
     }
     LANE_WIDTH = 4
 
-    ACC_MAX = 6
+    ACC_MAX = 2
     ACC_MIN = -6
 
     TTC_MIN = 0  # 0.2
@@ -1627,7 +1627,7 @@ class RULE_MAKER(COALITION_GAME_MAKER):
         """Check lane-change safety on the target lane's Frenet s axis."""
         # === FRENET RULE SAFETY V1 ===
         LANE_CHANGE_MAX_BRAKING_IMPOSED = 3.0
-        ACC_MAX = 6.0
+        ACC_MAX = 2.0
         TTC_MIN = 3.0
 
         new_preceding, new_following = (
