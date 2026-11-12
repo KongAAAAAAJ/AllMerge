@@ -80,7 +80,17 @@ control:
       limit: null
     fuel:
       weight: 0.0
-      parameters: null
+      parameters:
+        empty_mass_kg: 4455
+        rolling_resistance: 0.007
+        drag_coefficient: 0.6
+        frontal_area_m2: 6.8
+        drivetrain_efficiency: 0.86
+        alpha0: 0.00156  # 经验值
+        alpha1: 8e-05
+        alpha2: 1e-08
+        air_density_kg_m3: 1.225
+        gravity_m_s2: 9.81
     progress:
       weight: 0.0
       minimum_progress_m: null
