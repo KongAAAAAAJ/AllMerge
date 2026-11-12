@@ -70,8 +70,10 @@ def _infer_one(model, ds, *, seed, train_seed, method, device,
                 rows.append(row)
                 if idx in fig_indices:
                     xy = prediction['pose'][j, :, :2].detach().cpu().numpy().copy()
-                    gt0 = context['koopman_pose0_si'][j, :2].detach().cpu().numpy()[None,:]
-                    gtxy = np.concatenate((gt0, truth[j].detach().cpu().numpy()), axis=0)
+                    gt_future_xy = truth[j].detach().cpu().numpy()
+                    # Expert dense trajectory is ego-local. Its t=0 point is (0, 0);
+                    # koopman_pose0_si belongs to the world coordinate system.
+                    gtxy = np.concatenate((np.zeros_like(gt_future_xy[:1]), gt_future_xy), axis=0)
                     figures[idx] = dict(speeds_kmh=metrics['speeds_kmh'][j].detach().cpu().numpy().copy(),
                                         xy=xy, gt_xy=gtxy)
                 global_index += 1

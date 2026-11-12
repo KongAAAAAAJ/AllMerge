@@ -52,7 +52,8 @@ def evaluate_sample_metrics(prediction, targets, features, context, *, fuel_para
     pvr = (base['progress_m'] < progress_threshold_m).to(torch.float32)
     # K2's predicted vx is longitudinal; finite-difference GT XY gives planar
     # speed magnitude, so this is an explicitly labelled auxiliary proxy only.
-    gt_poses = torch.cat((context['koopman_pose0_si'][:, None, :2], truth), dim=1)
+    # Expert dense XY is ego-local: prepend the origin, not world-space pose0.
+    gt_poses = torch.cat((torch.zeros_like(truth[:, :1, :]), truth), dim=1)
     gt_speed = torch.linalg.vector_norm(gt_poses[:, 1:] - gt_poses[:, :-1], dim=-1) / dt
     speed_mae_proxy = (prediction['speeds'][:, 1:] - gt_speed).abs().mean(dim=1) * 3.6
     accel = (prediction['speeds'][:, 1:] - prediction['speeds'][:, :-1]) / dt

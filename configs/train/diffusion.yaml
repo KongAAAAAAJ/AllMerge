@@ -51,7 +51,9 @@ control:
     max_accel_mps2: 2.5
     max_steer_rad: 0.08
     num_train_timesteps: 1000
-    inference_steps: 8
+    inference_steps: 2
+    inference_start_timestep: 8
+    inference_noise_scale: 1.0
     position_scale_m: 10.0
     loss_position: 1.0
   training:
