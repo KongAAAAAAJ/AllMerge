@@ -240,6 +240,11 @@ class AllMergeExpertShardDataset(Dataset):
 
             features[key] = tensor
 
+        if "coarse_controls" in shard:
+            features["coarse_controls"] = torch.from_numpy(
+                np.asarray(shard["coarse_controls"][sample_idx]).copy()
+            ).float()
+
         targets = {
             "trajectory": torch.from_numpy(
                 np.asarray(

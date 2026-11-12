@@ -25,7 +25,6 @@ from .blocks import CrossAttentionBlock, SinusoidalTimeEmbedding
 from highway_env.planner.diffusion.common.execution import VehicleExecution
 from highway_env.planner.diffusion.common.fuel import FuelParameters, vt_cpfm_from_states
 from highway_env.planner.diffusion.common.progress import centerline_progress
-from highway_env.planner.diffusion.common.anchor_controls import xy_anchors_to_controls
 
 
 @dataclass
@@ -36,7 +35,7 @@ class ControlSpaceConfig:
     max_accel_mps2: float = 2.5
     max_steer_rad: float = 0.08
     num_train_timesteps: int = 1000
-    inference_steps: int = 2           # Match trajectory runtime [8,0] by default.
+    inference_steps: int = 2           # Match truncated trajectory DDIM [8,0].
     inference_start_timestep: int = 8
     inference_noise_scale: float = 1.0
     position_scale_m: float = 10.0
@@ -49,9 +48,9 @@ class ControlSpaceConfig:
                self.max_steer_rad, self.position_scale_m, self.loss_position) <= 0:
             raise ValueError('wheelbase, limits and trajectory loss scaling must be positive')
         if not 2 <= self.inference_steps <= self.inference_start_timestep + 1:
-            raise ValueError('inference_steps must be in [2, start_timestep+1]')
-        if not 1 <= self.inference_start_timestep < self.num_train_timesteps:
-            raise ValueError('inference_start_timestep must be within (0,num_train_timesteps)')
+            raise ValueError('inference_steps must be in [2, inference_start_timestep+1]')
+        if not 0 <= self.inference_start_timestep < self.num_train_timesteps:
+            raise ValueError('Invalid inference_start_timestep')
         if self.inference_noise_scale < 0:
             raise ValueError('inference_noise_scale must be nonnegative')
 
@@ -126,65 +125,40 @@ class ControlDiffusionPlanner(nn.Module):
                 setattr(self.adapter, attr, val.to(device))
         return self.scene_encoder(features)
 
-    def _anchor_controls(self, features):
-        """Use the same dynamic XY anchors as trajectory diffusion.
-
-        Current AllMerge anchor_builder saves XY (0.5 s) but no paired
-        a/delta history. Reconstruct bounded 10-Hz control anchors once per
-        forward pass; no ground-truth future labels are involved.
-        """
-        anchors = features['coarse_trajectories']
-        expected = (features['ego_state'].shape[0], self.scene_config.num_modes,
-                    self.scene_config.horizon_steps, 2)
-        if tuple(anchors.shape) != expected:
-            raise ValueError(f'coarse_trajectories: expected {expected}, got {tuple(anchors.shape)}')
-        controls = xy_anchors_to_controls(
-            anchors, features['ego_state'][:, 0],
-            sparse_dt=self.scene_config.trajectory_dt,
-            dense_dt=self.ctrl_cfg.dt,
-            wheelbase_m=self.ctrl_cfg.wheelbase_m,
-            max_accel_mps2=self.ctrl_cfg.max_accel_mps2,
-            max_steer_rad=self.ctrl_cfg.max_steer_rad,
-        )
-        if controls.shape != (expected[0], expected[1], self.ctrl_cfg.horizon_steps, 2):
-            raise ValueError('XY anchor duration must match control horizon')
-        # Geometrically absent modes carry zero XY data. Give those inactive
-        # slots an actual valid reference rather than an impossible zero-path
-        # reconstruction, while retaining the unchanged mode_valid_mask.
-        valid = features['mode_valid_mask'].bool()
-        if tuple(valid.shape) != expected[:2] or not valid.any(dim=1).all():
-            raise ValueError('At least one valid anchor per sample is required')
-        first_valid = valid.to(torch.int64).argmax(dim=1)
-        fallback = controls[torch.arange(expected[0], device=controls.device), first_valid]
-        return torch.where(valid[:, :, None, None], controls, fallback[:, None])
-
     def _sample_controls(self, features, *, generator=None, num_steps=None):
-        """Train/runtime-shared *truncated anchor-noised* control DDIM.
+        """Control-space DDIM initialized from the paired sampled controls.
 
-        It now mirrors trajectory-space initialization: x_t = sqrt(alpha_t)
-        * anchor + sqrt(1-alpha_t) * Gaussian noise, with t=8 by default.
-        Only the variable representation (a,delta vs XY) differs at this stage.
+        The same dynamic anchor bank creates coarse_trajectories for the XY
+        model and coarse_controls for this model. No inverse XY decoding.
         """
         cfg = self.ctrl_cfg
-        B = features['ego_state'].shape[0]
-        seed_physical = self._anchor_controls(features)
-        seed_norm = seed_physical / self.control_limits.to(seed_physical)
-        noise = torch.randn(seed_norm.shape, device=seed_norm.device,
-                            dtype=seed_norm.dtype, generator=generator)
+        B, M, H = (features['ego_state'].shape[0], self.scene_config.num_modes,
+                   cfg.horizon_steps)
+        if 'coarse_controls' not in features:
+            raise KeyError('Control diffusion requires sampled coarse_controls [B,M,40,2]')
+        anchor = features['coarse_controls']
+        if anchor.shape != (B, M, H, 2):
+            raise ValueError(f'coarse_controls shape {tuple(anchor.shape)} != {(B,M,H,2)}')
+        if not torch.isfinite(anchor).all():
+            raise ValueError('coarse_controls contains NaN/Inf')
+        clean = anchor / self.control_limits
+        noise = torch.randn(clean.shape, device=clean.device, dtype=clean.dtype,
+                            generator=generator) * cfg.inference_noise_scale
         scene = self._encode_scene(features)
-        count = int(num_steps if num_steps is not None else cfg.inference_steps)
-        start_t = int(cfg.inference_start_timestep)
-        if not 2 <= count <= start_t + 1:
-            raise ValueError('Invalid truncated DDIM inference step count')
-        ts = torch.linspace(start_t, 0, count, device=noise.device).round().long().tolist()
-        timesteps = torch.full((B,), start_t, device=noise.device, dtype=torch.long)
+        count = int(num_steps or cfg.inference_steps)
+        if not 2 <= count <= cfg.inference_start_timestep + 1:
+            raise ValueError('Invalid truncated DDIM step count')
+        ts = torch.linspace(cfg.inference_start_timestep, 0, count,
+                            device=clean.device).round().long().tolist()
         sample = self.schedule.add_noise(
-            seed_norm, noise * float(cfg.inference_noise_scale), timesteps)
+            clean, noise,
+            torch.full((B,), ts[0], dtype=torch.long, device=clean.device),
+        )
         for j, t in enumerate(ts):
             x0 = self.denoiser(sample,
                                torch.full((B,), t, device=sample.device, dtype=torch.long),
                                scene)
-            next_t = ts[j + 1] if j + 1 < len(ts) else None
+            next_t = ts[j + 1] if j + 1 < len(ts) else -1
             sample = self.schedule.step_predict_x0(sample, x0, t, next_t)
         return sample * self.control_limits
 

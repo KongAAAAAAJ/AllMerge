@@ -96,6 +96,10 @@ class PlannerTensorAdapter:
                 device=self.device,
             )
 
+        if "coarse_controls" in features:
+            result["coarse_controls"] = torch.as_tensor(
+                features["coarse_controls"], dtype=torch.float32, device=self.device
+            )
         self._validate_shapes(result)
         return result
 
@@ -186,6 +190,9 @@ class PlannerTensorAdapter:
                 cfg.num_modes,
             ),
         }
+
+        if "coarse_controls" in features:
+            expected["coarse_controls"] = (batch, cfg.num_modes, 40, 2)
 
         for key, shape in expected.items():
             actual = tuple(

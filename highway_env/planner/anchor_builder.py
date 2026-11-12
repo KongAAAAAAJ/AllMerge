@@ -17,6 +17,8 @@ The implementation is adapted to AllMerge:
 - mode_valid_mask expresses traffic/geometry selectability only;
 - traffic validity uses a constant-velocity prediction plus longitudinal/
   lateral oriented-rectangle overlap checks;
+- control anchors [40,2] are sampled and forward-rolled out by the bicycle model;
+- coarse XY anchors [8,2] are exact 0.5-s subsamples of the same rollout;
 - output remains NumPy and is independent of PyTorch.
 """
 
@@ -39,6 +41,7 @@ from highway_env.planner.mode_definitions import (
 @dataclass
 class AnchorOutput:
     coarse_trajectories: np.ndarray
+    coarse_controls: np.ndarray
     mode_valid_mask: np.ndarray
     diagnostics: Optional[Dict[int, Dict[str, Any]]] = None
 
@@ -173,6 +176,13 @@ class AllMergeAnchorBuilder:
     DEFAULT_CONFIG = {
         "horizon_steps": 8,
         "trajectory_dt": 0.5,
+        "control_steps": 40,
+        "control_dt": 0.1,
+        "wheelbase_m": 5.5,
+        "max_accel_mps2": 2.5,
+        "max_steer_rad": 0.08,
+        "lookahead_s": 0.65,
+        "min_lookahead_m": 7.0,
 
         # Dynamic speed levels.
         # The center speed is shifted by:
@@ -212,6 +222,13 @@ class AllMergeAnchorBuilder:
 
         self.horizon_steps = int(self.config["horizon_steps"])
         self.dt = float(self.config["trajectory_dt"])
+        self.control_steps = int(self.config["control_steps"])
+        self.control_dt = float(self.config["control_dt"])
+        self.wheelbase = float(self.config["wheelbase_m"])
+        self.max_accel = float(self.config["max_accel_mps2"])
+        self.max_steer = float(self.config["max_steer_rad"])
+        self.lookahead_s = float(self.config["lookahead_s"])
+        self.min_lookahead_m = float(self.config["min_lookahead_m"])
         self.speed_delta = float(self.config["speed_delta_mps"])
         self.acceleration_preview_s = float(
             self.config["acceleration_preview_s"]
@@ -225,8 +242,13 @@ class AllMergeAnchorBuilder:
 
         if self.horizon_steps <= 0:
             raise ValueError("horizon_steps must be positive")
-        if self.dt <= 0.0:
-            raise ValueError("trajectory_dt must be positive")
+        if self.dt <= 0.0 or self.control_dt <= 0.0:
+            raise ValueError("Anchor sample intervals must be positive")
+        if (self.control_steps <= 0 or self.control_steps % self.horizon_steps != 0
+                or abs(self.control_steps * self.control_dt - self.horizon_steps * self.dt) > 1e-8
+                or self.wheelbase <= 0 or self.max_accel <= 0 or self.max_steer <= 0
+                or self.lookahead_s <= 0 or self.min_lookahead_m <= 0):
+            raise ValueError("Control and XY anchor grids/vehicle limits are inconsistent")
 
         # List[ego_idx -> Dict[mode_idx -> diagnostic record]]
         # Updated after every build_batch(). Kept outside planner features
@@ -242,7 +264,7 @@ class AllMergeAnchorBuilder:
         features: Dict[str, np.ndarray],
         target_accelerations: Optional[Sequence[float]] = None,
     ) -> Dict[str, np.ndarray]:
-        """Build [B, M, 8, 2] anchors and [B, M] validity mask."""
+        """Generate paired XY/control anchors [B,M,8,2]/[B,M,40,2]."""
         batch_size = int(features["ego_state"].shape[0])
 
         if target_accelerations is None:
@@ -263,6 +285,9 @@ class AllMergeAnchorBuilder:
             ),
             dtype=np.float32,
         )
+        controls = np.zeros(
+            (batch_size, self.num_modes, self.control_steps, 2), dtype=np.float32
+        )
         valid = np.zeros(
             (batch_size, self.num_modes),
             dtype=bool,
@@ -279,6 +304,7 @@ class AllMergeAnchorBuilder:
                 target_acceleration=float(target_accelerations[b]),
             )
             coarse[b] = out.coarse_trajectories
+            controls[b] = out.coarse_controls
             valid[b] = out.mode_valid_mask
             diagnostics_batch.append(
                 out.diagnostics if out.diagnostics is not None else {}
@@ -286,10 +312,11 @@ class AllMergeAnchorBuilder:
 
         self.last_diagnostics = diagnostics_batch
 
-        self._validate_batch(coarse, valid, batch_size)
+        self._validate_batch(coarse, controls, valid, batch_size)
 
         return {
             "coarse_trajectories": coarse,
+            "coarse_controls": controls,
             "mode_valid_mask": valid,
         }
 
@@ -347,6 +374,7 @@ class AllMergeAnchorBuilder:
             (self.num_modes, self.horizon_steps, 2),
             dtype=np.float32,
         )
+        controls = np.zeros((self.num_modes, self.control_steps, 2), dtype=np.float32)
         valid = np.zeros((self.num_modes,), dtype=bool)
         diagnostics_enabled = bool(
             self.config.get("diagnostics_enabled", False)
@@ -354,53 +382,31 @@ class AllMergeAnchorBuilder:
         mode_diagnostics: Dict[int, Dict[str, Any]] = {}
 
         for slot in MODE_SLOTS:
+            target_lane = None
+            target_speed = 0.0
             if slot.semantic_group == "STOP":
-                trajectory = self._generate_stop(
-                    current,
-                    ego_speed,
-                )
-                is_valid = True
-
+                target_lane = current
             elif slot.semantic_group == "KEEP":
+                target_lane = current
                 target_speed = speed_levels[slot.speed_profile]
-                trajectory = self._generate_lane_follow(
-                    current,
-                    ego_speed,
-                    target_speed,
+            elif slot.semantic_group == "LEFT_LC" and left is not None:
+                target_lane = left
+                target_speed = max(speed_levels[slot.speed_profile], self.min_lc_speed)
+            elif slot.semantic_group == "RIGHT_LC" and right is not None:
+                target_lane = right
+                target_speed = max(speed_levels[slot.speed_profile], self.min_lc_speed)
+
+            if target_lane is None:
+                trajectory = None
+                control_sequence = None
+                is_valid = False
+            else:
+                control_sequence, trajectory = self._sample_and_rollout(
+                    current, target_lane, ego_speed, target_speed,
+                    lane_change=slot.semantic_group in ("LEFT_LC", "RIGHT_LC"),
+                    emergency_stop=slot.semantic_group == "STOP",
                 )
                 is_valid = True
-
-            elif slot.semantic_group == "LEFT_LC":
-                if left is None:
-                    trajectory = None
-                    is_valid = False
-                else:
-                    target_speed = speed_levels[slot.speed_profile]
-                    trajectory = self._generate_lane_change(
-                        current,
-                        left,
-                        ego_speed,
-                        target_speed,
-                    )
-                    is_valid = True
-
-            elif slot.semantic_group == "RIGHT_LC":
-                if right is None:
-                    trajectory = None
-                    is_valid = False
-                else:
-                    target_speed = speed_levels[slot.speed_profile]
-                    trajectory = self._generate_lane_change(
-                        current,
-                        right,
-                        ego_speed,
-                        target_speed,
-                    )
-                    is_valid = True
-
-            else:
-                trajectory = None
-                is_valid = False
 
             if trajectory is None:
                 if diagnostics_enabled:
@@ -452,6 +458,7 @@ class AllMergeAnchorBuilder:
             # A geometrically existing mode always retains its trajectory,
             # even when traffic makes it invalid.
             coarse[slot.index] = trajectory
+            controls[slot.index] = control_sequence
             valid[slot.index] = bool(is_valid)
 
             if diagnostics_enabled:
@@ -475,16 +482,17 @@ class AllMergeAnchorBuilder:
             keep_low = next(
                 slot for slot in MODE_SLOTS if slot.name == "KEEP_LOW"
             )
-            trajectory = self._generate_lane_follow(
-                current,
-                ego_speed,
-                max(ego_speed - self.speed_delta, 0.0),
+            control_sequence, trajectory = self._sample_and_rollout(
+                current, current, ego_speed, max(ego_speed - self.speed_delta, 0.0),
+                lane_change=False, emergency_stop=False,
             )
             coarse[keep_low.index] = trajectory
+            controls[keep_low.index] = control_sequence
             valid[keep_low.index] = True
 
         return AnchorOutput(
             coarse_trajectories=coarse,
+            coarse_controls=controls,
             mode_valid_mask=valid,
             diagnostics=mode_diagnostics if diagnostics_enabled else None,
         )
@@ -520,113 +528,87 @@ class AllMergeAnchorBuilder:
             SpeedProfile.LOW: low,
         }
 
-    def _distance_profile(
-        self,
-        start_speed: float,
-        target_speed: float,
-    ) -> np.ndarray:
-        """Smoothly change v0 to target speed and integrate distance."""
-        v0 = max(float(start_speed), 0.0)
-        vt = max(float(target_speed), 0.0)
-
-        # Speed at t=0 plus one value at each future step.
-        velocities = np.linspace(
-            v0,
-            vt,
-            self.horizon_steps + 1,
-            dtype=np.float32,
-        )
-
-        step_distances = (
-            0.5
-            * (velocities[:-1] + velocities[1:])
-            * self.dt
-        )
-        return np.cumsum(
-            step_distances,
-            dtype=np.float32,
-        )
-
     # ------------------------------------------------------------------
-    # Trajectory generation
+    # Paired control sampling and kinematic rollout
     # ------------------------------------------------------------------
 
-    def _generate_lane_follow(
+    def _sample_and_rollout(
         self,
-        lane_polyline: np.ndarray,
-        start_speed: float,
+        current_lane: np.ndarray,
+        target_lane: np.ndarray,
+        initial_speed: float,
         target_speed: float,
-    ) -> np.ndarray:
-        distances = self._distance_profile(
-            start_speed,
-            target_speed,
-        )
-        return _sample_polyline_at_distances(
-            lane_polyline,
-            distances,
-        )
+        *,
+        lane_change: bool,
+        emergency_stop: bool,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate U_A first and A from the *same* forward kinematic rollout.
 
-    def _generate_lane_change(
-        self,
-        current_polyline: np.ndarray,
-        target_polyline: np.ndarray,
-        start_speed: float,
-        target_speed: float,
-    ) -> np.ndarray:
-        target_speed = max(
-            float(target_speed),
-            self.min_lc_speed,
-        )
-
-        distances = self._distance_profile(
-            start_speed,
-            target_speed,
-        )
-
-        base = _sample_polyline_at_distances(
-            current_polyline,
-            distances,
-        )
-        target = _sample_polyline_at_distances(
-            target_polyline,
-            distances,
-        )
-
-        progress = np.linspace(
-            1.0 / self.horizon_steps,
-            1.0,
-            self.horizon_steps,
-            dtype=np.float32,
-        )
-        blend = _quintic_blend(progress)[:, None]
-
-        return (
-            (1.0 - blend) * base
-            + blend * target
-        ).astype(np.float32)
-
-    def _generate_stop(
-        self,
-        current_polyline: np.ndarray,
-        start_speed: float,
-    ) -> np.ndarray:
-        speed = max(float(start_speed), 0.0)
-        distances = []
-        distance = 0.0
-
-        for _ in range(self.horizon_steps):
-            next_speed = max(
-                speed - self.emergency_decel * self.dt,
-                0.0,
-            )
-            distance += 0.5 * (speed + next_speed) * self.dt
-            distances.append(distance)
-            speed = next_speed
-
-        return _sample_polyline_at_distances(
-            current_polyline,
-            np.asarray(distances, dtype=np.float32),
-        )
+        Longitudinal acceleration is a mode-conditioned bounded command;
+        front-wheel steering is sampled using a road-conditioned lookahead
+        tracker. Each 0.1-s control is immediately applied to a kinematic
+        bicycle; every fifth resulting XY point becomes an anchor waypoint.
+        No XY-to-control inverse kinematics is performed.
+        """
+        controls = np.zeros((self.control_steps, 2), dtype=np.float32)
+        dense_xy = np.zeros((self.control_steps, 2), dtype=np.float32)
+        x = y = psi = 0.0
+        velocity = max(float(initial_speed), 0.0)
+        duration = self.control_steps * self.control_dt
+        if emergency_stop:
+            acceleration = -min(self.emergency_decel, self.max_accel)
+        else:
+            acceleration = float(np.clip(
+                (max(float(target_speed), 0.0) - velocity) / duration,
+                -self.max_accel, self.max_accel,
+            ))
+        travelled = 0.0
+        for i in range(self.control_steps):
+            # Preview location is a map-guided target for forward steering
+            # sampling, not an XY anchor to be inverted into controls.
+            preview_s = max(self.min_lookahead_m, velocity * self.lookahead_s)
+            lane_s = travelled + preview_s
+            p_current = _sample_polyline_at_distances(current_lane, [lane_s])[0]
+            if lane_change:
+                p_target = _sample_polyline_at_distances(target_lane, [lane_s])[0]
+                preview_time = (i + 1) * self.control_dt + self.lookahead_s
+                weight = float(_quintic_blend(np.asarray([preview_time / duration]))[0])
+                waypoint = (1.0 - weight) * p_current + weight * p_target
+            else:
+                waypoint = p_current
+            vec_x = float(waypoint[0]) - x
+            vec_y = float(waypoint[1]) - y
+            distance = max(float(np.hypot(vec_x, vec_y)), 1e-4)
+            angle_error = float(np.arctan2(vec_y, vec_x) - psi)
+            angle_error = float(np.arctan2(np.sin(angle_error), np.cos(angle_error)))
+            # Pure-pursuit front-wheel angle, bounded by control-space limits.
+            desired_steer = float(np.arctan(
+                2.0 * self.wheelbase * np.sin(angle_error) / distance
+            ))
+            steering = float(np.clip(desired_steer, -self.max_steer, self.max_steer))
+            if emergency_stop and velocity < 1e-5:
+                accel_step = steering = 0.0
+            else:
+                accel_step = acceleration
+                if acceleration < 0 and velocity + acceleration * self.control_dt < 0:
+                    accel_step = -velocity / self.control_dt
+            controls[i] = (accel_step, steering)
+            next_v = max(0.0, velocity + accel_step * self.control_dt)
+            mid_v = 0.5 * (velocity + next_v)
+            yaw_step = mid_v * np.tan(steering) * self.control_dt / self.wheelbase
+            heading_mid = psi + 0.5 * yaw_step
+            dx = mid_v * np.cos(heading_mid) * self.control_dt
+            dy = mid_v * np.sin(heading_mid) * self.control_dt
+            x += float(dx)
+            y += float(dy)
+            travelled += float(np.hypot(dx, dy))
+            psi += float(yaw_step)
+            velocity = next_v
+            dense_xy[i] = (x, y)
+        stride = self.control_steps // self.horizon_steps
+        xy = dense_xy[stride - 1 :: stride].copy()
+        assert xy.shape == (self.horizon_steps, 2)
+        return controls, xy
 
     # ------------------------------------------------------------------
     # Lane extraction from vectorized map
@@ -1187,6 +1169,7 @@ class AllMergeAnchorBuilder:
     def _validate_batch(
         self,
         coarse: np.ndarray,
+        controls: np.ndarray,
         valid: np.ndarray,
         batch_size: int,
     ) -> None:
@@ -1206,6 +1189,15 @@ class AllMergeAnchorBuilder:
                 f"coarse_trajectories shape={coarse.shape}, "
                 f"expected={expected_coarse}"
             )
+
+        if controls.shape != (batch_size, self.num_modes, self.control_steps, 2):
+            raise RuntimeError(f"coarse_controls shape={controls.shape} is invalid")
+        if not np.all(np.isfinite(controls)):
+            raise RuntimeError("coarse_controls contains NaN/Inf")
+        if (np.abs(controls[..., 0]) > self.max_accel + 1e-5).any() or (
+            np.abs(controls[..., 1]) > self.max_steer + 1e-5
+        ).any():
+            raise RuntimeError("coarse_controls exceeds control-space limits")
 
         if valid.shape != expected_valid:
             raise RuntimeError(

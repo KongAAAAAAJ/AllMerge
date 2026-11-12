@@ -21,7 +21,7 @@ trajectory:
     persistent_workers: true
     prefetch_factor: 2
     pin_memory: auto
-    max_epochs: 50
+    max_epochs: 100
     max_steps: -1
     learning_rate: 0.0001
     weight_decay: 0.0001
@@ -57,13 +57,13 @@ control:
     position_scale_m: 10.0
     loss_position: 1.0
   training:
-    dataset_root: outputs/expert_dataset/expert_trucksim_k2_50k_v1
-    output_dir: outputs/diffusion_control_d1_trajectory_only
+    dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_50k_v1
+    output_dir: outputs/diffusion_control_anchor_pair_v1
     train_split: train
     val_split: val
-    batch_size: 2
-    num_workers: 0
-    max_epochs: 50
+    batch_size: 64
+    num_workers: 8
+    max_epochs: 100
     lr: 0.0001
     weight_decay: 0.0001
     grad_clip: 1.0

@@ -59,6 +59,7 @@ FEATURE_KEYS = (
     "target_point",
     "target_lane_polyline",
     "coarse_trajectories",
+    "coarse_controls",
     "mode_valid_mask",
 )
 
