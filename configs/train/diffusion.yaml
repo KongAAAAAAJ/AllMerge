@@ -77,7 +77,7 @@ control:
       weight: 1.0
     ltr:
       weight: 0.0
-      limit: null
+      limit: 0.6  # 侧倾风险阈值，超过0.6才参与loss计算
     fuel:
       weight: 0.0
       parameters:
@@ -93,7 +93,7 @@ control:
         gravity_m_s2: 9.81
     progress:
       weight: 0.0
-      minimum_progress_m: null
+      minimum_progress_m: 60  # 4s的平均进度
 runtime:
   device: auto
   deterministic_seed: 0

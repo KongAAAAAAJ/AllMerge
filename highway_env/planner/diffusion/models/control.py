@@ -1,12 +1,12 @@
-"""D1: trajectory-only supervised, control-space stochastic diffusion planner.
+"""TRACE control-space stochastic diffusion planner with shared mode selection.
 
-No inferred / pseudo expert controls are used. The model samples noisy control
-sequences, performs a differentiable DDIM-style refinement, integrates controls
-with a kinematic bicycle model, and is supervised ONLY by expert XY positions.
+Control candidates are refined by DDIM and rolled out by a kinematic bicycle
+or frozen Koopman K2 execution model. Train and inference select the same valid
+goal-endpoint candidate. Expert XY, LTR, fuel, and progress losses supervise
+the chosen execution; no pseudo expert controls are used.
 
-Important: without clean control labels this is end-to-end, trajectory-trained
-iterative diffusion refinement; it is not a standard supervised noise-prediction
-DDPM objective. Training and inference run the same refinement schedule.
+Without clean control labels the objective is trajectory-trained iterative
+diffusion refinement, not standard DDPM noise-prediction supervision.
 """
 from __future__ import annotations
 
@@ -82,11 +82,11 @@ class DirectControlDenoiser(nn.Module):
 
 
 class ControlDiffusionPlanner(nn.Module):
-    """Diffusion of 40 acceleration/steering inputs, trained by expert XY only.
+    """Control-space diffusion with goal-endpoint selection in train and inference.
 
-    forward_train: candidate controls [B,M,40,2] -> all kinematic trajectories;
-    selects best valid mode by trajectory error (only trajectory loss).
-    infer_multimodal: same DDIM schedule, mode chosen by goal endpoint distance.
+    All candidate controls are rolled out by the chosen execution backend. The
+    same valid-mode-filtered goal-endpoint selector chooses the executed mode
+    for trajectory supervision, auxiliary objectives, and online inference.
     """
 
     def __init__(self, model_config=None, control_config=None, *,
@@ -103,6 +103,7 @@ class ControlDiffusionPlanner(nn.Module):
             [self.ctrl_cfg.max_accel_mps2, self.ctrl_cfg.max_steer_rad], dtype=torch.float32))
         self.execution_config = dict(execution_config or {'model': 'kinematic'})
         self.loss_config = dict(loss_config or {})
+        self.loss_config.setdefault('mode_selection', 'goal_endpoint')
         self.vehicle_model = VehicleExecution(
             self.execution_config, dt=self.ctrl_cfg.dt,
             wheelbase_m=self.ctrl_cfg.wheelbase_m,
@@ -142,6 +143,8 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _validate_objectives(self):
         cfg = self.loss_config
+        if cfg.get('mode_selection') != 'goal_endpoint':
+            raise ValueError('Control diffusion training mode_selection must be goal_endpoint')
         trajectory = cfg.get('trajectory', {})
         if trajectory.get('type', 'legacy_smooth_l1') not in ('legacy_smooth_l1', 'paper_mse'):
             raise ValueError('trajectory.type: legacy_smooth_l1 or paper_mse')
@@ -181,13 +184,33 @@ class ControlDiffusionPlanner(nn.Module):
         result = self._all_predictions(controls, features, context)
         return result['poses'], result['speeds']
 
+    @staticmethod
+    def _select_goal_endpoint_mode(poses_all, features):
+        """Shared train/inference selector: valid terminal XY nearest target_point.
+
+        The score is unnormalized negative squared physical distance (m^2).
+        Ties use torch.argmax's first-index rule in both phases. The discrete
+        mode index itself is not differentiable; gradients flow through the
+        selected trajectory and its executed vehicle states.
+        """
+        valid = features['mode_valid_mask'].bool()
+        if valid.shape != poses_all.shape[:2]:
+            raise ValueError('mode_valid_mask must be [B,num_modes]')
+        if not valid.any(dim=1).all():
+            raise ValueError('Every episode needs at least one valid mode')
+        target = features['target_point'][:, None, :]
+        scores = -(poses_all[:, :, -1, :2] - target).square().sum(dim=-1)
+        selected = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
+        return selected, scores
+
     def forward_train(self, features, target_dense_xy, target_mode=None, *,
                       generator=None, context=None):
-        """Expert XY supervision; no pseudo controls or inverse dynamics.
+        """Train on the same goal-endpoint-selected mode used by inference.
 
-        Best-of-M assignment is based on *trajectory error alone*. Auxiliary
-        LTR/fuel/progress terms apply only to the selected mode, so they do
-        not create a reward-based oracle that changes supervision labels.
+        Target XY supplies trajectory supervision after selection only. The
+        choice of mode depends on observed target_point, predicted endpoint,
+        and mode_valid_mask; it never uses future expert XY as an oracle.
+        Auxiliary losses use the same selected mode as trajectory supervision.
         """
         cfg = self.ctrl_cfg
         B = features['ego_state'].shape[0]
@@ -205,15 +228,13 @@ class ControlDiffusionPlanner(nn.Module):
             # Bit-for-bit equivalent to the original D1 SmoothL1 regression.
             errors = F.smooth_l1_loss(predicted_xy / cfg.position_scale_m,
                 truth / cfg.position_scale_m, reduction='none').mean(dim=(-2, -1))
-        valid = features['mode_valid_mask'].bool()
-        if not valid.any(dim=1).all():
-            raise ValueError('Each episode needs at least one valid mode')
-        oracle_err, selected = errors.masked_fill(~valid, float('inf')).min(dim=1)
+        selected, _ = self._select_goal_endpoint_mode(poses_all, features)
+        selected_error = errors.gather(1, selected[:, None]).squeeze(1)
         batch_ix = torch.arange(B, device=controls_all.device)
         selected_controls = controls_all[batch_ix, selected]
         selected_poses = poses_all[batch_ix, selected]
         selected_speeds = speeds_all[batch_ix, selected]
-        z = oracle_err.new_zeros(())
+        z = selected_error.new_zeros(())
         ltr_loss, fuel_loss, progress_loss = z, z, z
         fuel_total = None
         if self._weight('ltr') > 0:
@@ -235,7 +256,7 @@ class ControlDiffusionPlanner(nn.Module):
             min_progress = float(self.loss_config['progress']['minimum_progress_m'])
             delta_s = centerline_progress(selected_poses[:, -1], features['target_lane_polyline'])
             progress_loss = torch.relu(min_progress - delta_s).square().mean()
-        trajectory_loss = oracle_err.mean()
+        trajectory_loss = selected_error.mean()
         total = (self._weight('trajectory') * trajectory_loss +
                  self._weight('ltr') * ltr_loss +
                  self._weight('fuel') * fuel_loss +
@@ -261,12 +282,7 @@ class ControlDiffusionPlanner(nn.Module):
                                              num_steps=num_steps)
         pred = self._all_predictions(controls_all, features, context)
         poses_all, speeds_all = pred['poses'], pred['speeds']
-        valid = features['mode_valid_mask'].bool()
-        if not valid.any(dim=1).all():
-            raise ValueError('Every episode needs at least one valid mode')
-        target = features['target_point'][:, None, :]
-        scores = -(poses_all[:, :, -1, :2] - target).square().sum(dim=-1)
-        mode = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
+        mode, scores = self._select_goal_endpoint_mode(poses_all, features)
         idx = torch.arange(controls_all.shape[0], device=controls_all.device)
         controls = controls_all[idx, mode]
         poses = poses_all[idx, mode]
