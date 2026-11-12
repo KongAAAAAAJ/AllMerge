@@ -59,7 +59,7 @@ control:
     output_dir: outputs/diffusion_control_d1_trajectory_only
     train_split: train
     val_split: val
-    batch_size: 8
+    batch_size: 2
     num_workers: 0
     max_epochs: 50
     lr: 0.0001
@@ -69,11 +69,11 @@ control:
     device: auto
     seed: 0
   execution:
-    model: kinematic
+    model: koopman_k2
     checkpoint: outputs/koopman/checkpoints/v0/k2/best.pt
   losses:
     trajectory:
-      type: legacy_smooth_l1
+      type: paper_mse
       weight: 1.0
     ltr:
       weight: 0.0
@@ -92,3 +92,7 @@ runtime:
     control: outputs/diffusion_control_d1_trajectory_only/best.pt
   diffusion_spline_enabled: false
   diffusion_execution_enabled: false
+
+
+
+
