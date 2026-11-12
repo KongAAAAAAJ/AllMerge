@@ -179,7 +179,8 @@ class AllMergeAnchorBuilder:
         "control_steps": 40,
         "control_dt": 0.1,
         "wheelbase_m": 5.5,
-        "max_accel_mps2": 2.5,
+        "max_accel_mps2": 2.0,
+        "max_decel_mps2": 2.5,
         "max_steer_rad": 0.08,
         "lookahead_s": 0.65,
         "min_lookahead_m": 7.0,
@@ -187,7 +188,7 @@ class AllMergeAnchorBuilder:
         # Dynamic speed levels.
         # The center speed is shifted by:
         #   target_acceleration * acceleration_preview_s
-        "speed_delta_mps": 4.0,
+        "speed_delta_mps": 6.0,
         "acceleration_preview_s": 1.0,
         "minimum_lane_change_speed_mps": 3.0,
 
@@ -226,6 +227,7 @@ class AllMergeAnchorBuilder:
         self.control_dt = float(self.config["control_dt"])
         self.wheelbase = float(self.config["wheelbase_m"])
         self.max_accel = float(self.config["max_accel_mps2"])
+        self.max_decel = float(self.config["max_decel_mps2"])
         self.max_steer = float(self.config["max_steer_rad"])
         self.lookahead_s = float(self.config["lookahead_s"])
         self.min_lookahead_m = float(self.config["min_lookahead_m"])
@@ -246,7 +248,8 @@ class AllMergeAnchorBuilder:
             raise ValueError("Anchor sample intervals must be positive")
         if (self.control_steps <= 0 or self.control_steps % self.horizon_steps != 0
                 or abs(self.control_steps * self.control_dt - self.horizon_steps * self.dt) > 1e-8
-                or self.wheelbase <= 0 or self.max_accel <= 0 or self.max_steer <= 0
+                or self.wheelbase <= 0 or self.max_accel <= 0 or self.max_decel <= 0
+                or self.max_steer <= 0
                 or self.lookahead_s <= 0 or self.min_lookahead_m <= 0):
             raise ValueError("Control and XY anchor grids/vehicle limits are inconsistent")
 
@@ -518,9 +521,20 @@ class AllMergeAnchorBuilder:
         )
         center = float(np.clip(center, 0.0, speed_limit))
 
-        high = float(np.clip(center + self.speed_delta, 0.0, speed_limit))
-        medium = center
-        low = float(np.clip(center - self.speed_delta, 0.0, speed_limit))
+        # Preserve three distinct speed targets when the center is near the
+        # speed limit or zero.  The previous independent clipping collapsed
+        # HIGH and MEDIUM into identical controls for many highway samples.
+        # Shift the same target-speed span *inside* [0, speed_limit], rather
+        # than increasing speed beyond the road limit.
+        span = min(2.0 * self.speed_delta, speed_limit)
+        low = max(0.0, center - self.speed_delta)
+        high = min(speed_limit, center + self.speed_delta)
+        if high - low < span - 1e-8:
+            if center >= speed_limit / 2.0:
+                low = max(0.0, high - span)
+            else:
+                high = min(speed_limit, low + span)
+        medium = 0.5 * (high + low)
 
         return {
             SpeedProfile.HIGH: high,
@@ -556,11 +570,11 @@ class AllMergeAnchorBuilder:
         velocity = max(float(initial_speed), 0.0)
         duration = self.control_steps * self.control_dt
         if emergency_stop:
-            acceleration = -min(self.emergency_decel, self.max_accel)
+            acceleration = -min(self.emergency_decel, self.max_decel)
         else:
             acceleration = float(np.clip(
                 (max(float(target_speed), 0.0) - velocity) / duration,
-                -self.max_accel, self.max_accel,
+                -self.max_decel, self.max_accel,
             ))
         travelled = 0.0
         for i in range(self.control_steps):
@@ -1194,9 +1208,9 @@ class AllMergeAnchorBuilder:
             raise RuntimeError(f"coarse_controls shape={controls.shape} is invalid")
         if not np.all(np.isfinite(controls)):
             raise RuntimeError("coarse_controls contains NaN/Inf")
-        if (np.abs(controls[..., 0]) > self.max_accel + 1e-5).any() or (
-            np.abs(controls[..., 1]) > self.max_steer + 1e-5
-        ).any():
+        if ((controls[..., 0] > self.max_accel + 1e-5).any() or
+            (controls[..., 0] < -self.max_decel - 1e-5).any() or
+            (np.abs(controls[..., 1]) > self.max_steer + 1e-5).any()):
             raise RuntimeError("coarse_controls exceeds control-space limits")
 
         if valid.shape != expected_valid:

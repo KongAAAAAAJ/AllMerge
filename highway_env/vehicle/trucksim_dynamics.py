@@ -65,13 +65,20 @@ class TrucksimVehicle(FOLLOWVehicle):
                 raise ValueError('TruckSim export indices must be distinct')
             result.signal_map = {'imports': dict(import_map), 'exports': dict(export_map)}
         result.solver_target_time = model.current_time
+        # Preserve both coordinate-frame origins.  A heading offset requires a
+        # matching rotation of the native displacement; translating native XY
+        # alone is incorrect for curved scenes with a nonzero initial heading.
+        result.scene_origin_xy = np.asarray(vehicle.position, dtype=float)[:2].copy()
         if result.control_mode == 'longitudinal':
-            result.position_offset = vehicle.position - result.export_array[4:6]
-            result.heading_offset = vehicle.heading - np.deg2rad(result.export_array[10])
+            result.native_origin_xy = result.export_array[4:6].copy()
+            native_heading = np.deg2rad(result.export_array[10])
         else:
             e = result.signal_map['exports']
-            result.position_offset = vehicle.position - result.export_array[[e['x_m'], e['y_m']]]
-            result.heading_offset = vehicle.heading - np.deg2rad(result.export_array[e['yaw_deg']])
+            result.native_origin_xy = result.export_array[[e['x_m'], e['y_m']]].copy()
+            native_heading = np.deg2rad(result.export_array[e['yaw_deg']])
+        result.heading_offset = float(vehicle.heading - native_heading)
+        result.frame_cos = float(np.cos(result.heading_offset))
+        result.frame_sin = float(np.sin(result.heading_offset))
         result.steering_ratio = float(config['steering_ratio'])
         if not np.isfinite(result.steering_ratio) or result.steering_ratio <= 0:
             raise ValueError('TruckSim steering_ratio must be positive')
@@ -121,12 +128,20 @@ class TrucksimVehicle(FOLLOWVehicle):
                 setattr(result, name, copy.deepcopy(value, memo))
         return result
 
+    def _native_to_scene_position(self, native_xy):
+        """Rigid-body SE(2) map using the native and scene initial poses."""
+        delta = np.asarray(native_xy, dtype=float) - self.native_origin_xy
+        c, si = self.frame_cos, self.frame_sin
+        return self.scene_origin_xy + np.asarray(
+            [c * delta[0] - si * delta[1],
+             si * delta[0] + c * delta[1]], dtype=float)
+
     def _sync_state(self):
         export = np.asarray(self.export_array, dtype=float)
         if not np.all(np.isfinite(export)):
             raise RuntimeError("TruckSim returned non-finite state")
         if self.control_mode == 'longitudinal':
-            self.position = export[4:6] + self.position_offset
+            self.position = self._native_to_scene_position(export[4:6])
             self.speed = float(np.hypot(export[2], export[3]) / 3.6)
             # Body sideslip (Vy/Vx) is not the vehicle yaw angle.
             self.heading = float(np.deg2rad(export[10]) + self.heading_offset)
@@ -135,7 +150,7 @@ class TrucksimVehicle(FOLLOWVehicle):
             self.ltr = None
         else:
             e = self.signal_map['exports']
-            self.position = np.array([export[e['x_m']], export[e['y_m']]]) + self.position_offset
+            self.position = self._native_to_scene_position(export[[e['x_m'], e['y_m']]])
             self.speed = float(np.hypot(export[e['vx_kmh']], export[e['vy_kmh']]) / 3.6)
             self.heading = float(np.deg2rad(export[e['yaw_deg']]) + self.heading_offset)
             self.measured_acceleration = np.array([export[e['ax_g']], export[e['ay_g']]]) * 9.8
