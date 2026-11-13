@@ -228,8 +228,8 @@ def eval_payload_ablation(checkpoints, *, yaml_config, dataset_root,
     root = resolve_repo_file(dataset_root)
     source = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
         dataset_root=root,split=split,max_samples=None))
-    eval_cfg = load_mode_yaml(yaml_config)
-    configured_root = resolve_repo_file(eval_cfg['training']['dataset_root'])
+    cfg = load_mode_yaml(yaml_config)
+    configured_root = resolve_repo_file(cfg['training']['dataset_root'])
     model_cfg = cfg.get('model') or {}
     control_cfg = cfg.get('control') or {}
     anchor_contract = _validate_control_anchor_dataset(
