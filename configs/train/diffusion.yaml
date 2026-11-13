@@ -67,7 +67,7 @@ control:
     loss_position: 1.0
   training:
     dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
-    output_dir: outputs/fuel_ablation/F1
+    output_dir: outputs/fuel_ablation/F0
     train_split: train
     val_split: val
     batch_size: 64
@@ -90,7 +90,7 @@ control:
       weight: 0.0
       limit: 0.6  # 侧倾风险阈值，超过0.6才参与loss计算
     fuel:
-      weight: 50
+      weight: 0
       parameters:
         empty_mass_kg: 4455
         rolling_resistance: 0.007
@@ -103,17 +103,13 @@ control:
         air_density_kg_m3: 1.225
         gravity_m_s2: 9.81
     progress:
-      weight: 0.02
+      weight: 0
       minimum_progress_m: 60  # 4s的平均进度
 runtime:
   device: auto
   deterministic_seed: 0
   checkpoint:
     trajectory: outputs/diffusion_pretrain/YOUR_TRAJECTORY_CHECKPOINT.pt
-    control: outputs/fuel_ablation/F1/best.pt
+    control: outputs/fuel_ablation/F0/best.pt
   diffusion_spline_enabled: false
   diffusion_execution_enabled: false
-
-
-
-
