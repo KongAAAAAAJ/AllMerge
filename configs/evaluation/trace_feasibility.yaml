@@ -16,8 +16,8 @@ stability:
   roll_mu_slope_rad: 0.0
   ltr_limit: null
 geometry:
-  ego_length_m: null
-  ego_width_m: null
+  ego_length_m: 10
+  ego_width_m: 2.4
   footprint_circle_count: 7
   road_margin_m: null
   curvature_limit_per_m: null

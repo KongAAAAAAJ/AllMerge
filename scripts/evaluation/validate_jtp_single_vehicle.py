@@ -20,9 +20,29 @@ import numpy as np
 import torch
 import yaml
 
-# Support direct execution from the repository root and from this file path.
+# Resolve the repository root robustly for direct script execution.
+# The script is located at <repo>/scripts/evaluation/, so parents[2] is the
+# repository root. Marker-based discovery avoids future path-depth mistakes.
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    _script_path = Path(__file__).resolve()
+    _repo_root = next(
+        (
+            _parent
+            for _parent in _script_path.parents
+            if (_parent / "data_pipeline" / "expert_dataset.py").is_file()
+            and (_parent / "highway_env").is_dir()
+        ),
+        None,
+    )
+    if _repo_root is None:
+        raise RuntimeError(
+            "Cannot locate AllMerge repository root from "
+            f"{_script_path}; expected data_pipeline/expert_dataset.py "
+            "and highway_env/ at the repository root."
+        )
+    _repo_root_str = str(_repo_root)
+    if _repo_root_str not in sys.path:
+        sys.path.insert(0, _repo_root_str)
 
 from data_pipeline.expert_dataset import (  # noqa: E402
     AllMergeExpertDatasetConfig,
