@@ -1,0 +1,114 @@
+{
+  "package_id": "trace_jtp_stage1",
+  "package_version": "1.0.0",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "installed_at": "2026-11-13T19:13:08",
+  "rolled_back": false,
+  "records": [
+    {
+      "path": "configs/projection/jtp.yaml",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "3e441be4d4a56db60c66c9d0162de7fadf9244ae33f33c424306e0897b940f7b"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/README.md",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "acb065367ae3a2945b0f1f0492db5b4d83e2c9ae2145e1d7860c07dca733df56"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/config.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "7a4418d711ab8622a6ccf56227af3458543b99cc176e0a2de71cc1b2300054f6"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/constraints.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "e885c980ef4bdd670a029180086f9cae59b8c38a81c99a4e39eb54d61ca2dac3"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/execution_adapter.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "a16f0fa53c74be0d25c7e5a7433c84fa69bfc9ad032af2337e5e58c29ca04fd2"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/geometry.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "4856480731a74bb790d8d29cd360c9bfe54118eb2aa520dd3bedbbf65203b56b"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/qp_builder.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "d80f6aedb63c0c1c9e3dd2bfc3585e403369abe24f26b61a9ebd968e270f4087"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/scp_solver.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "9d2fd97e00fff28993f9cf201dae48a353bf2f34ee897867a7c06325959daa03"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/types.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "67486053d48b7de4d4e74dac2d8147a2eef2ed8387931db3e803616145d582ac"
+    },
+    {
+      "path": "requirements-jtp.txt",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "7077c25dc8c3a03de92f37ae86780e212fc42599f0646ef7b8d5fc049710ffbb"
+    },
+    {
+      "path": "tests/test_joint_trajectory_projection.py",
+      "action": "add",
+      "backup_file": null,
+      "before_sha256": null,
+      "after_sha256": "0b9dd38527ff896c28315a9d23c02df94e484456e4e5922b291fd49201e8cf16"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/__init__.py",
+      "action": "replace",
+      "backup_file": "files/highway_env/planner/diffusion/projection/__init__.py",
+      "before_sha256": "f77f581bf3ad75b5b3cbbe7e38d6844a51562667df19c8cca5792978df692553",
+      "after_sha256": "ca6410e5abe36e1f20c28b9c514167a3a133e51bd1dcc9eabfc06f8261126883"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/matp_adapter.py",
+      "action": "delete",
+      "backup_file": "files/highway_env/planner/diffusion/projection/matp_adapter.py",
+      "before_sha256": "aaf482cb92bc1d8e3bce27fa03a09b0b7d83124addb517b901017546cf0e4ad3",
+      "after_sha256": null
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/matp_w1.py",
+      "action": "delete",
+      "backup_file": "files/highway_env/planner/diffusion/projection/matp_w1.py",
+      "before_sha256": "14d40345a5f6f323cab370ea50ab423e134440ec80e0ae4df1ca734f1b15730d",
+      "after_sha256": null
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/spline.py",
+      "action": "delete",
+      "backup_file": "files/highway_env/planner/diffusion/projection/spline.py",
+      "before_sha256": "0fee276cfc150fdfc2ae7514222a2935ef7f4ae88cef819799c1c75d57d9a98d",
+      "after_sha256": null
+    }
+  ]
+}

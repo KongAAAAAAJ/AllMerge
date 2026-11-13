@@ -1,17 +1,17 @@
-"""Projection utilities migrated from the AllMerge GuideDistill worktree."""
-from .matp_adapter import load_matp, project_w1
-from .matp_w1 import (
-    MatpW1Config,
-    curvature_series,
-    evaluate_w1_curvature_feasibility,
-    project_w1_local,
-)
+"""Joint Trajectory Projection (JTP) public API."""
+from .config import default_config_path, load_jtp_config, validate_jtp_config
+from .execution_adapter import KoopmanExecutionAdapter
+from .scp_solver import JointTrajectoryProjector
+from .types import ExternalTraffic, JTPResult, RoadGeometry, constant_velocity_poses
 
 __all__ = [
-    "MatpW1Config",
-    "curvature_series",
-    "evaluate_w1_curvature_feasibility",
-    "load_matp",
-    "project_w1",
-    "project_w1_local",
+    "ExternalTraffic",
+    "JTPResult",
+    "JointTrajectoryProjector",
+    "KoopmanExecutionAdapter",
+    "RoadGeometry",
+    "constant_velocity_poses",
+    "default_config_path",
+    "load_jtp_config",
+    "validate_jtp_config",
 ]

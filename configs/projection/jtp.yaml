@@ -1,0 +1,90 @@
+# Joint Trajectory Projection (JTP)
+# All values in this file are provisional engineering defaults. They must be
+# calibrated against the final TRACE experimental setup before paper runs.
+
+execution:
+  dt_s: 0.1
+  horizon_steps: 40       # Koopman execution grid H
+  control_steps: 40       # diffusion control nodes K; current TRACE uses K=H
+  wheelbase_m: 5.5
+
+stability:
+  gravity_mps2: 9.81
+  minimum_mu_for_limits: 0.05
+  yaw_rate_safety_factor: 0.85
+  minimum_speed_for_yaw_limit_mps: 3.0
+  sideslip:
+    base_limit_deg: 5.0
+    reference_mu: 0.8
+    friction_exponent: 0.5
+    scale_min: 0.65
+    scale_max: 1.15
+  roll:
+    base_limit_deg: 5.0
+    reference_mu: 0.8
+    friction_exponent: 0.5
+    payload_reference_kg: 10000.0
+    payload_sensitivity: 0.20
+    scale_min: 0.55
+    scale_max: 1.10
+  ltr_limit: 0.80
+
+geometry:
+  curvature_limit_per_m: 0.025
+  road_clearance_m: 0.35
+  # Overlapping circle cover for a nominal 16.5 m x 2.55 m heavy truck.
+  # Road corridors describe the outer drivable carriageway boundaries, not lane boundaries.
+  footprint:
+    circle_offsets_m: [-6.6, -3.3, 0.0, 3.3, 6.6]
+    circle_radius_m: 2.10
+
+collision:
+  clearance_m: 0.50
+  # Default background-vehicle approximation; can be overridden per actor.
+  external_footprint:
+    circle_offsets_m: [-1.2, 0.0, 1.2]
+    circle_radius_m: 1.55
+
+control:
+  acceleration_min_mps2: -4.0
+  acceleration_max_mps2: 2.5
+  steering_min_rad: -0.08
+  steering_max_rad: 0.08
+  acceleration_rate_max_mps3: 4.0
+  steering_rate_max_radps: 0.12
+  # Dimensionless trust-region radius is multiplied by these physical scales.
+  trust_scale: [2.5, 0.08]
+
+optimization:
+  max_scp_iterations: 8
+  max_qp_retries: 3
+  lambda_u: 0.10
+  trajectory_weights: [1.0, 1.0, 0.25]  # x, y, yaw
+  control_weights: [0.16, 156.25]       # ax, front-wheel steering
+  initial_trust_radius: 0.25
+  minimum_trust_radius: 0.025
+  maximum_trust_radius: 0.75
+  trust_shrink_factor: 0.5
+  trust_grow_factor: 1.5
+  alpha_initial: 1.0
+  alpha_minimum: 0.125
+  alpha_shrink_factor: 0.5
+  merit_penalty: 1000.0
+  merit_scales:
+    stability: [0.5, 0.0872665, 0.0872665, 0.80]  # r, beta, roll, LTR
+    road_residual_m: 0.5
+    curvature_residual_per_m2: 0.000625
+    collision_residual_m2: 22.09
+  convergence_step_norm: 0.001
+  constraint_tolerance: 0.0001
+  objective_tolerance: 0.00001
+  jacobian_vectorize: true
+
+qp:
+  max_iter: 10000
+  eps_abs: 0.0001
+  eps_rel: 0.0001
+  polishing: true
+  adaptive_rho: true
+  verbose: false
+  diagonal_regularization: 0.000001
