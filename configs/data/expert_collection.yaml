@@ -20,8 +20,8 @@ conditions:
 # Start with a small pilot.  If the 3-solver native DLL system is unstable,
 # do not mark interrupted or partial episodes as training data.
 collection:
-  dataset_name: expert_trucksim_k2_anchor_pair_1k
-  target_samples: 1000
+  dataset_name: expert_trucksim_k2_anchor_pair_100k
+  target_samples: 100000
   episode_duration_s: 5.0
   max_episodes: 10000
   timeout_s: 300
