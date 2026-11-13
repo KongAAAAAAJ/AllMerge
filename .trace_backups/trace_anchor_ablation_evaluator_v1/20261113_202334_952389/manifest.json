@@ -1,0 +1,30 @@
+{
+  "migration_id": "trace_anchor_ablation_evaluator_v1",
+  "created_at": "2026-11-13T20:23:34",
+  "created_files": [
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/__init__.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/data.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/metrics.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/feasibility.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/reporting.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/visualization.py",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/runner.py",
+    "scripts/evaluation/eval_anchor_ablation.py",
+    "configs/evaluation/anchor_ablation.yaml",
+    "configs/evaluation/trace_feasibility.yaml",
+    "tests/test_anchor_ablation_evaluator.py"
+  ],
+  "sha256": {
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/__init__.py": "d821298d6ba9cbe21487490c7956fa00b97bc4e1c022af49b556075fbd9a04db",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/data.py": "91c7783c88607fe779f3ff2c4a399ccbf33a87e0ca22d7e7e7171e3147f25390",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/metrics.py": "ba07938d6f94a492e853972688aae5a0ce56e6433d71ac57f6b78b76fa53a850",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/feasibility.py": "3ac4d76e7f7e2e98f66a1854bae60d0d506b7e42e7538095f35abbe289fb69b4",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/reporting.py": "f92df6d7e1de9a99eaf87982b68f21ed366da9fe587e9a531f9c6bac94d355e9",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/visualization.py": "8791ed8d35b1b97fe3dc337e35e3f4d00e706dd08b92a8701f6b57cea38c5605",
+    "highway_env/planner/diffusion/evaluation/anchor_ablation/runner.py": "24a11a25796ee2af7935540249464d69f3e1b9a9565c0f6b056798ee8c9c2f78",
+    "scripts/evaluation/eval_anchor_ablation.py": "7108d40bfe8cb053289a4c9fa2aab8e2d3f96af898e08a92b175ec52d1ee6a68",
+    "configs/evaluation/anchor_ablation.yaml": "e71d55c5d3c405bf858c635c16bf8f8605f4807888d361e077129f10c832a35e",
+    "configs/evaluation/trace_feasibility.yaml": "e2ea36db0648b0771e4573e3f3dec32f3b9bf697add017576ee4706c58232a0f",
+    "tests/test_anchor_ablation_evaluator.py": "d81ce6b0586f95ddc14b8d851d6fc3901043bf317b73fb964b5b3162b1f876e9"
+  }
+}

@@ -80,6 +80,108 @@ def _infer_one(model, ds, *, seed, train_seed, method, device,
     return rows, figures
 
 
+def _validate_control_anchor_dataset(
+    dataset,
+    *,
+    dataset_root,
+    expected_modes=10,
+    expected_control_steps=40,
+    expected_trajectory_steps=8,
+    configured_dataset_root=None,
+):
+    """Fail early unless every selected shard contains paired control anchors.
+
+    Control-space diffusion consumes the physical control sequence that was
+    generated together with each coarse XY anchor. The legacy expert dataset
+    schema intentionally keeps ``coarse_controls`` optional for trajectory
+    planners, but it is mandatory for TRACE control-space evaluation.
+    """
+    if len(dataset) <= 0:
+        raise ValueError(
+            f"Fuel-aware control evaluation found no samples in dataset: {dataset_root}"
+        )
+
+    missing_shards = []
+    for shard_path in dataset.shard_paths:
+        with np.load(shard_path, allow_pickle=False) as shard:
+            if "coarse_controls" not in shard.files:
+                missing_shards.append(Path(shard_path).name)
+
+    if missing_shards:
+        preview = ", ".join(missing_shards[:5])
+        suffix = " ..." if len(missing_shards) > 5 else ""
+        configured_hint = ""
+        if configured_dataset_root is not None:
+            configured_hint = (
+                f"\nThe active YAML control.training.dataset_root resolves to: "
+                f"{configured_dataset_root}"
+                "\nRemove the explicit --dataset-root argument to use that "
+                "configured dataset, or pass it explicitly."
+            )
+        raise ValueError(
+            "Incompatible dataset for TRACE control-space Fuel-Aware evaluation."
+            f"\nSelected dataset: {dataset_root}"
+            f"\nMissing coarse_controls in {len(missing_shards)}/"
+            f"{len(dataset.shard_paths)} selected shards: {preview}{suffix}"
+            "\nThe current control-diffusion model requires paired dynamic "
+            "anchors: coarse_controls [N,10,40,2], generated together with "
+            "coarse_trajectories [N,10,8,2]."
+            "\nThis dataset contains only XY anchors and cannot provide the "
+            "original control anchors. Do not reconstruct controls by "
+            "inverting coarse_trajectories."
+            f"{configured_hint}"
+        )
+
+    features, _ = dataset[0]
+    expected_control_shape = (
+        int(expected_modes), int(expected_control_steps), 2
+    )
+    expected_trajectory_shape = (
+        int(expected_modes), int(expected_trajectory_steps), 2
+    )
+    expected_mask_shape = (int(expected_modes),)
+
+    actual_control_shape = tuple(features["coarse_controls"].shape)
+    actual_trajectory_shape = tuple(features["coarse_trajectories"].shape)
+    actual_mask_shape = tuple(features["mode_valid_mask"].shape)
+
+    if actual_control_shape != expected_control_shape:
+        raise ValueError(
+            "Invalid paired control-anchor shape in selected dataset: "
+            f"coarse_controls={actual_control_shape}, "
+            f"expected={expected_control_shape}; dataset={dataset_root}"
+        )
+    if actual_trajectory_shape != expected_trajectory_shape:
+        raise ValueError(
+            "Invalid paired trajectory-anchor shape in selected dataset: "
+            f"coarse_trajectories={actual_trajectory_shape}, "
+            f"expected={expected_trajectory_shape}; dataset={dataset_root}"
+        )
+    if actual_mask_shape != expected_mask_shape:
+        raise ValueError(
+            "Invalid anchor validity-mask shape in selected dataset: "
+            f"mode_valid_mask={actual_mask_shape}, "
+            f"expected={expected_mask_shape}; dataset={dataset_root}"
+        )
+    if not torch.isfinite(features["coarse_controls"]).all():
+        raise ValueError(
+            f"coarse_controls contains NaN/Inf in dataset sample 0: {dataset_root}"
+        )
+    if not torch.isfinite(features["coarse_trajectories"]).all():
+        raise ValueError(
+            f"coarse_trajectories contains NaN/Inf in dataset sample 0: {dataset_root}"
+        )
+
+    return {
+        "strategy": "dynamic_paired_control_anchors",
+        "coarse_controls_shape": list(expected_control_shape),
+        "coarse_trajectories_shape": list(expected_trajectory_shape),
+        "mode_valid_mask_shape": list(expected_mask_shape),
+        "checked_shards": len(dataset.shard_paths),
+        "dataset_root": str(dataset_root),
+    }
+
+
 def _grouped_summary(records, groups, payloads):
     indices_to_payload = {int(idx):float(p) for p,ids in groups.items() for idx in ids}
     nested = {p:defaultdict(lambda: defaultdict(dict)) for p in payloads}
@@ -126,6 +228,25 @@ def eval_payload_ablation(checkpoints, *, yaml_config, dataset_root,
     root = resolve_repo_file(dataset_root)
     source = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
         dataset_root=root,split=split,max_samples=None))
+    eval_cfg = load_mode_yaml(yaml_config)
+    configured_root = resolve_repo_file(eval_cfg['training']['dataset_root'])
+    model_cfg = cfg.get('model') or {}
+    control_cfg = cfg.get('control') or {}
+    anchor_contract = _validate_control_anchor_dataset(
+        source,
+        dataset_root=root,
+        expected_modes=int(model_cfg.get('num_modes', 10)),
+        expected_control_steps=int(control_cfg.get('horizon_steps', 40)),
+        expected_trajectory_steps=int(model_cfg.get('horizon_steps', 8)),
+        configured_dataset_root=configured_root,
+    )
+    print(
+        '[ANCHOR DATASET] paired controls verified: '
+        f"controls={anchor_contract['coarse_controls_shape']} "
+        f"trajectories={anchor_contract['coarse_trajectories_shape']} "
+        f"shards={anchor_contract['checked_shards']} root={root}",
+        flush=True,
+    )
     ds, groups, available = select_payload_samples(source,payloads,max_samples=num_samples,
         sample_seed=sample_seed,tolerance_kg=payload_tolerance_kg)
     selected = select_figure_samples(groups,payloads,figure_seed=figure_seed)
@@ -223,6 +344,7 @@ def eval_payload_ablation(checkpoints, *, yaml_config, dataset_root,
         sample_ids=[{'original_index':i,'shard':ds.shard_paths[ds._index[j][0]].name,
                      'shard_sample_index':ds._index[j][1]} for j,i in enumerate(ds.source_indices)],
         split=split,eval_samples=len(ds),dataset_root=str(root),
+        anchor_contract=anchor_contract,
         fuel_parameters=vars(params),frozen_k2_signature=reference['k2_signature'],
         configuration=str(resolve_repo_file(yaml_config)),
         checkpoint_info=checkpoint_info,
@@ -243,7 +365,7 @@ def main(argv=None):
     parser.add_argument('--checkpoint',action='append',required=True,
         help='F0=path and F3=path; independent training: F0@0=path, F3@0=path etc.')
     parser.add_argument('--config',default='configs/train/diffusion.yaml')
-    parser.add_argument('--dataset-root')
+    parser.add_argument('--dataset-root', help=('Control-space evaluation dataset; each selected shard must contain paired coarse_controls [N,10,40,2]. Defaults to control.training.dataset_root in the YAML.'))
     parser.add_argument('--split',choices=('train','val','test'),default='val')
     parser.add_argument('--num-samples',type=int,default=99,
         help='Total stratified sample count; 0 uses all matching samples')

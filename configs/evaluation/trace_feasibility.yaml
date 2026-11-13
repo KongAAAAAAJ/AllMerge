@@ -1,0 +1,33 @@
+# Fill the experiment values frozen for TRACE Section V before running the
+# complete four-metric paper evaluation. The evaluator deliberately refuses
+# to invent empirical stability/vehicle thresholds.
+stability:
+  gravity_mps2: 9.81
+  yaw_rate_speed_epsilon_mps: 1.0
+  # beta_lim(mu) = sideslip_limit_rad + sideslip_mu_slope_rad * (1 - mu)
+  sideslip_limit_rad: null
+  sideslip_mu_slope_rad: 0.0
+  # phi_lim(payload,mu) = roll_limit_rad
+  #   + roll_payload_slope_rad_per_1000kg * (payload-reference)/1000
+  #   + roll_mu_slope_rad * (1-mu)
+  roll_limit_rad: null
+  roll_payload_slope_rad_per_1000kg: 0.0
+  roll_payload_reference_kg: 0.0
+  roll_mu_slope_rad: 0.0
+  ltr_limit: null
+geometry:
+  ego_length_m: null
+  ego_width_m: null
+  footprint_circle_count: 7
+  road_margin_m: null
+  curvature_limit_per_m: null
+  collision_margin_m: null
+control:
+  # If omitted, symmetric acceleration/steering bounds are taken from the
+  # common ControlSpaceConfig in the three compatible checkpoints.
+  acceleration_min_mps2: null
+  acceleration_max_mps2: null
+  steering_min_rad: null
+  steering_max_rad: null
+  acceleration_rate_max_mps3: null
+  steering_rate_max_rad_s: null

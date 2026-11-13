@@ -1,0 +1,11 @@
+# TRACE paper-aligned A0/A1/A2 Anchor Ablation evaluation.
+dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
+split: test
+num_frames: 200          # 0 evaluates all complete synchronized frames
+max_samples: null
+batch_size: 16
+num_workers: 0
+device: auto
+seeds: "0,1,2"
+sample_seed: 2026
+output_dir: outputs/anchor_ablation/evaluation
