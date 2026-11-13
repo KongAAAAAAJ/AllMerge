@@ -115,14 +115,28 @@ class ControlDiffusionPlanner(nn.Module):
         )
         self.anchors_config = dict(anchors_config or {'strategy': 'dynamic'})
         anchor_strategy = self.anchors_config.get('strategy', 'dynamic')
-        if anchor_strategy not in ('dynamic', 'adaptive'):
-            raise ValueError('Control anchor strategy must be dynamic or adaptive')
+        # A0_FIXED_CONTROL_KMEANS_V3
+        if anchor_strategy not in ('dynamic', 'adaptive', 'fixed'):
+            raise ValueError('Control anchor strategy must be dynamic, adaptive or fixed')
         self.anchor_manager = None
-        if anchor_strategy == 'adaptive':
+        if anchor_strategy in ('adaptive', 'fixed'):
             if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
                 raise ValueError('num_selected must equal model num_modes')
+        if anchor_strategy == 'adaptive':
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
             self.anchor_manager = AdaptiveAnchorManager(self.anchors_config)
+        elif anchor_strategy == 'fixed':
+            from highway_env.planner.fixed_anchor_manager import FixedAnchorManager
+            self.anchor_manager = FixedAnchorManager(
+                self.anchors_config,
+                num_modes=self.scene_config.num_modes,
+                dt=self.ctrl_cfg.dt,
+                wheelbase_m=self.ctrl_cfg.wheelbase_m,
+                max_accel_mps2=self.ctrl_cfg.max_accel_mps2,
+                max_steer_rad=self.ctrl_cfg.max_steer_rad,
+            )
+            # Persist the exact K-means control-bank identity in the planner checkpoint.
+            self.anchors_config['bank_sha256'] = self.anchor_manager.bank_sha256
         self._validate_objectives()
 
     def _encode_scene(self, features):
@@ -134,7 +148,7 @@ class ControlDiffusionPlanner(nn.Module):
         return self.scene_encoder(features)
 
     def _prepare_anchors(self, features):
-        """Select adaptive candidates on demand; leave the A1 default untouched."""
+        """Dispatch dynamic, adaptive, or fixed anchors without semantic mode identities."""
         return features if self.anchor_manager is None else self.anchor_manager.select(features)
 
     def _sample_controls(self, features, *, generator=None, num_steps=None):

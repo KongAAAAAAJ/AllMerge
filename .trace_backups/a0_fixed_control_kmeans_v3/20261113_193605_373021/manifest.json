@@ -1,0 +1,23 @@
+{
+  "migration_id": "a0_fixed_control_kmeans_v3",
+  "created_at": "2026-11-13T19:36:05",
+  "created_files": [
+    "highway_env/planner/fixed_anchor_manager.py",
+    "scripts/data/build_a0_fixed_anchors.py",
+    "tests/test_fixed_anchor_manager.py",
+    "configs/train/diffusion_a0_fixed.yaml"
+  ],
+  "sha256": {
+    "highway_env/planner/fixed_anchor_manager.py": "2a3914305adbfa32d9df41de38ec2edf19ff055eb4778457e5467781f0126ffa",
+    "scripts/data/build_a0_fixed_anchors.py": "e7de77c121bb74c1225533248c9eb5efd7fd2fe4550a8bbdb8c108827546954b",
+    "tests/test_fixed_anchor_manager.py": "7acea8eb46fc365ccbf17726cca01cda0f85f24e95f8a682cb2e7af986f60959",
+    "configs/train/diffusion_a0_fixed.yaml": "ae1771c7156161779642a812c770d2b783efcb3856dc96c65d0d7bfa5cdf90f1"
+  },
+  "modified_files": {
+    "highway_env/planner/diffusion/models/control.py": {
+      "backup": ".trace_backups/a0_fixed_control_kmeans_v3/20261113_193605_373021/control.py.before_a0_fixed_control_kmeans_v3",
+      "original_sha256": "8266be70f7c61117b59576078d75a5f94326aea668fecc7f6c12d615bda6273b",
+      "patched_sha256": "7071054e852386418957a37300390cb6ec324f463e95801aaa6ac6a8c0c5b2e9"
+    }
+  }
+}
