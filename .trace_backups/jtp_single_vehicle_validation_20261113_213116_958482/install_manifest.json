@@ -1,0 +1,16 @@
+{
+  "package_id": "trace_jtp_single_vehicle_validation",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "installed_at": "2026-11-13T21:31:16",
+  "rolled_back": false,
+  "records": [
+    {
+      "path": "scripts/evaluation/validate_jtp_single_vehicle.py",
+      "after": "1da3f6a87d0438b025d9c3e3e0b429d39da5caf55821de101893e706d44baf93"
+    },
+    {
+      "path": "tests/test_jtp_single_vehicle_validation.py",
+      "after": "ec1e409d4b83dac8650dea2d4a2f15a1f75488ffbb365f0ea4b872a025424a6c"
+    }
+  ]
+}
