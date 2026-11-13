@@ -93,7 +93,8 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
     model = ControlDiffusionPlanner(
         cfg.get('model'), cfg.get('control'),
         execution_config=cfg.get('execution'), loss_config=cfg.get('losses'),
-    ).to(selected_device)
+                anchors_config=cfg.get('anchors'),
+            ).to(selected_device)
     # Explicitly exclude frozen K2 parameters from the optimizer.
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
     batch_size = int(tr.get('batch_size', 8))
@@ -138,6 +139,7 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
             'model_config': cfg.get('model', {}), 'control_config': cfg.get('control', {}),
             'execution_config': model.execution_config,
             'loss_config': model.loss_config,
+            'anchors_config': model.anchors_config,
             'koopman_metadata': model.vehicle_model.koopman_metadata,
             'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict(),
             'epoch': epoch, 'history': history,
@@ -169,7 +171,10 @@ def load_control_checkpoint(checkpoint, device='cpu'):
         execution_config=payload.get('execution_config'),
         loss_config=payload.get('loss_config'),
         koopman_metadata=payload.get('koopman_metadata'),
-    )
+                anchors_config=payload.get('anchors_config'),
+            )
+    if any(key.startswith('denoiser.mode_embedding.') for key in payload['model_state']):
+        raise RuntimeError('Legacy mode_embedding checkpoint is incompatible; retrain the identity-free control planner')
     model.load_state_dict(payload['model_state'])
     return model.to(device).eval(), payload
 

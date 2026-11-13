@@ -1,0 +1,29 @@
+# TRACE A2 safety-scoring-only training (no expert trajectory labels).
+# Uses the newly collected expert shards for scene inputs only.
+dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_50k_v1
+output_dir: outputs/trace_adaptive_anchors
+train_split: train
+val_split: val
+batch_size: 16
+num_workers: 0
+max_samples: null
+epochs: 30
+lr: 0.0001
+weight_decay: 0.0001
+grad_clip: 1.0
+seed: 0
+model: {}
+candidate_generation: {}
+num_selected: 10
+top_r: 20
+trajectory_weight: 1.0
+control_weight: 1.0
+temperature: 0.3
+teacher:
+  collision_weight: 1.0
+  road_weight: 1.0
+  ego_length_m: 5.0
+  ego_width_m: 2.0
+  longitudinal_margin_m: 1.0
+  lateral_margin_m: 0.3
+  dt: 0.5

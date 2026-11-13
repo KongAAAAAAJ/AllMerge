@@ -95,10 +95,6 @@ class StructuredTrajectoryDenoiser(nn.Module):
             ),
         )
 
-        self.mode_embedding = nn.Embedding(
-            config.num_modes,
-            config.d_model,
-        )
 
         self.time_embedding = nn.Sequential(
             SinusoidalTimeEmbedding(
@@ -202,16 +198,6 @@ class StructuredTrajectoryDenoiser(nn.Module):
             flat
         )
 
-        mode_ids = torch.arange(
-            modes,
-            device=noisy_norm.device,
-        )
-        mode_tokens = (
-            mode_tokens
-            + self.mode_embedding(
-                mode_ids
-            )[None, :, :]
-        )
 
         time_embed = self.time_embedding(
             timestep

@@ -65,7 +65,6 @@ class DirectControlDenoiser(nn.Module):
         self.steps = steps
         self.noisy_encoder = nn.Sequential(
             nn.Linear(steps * 2, dim), nn.LayerNorm(dim), nn.GELU(), nn.Linear(dim, dim))
-        self.mode_embedding = nn.Embedding(self.modes, dim)
         self.time_embedding = nn.Sequential(
             SinusoidalTimeEmbedding(dim), nn.Linear(dim, 4 * dim),
             nn.SiLU(), nn.Linear(4 * dim, dim))
@@ -79,8 +78,7 @@ class DirectControlDenoiser(nn.Module):
         B, M, H, D = noisy.shape
         if (M, H, D) != (self.modes, self.steps, 2):
             raise ValueError('Expected [B,num_modes,40,2] controls')
-        tokens = (self.noisy_encoder(noisy.flatten(2)) +
-                  self.mode_embedding(torch.arange(M, device=noisy.device))[None])
+        tokens = (self.noisy_encoder(noisy.flatten(2)))
         t_emb = self.time_embedding(t)
         for layer in self.layers:
             tokens = layer(tokens, scene, t_emb)
@@ -96,7 +94,7 @@ class ControlDiffusionPlanner(nn.Module):
     """
 
     def __init__(self, model_config=None, control_config=None, *,
-                 execution_config=None, loss_config=None, koopman_metadata=None):
+                 execution_config=None, loss_config=None, koopman_metadata=None, anchors_config=None):
         super().__init__()
         self.scene_config = build_structured_diffusion_config(**(model_config or {}))
         self.ctrl_cfg = ControlSpaceConfig(**(control_config or {}))
@@ -115,6 +113,16 @@ class ControlDiffusionPlanner(nn.Module):
             wheelbase_m=self.ctrl_cfg.wheelbase_m,
             koopman_metadata=koopman_metadata,
         )
+        self.anchors_config = dict(anchors_config or {'strategy': 'dynamic'})
+        anchor_strategy = self.anchors_config.get('strategy', 'dynamic')
+        if anchor_strategy not in ('dynamic', 'adaptive'):
+            raise ValueError('Control anchor strategy must be dynamic or adaptive')
+        self.anchor_manager = None
+        if anchor_strategy == 'adaptive':
+            if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
+                raise ValueError('num_selected must equal model num_modes')
+            from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
+            self.anchor_manager = AdaptiveAnchorManager(self.anchors_config)
         self._validate_objectives()
 
     def _encode_scene(self, features):
@@ -124,6 +132,10 @@ class ControlDiffusionPlanner(nn.Module):
             if val.device != device:
                 setattr(self.adapter, attr, val.to(device))
         return self.scene_encoder(features)
+
+    def _prepare_anchors(self, features):
+        """Select adaptive candidates on demand; leave the A1 default untouched."""
+        return features if self.anchor_manager is None else self.anchor_manager.select(features)
 
     def _sample_controls(self, features, *, generator=None, num_steps=None):
         """Control-space DDIM initialized from the paired sampled controls.
@@ -237,6 +249,7 @@ class ControlDiffusionPlanner(nn.Module):
         B = features['ego_state'].shape[0]
         if target_dense_xy.shape != (B, cfg.horizon_steps, 2):
             raise ValueError('Expert trajectory_dense must be [B,40,2]')
+        features = self._prepare_anchors(features)
         controls_all = self._sample_controls(features, generator=generator)
         pred = self._all_predictions(controls_all, features, context)
         poses_all, speeds_all = pred['poses'], pred['speeds']
@@ -299,6 +312,7 @@ class ControlDiffusionPlanner(nn.Module):
     def infer_multimodal(self, features, generator: Optional[torch.Generator] = None,
                          num_steps: Optional[int] = None, context=None):
         cfg = self.ctrl_cfg
+        features = self._prepare_anchors(features)
         controls_all = self._sample_controls(features, generator=generator,
                                              num_steps=num_steps)
         pred = self._all_predictions(controls_all, features, context)

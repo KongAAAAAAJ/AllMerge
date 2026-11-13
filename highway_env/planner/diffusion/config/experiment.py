@@ -42,6 +42,7 @@ def load_mode_yaml(path: str | Path) -> dict[str, Any]:
             data['control'] = selected['dynamics']
             data['execution'] = selected.get('execution', {'model': 'kinematic'})
             data['losses'] = selected.get('losses', {})
+            data['anchors'] = selected.get('anchors', {'strategy': 'dynamic'})
     return data
 
 
