@@ -124,6 +124,16 @@ class MyHighwayEnv(AbstractEnv):
                     # ========================================================
                     "Diffusion": {
 
+                        # TRACE runtime backend. Keep trajectory as the
+                        # backward-compatible default; JTP requires control.
+                        "output_space": "trajectory",
+                        "jtp_enabled": False,
+                        "jtp_config": "configs/projection/jtp.yaml",
+                        "jtp_runtime_config": "configs/projection/jtp_runtime.yaml",
+                        # Execute U[0] only after JTP has verified all constraints.
+                        # If JTP fails or is warming up, the Polynomial controller is used.
+                        "jtp_control_execution_enabled": False,
+
                         # Stage 1 核心开关
                         "shadow_enabled": True,
 

@@ -1,0 +1,67 @@
+{
+  "package_id": "trace_jtp_stage2_compatible",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "records": [
+    {
+      "path": "highway_env/planner/diffusion/inference/jtp_context.py",
+      "backup": null,
+      "before": null,
+      "after": "d70a565a01cc0b68dca57f2da032de3b2e0c32e563f3814cbc3c329d59a2d4a3"
+    },
+    {
+      "path": "configs/projection/jtp_runtime.yaml",
+      "backup": null,
+      "before": null,
+      "after": "5e6433d0abef85ef9cbb4ef241bfbdddad66f35b8e242b7a01627bd9640253cd"
+    },
+    {
+      "path": "tests/test_jtp_runtime_integration.py",
+      "backup": null,
+      "before": null,
+      "after": "a3608e6277091be4d27f2123066c87379e9078ad8445b513dc71364b0ca8ed68"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/control.py",
+      "backup": "original/highway_env/planner/diffusion/inference/control.py",
+      "before": "e6fbccb14f7e110d2e6e3288ca90901b16ddc48a65c3c4be3c2cc1b415c2a0c0",
+      "after": "3e540eb0435d4dda54101ae6a1fef0dc0cf0823e4f03c88b5c59843d876cb6fb"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/runtime.py",
+      "backup": "original/highway_env/planner/diffusion/inference/runtime.py",
+      "before": "8708e9a7cbfba1c45343137ac4ea1203ccdf2b34d09ce8606e2a8dace3019f2b",
+      "after": "6e85a797b7ec7ef419245d17b2ad3723183e488a72d10d79d146d7672bc390a5"
+    },
+    {
+      "path": "highway_env/envs/common/action.py",
+      "backup": "original/highway_env/envs/common/action.py",
+      "before": "f7ad1d260fb75ada28bff36235ef91ec5fc0841e87e45c9be21f86fa1618def7",
+      "after": "7d2fc877bbd875fb5e415f7ae7e52bb16ebeb422ac65231bf23a6b5d9d507e41"
+    },
+    {
+      "path": "highway_env/vehicle/controller.py",
+      "backup": "original/highway_env/vehicle/controller.py",
+      "before": "108ec6f082c0db92b1622830187ce46fe6580c130a1cf569102afd02af84cf58",
+      "after": "7e67a48caedf96337bc1230d5796baf4c73d064e462a9f5b2d33901bd210a525"
+    },
+    {
+      "path": "highway_env/envs/my_highway_env.py",
+      "backup": "original/highway_env/envs/my_highway_env.py",
+      "before": "e8aec33fb11393d3540a62914b9cb25577799523fec137c10a7cca1464b71a8e",
+      "after": "3ed1fbd5189d0f160e4b4bcfbabe515957c9fe8a351e165b001934fb6a82ea30"
+    },
+    {
+      "path": "configs/train/diffusion.yaml",
+      "backup": "original/configs/train/diffusion.yaml",
+      "before": "e58004491eda5297f9734b33f89b55875913dde89af2884247f8257bbda5a3c4",
+      "after": "4ae683410a53596dc02ccca8a156f64ceb3d3f127b4a08073e2a559e69815fe8"
+    },
+    {
+      "path": "highway_env/planner/diffusion/README.md",
+      "backup": "original/highway_env/planner/diffusion/README.md",
+      "before": "fb6b24a5ec5aae27e4cd03f466cef3544e082071c0878d0f963130bc001b90c3",
+      "after": "92ec452a01ffb736742812eb6692454d0d4dd031cda1aaecf18b5999e961cbeb"
+    }
+  ],
+  "rolled_back": false
+}

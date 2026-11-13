@@ -108,6 +108,11 @@ control:
 runtime:
   device: auto
   deterministic_seed: 0
+  # JTP is an inference-only post-diffusion projection; no denoiser retraining.
+  jtp_enabled: false
+  jtp_config: configs/projection/jtp.yaml
+  jtp_runtime_config: configs/projection/jtp_runtime.yaml
+  jtp_control_execution_enabled: false
   checkpoint:
     trajectory: outputs/diffusion_pretrain/YOUR_TRAJECTORY_CHECKPOINT.pt
     control: outputs/fuel_ablation/F3/best.pt

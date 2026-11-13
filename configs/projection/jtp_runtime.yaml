@@ -1,0 +1,25 @@
+# Online context construction for TRACE control-space inference + JTP.
+# This file is deliberately separate from jtp.yaml so runtime integration
+# settings can be changed without overwriting the calibrated constraint set.
+execution:
+  dt_s: 0.1
+  horizon_steps: 40
+  control_steps: 40
+
+runtime:
+  context:
+    sample_dt_s: 0.1
+    max_gap_tolerance_s: 0.02
+    history_state_steps: 5
+    payload_kg: null       # scalar or per-controlled-vehicle list
+    road_mu: null          # scalar or per-controlled-vehicle list, in (0,1]
+  road:
+    sample_points: 64
+    backward_range_m: 20.0
+    forward_range_m: 180.0
+    include_connected_road_segments: true
+    search_lateral_range_m: 40.0
+  external_traffic:
+    enabled: true
+    max_distance_m: 120.0
+    max_actors: 16

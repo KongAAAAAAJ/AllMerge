@@ -590,54 +590,103 @@ class MultiAgentAction(ActionType):
         self,
         features,
         planner_flag,
+        target_lane_indices=None,
     ):
-        """Run the existing Diffusion selector and optional spline runtime."""
+        """Run Diffusion inference and optional control-space JTP projection."""
         if features is None:
             return
 
-        diffusion_config = planner_flag.get(
-            "Diffusion",
-            {},
-        )
-        shadow_enabled = bool(
-            diffusion_config.get("shadow_enabled", False)
-        )
-        execution_enabled = bool(
-            diffusion_config.get("diffusion_execution_enabled", False)
-        )
-        if not (shadow_enabled or execution_enabled):
-            return
+        diffusion_config = dict(planner_flag.get("Diffusion", {}) or {})
+        config_yaml = diffusion_config.get("config_yaml")
+        if config_yaml is not None:
+            from highway_env.planner.diffusion.config.experiment import load_mode_yaml, runtime_settings
+            effective = runtime_settings(load_mode_yaml(config_yaml))
+            effective.update({key: value for key, value in diffusion_config.items()
+                              if key != "config_yaml"})
+            diffusion_config = effective
+        shadow_enabled = bool(diffusion_config.get("shadow_enabled", False))
+        trajectory_execution_enabled = bool(
+            diffusion_config.get("diffusion_execution_enabled", False))
+        jtp_enabled = bool(diffusion_config.get("jtp_enabled", False))
+        jtp_control_execution_enabled = bool(
+            diffusion_config.get("jtp_control_execution_enabled", False))
+        output_space = str(diffusion_config.get("output_space", "trajectory")).lower()
 
-        if execution_enabled and not diffusion_config.get(
-            "diffusion_spline_enabled",
-            False,
+        if jtp_enabled and output_space != "control":
+            raise RuntimeError("JTP requires Planner.Diffusion.output_space='control'")
+        if jtp_control_execution_enabled and not jtp_enabled:
+            raise RuntimeError("jtp_control_execution_enabled requires jtp_enabled=True")
+        if trajectory_execution_enabled and not diffusion_config.get(
+            "diffusion_spline_enabled", False
         ):
             raise RuntimeError(
-                "Diffusion execution requires diffusion_spline_enabled=True"
+                "Trajectory-space Diffusion execution requires diffusion_spline_enabled=True"
             )
+        if not (shadow_enabled or trajectory_execution_enabled or jtp_enabled
+                or jtp_control_execution_enabled):
+            return
 
-        from highway_env.planner.diffusion.inference.runtime import (
-            DiffusionPlannerRuntime,
-        )
+        from highway_env.planner.diffusion.inference.runtime import DiffusionPlannerRuntime
 
-        runtime = getattr(
-            self.env,
-            "diffusion_planner_runtime",
-            None,
-        )
-
+        runtime = getattr(self.env, "diffusion_planner_runtime", None)
         if runtime is None:
-            runtime = DiffusionPlannerRuntime(
-                diffusion_config
-            )
+            runtime = DiffusionPlannerRuntime(diffusion_config)
             self.env.diffusion_planner_runtime = runtime
 
-        output = runtime.infer(features)
-        self.env.latest_diffusion_output = output
-        self._publish_diffusion_runtime_trajectories(
-            output,
-            diffusion_config,
+        jtp_inputs = None
+        control_delegate = getattr(runtime, "_control_delegate", None)
+        is_k2_control_runtime = (
+            control_delegate is not None
+            and getattr(control_delegate.model.vehicle_model, "kind", None) == "koopman_k2"
         )
+        if jtp_enabled or is_k2_control_runtime:
+            from highway_env.planner.diffusion.config.experiment import resolve_repo_file
+            from highway_env.planner.diffusion.inference.jtp_context import (
+                LiveK2ContextBuilder,
+                load_jtp_runtime_config,
+            )
+
+            runtime_context_path = resolve_repo_file(
+                diffusion_config.get(
+                    "jtp_runtime_config", "configs/projection/jtp_runtime.yaml"))
+            builder = getattr(self.env, "jtp_live_context_builder", None)
+            if (builder is None or
+                    getattr(builder, "config_path", None) != str(runtime_context_path)):
+                builder = LiveK2ContextBuilder(load_jtp_runtime_config(runtime_context_path))
+                builder.config_path = str(runtime_context_path)
+                self.env.jtp_live_context_builder = builder
+
+            feature_builder = getattr(self.env, "planner_feature_builder", None)
+            live = builder.build(
+                self.env,
+                feature_builder,
+                target_lane_indices,
+                include_projection_inputs=jtp_enabled,
+            )
+            self.env.latest_diffusion_jtp_context_status = live.get("status", "unknown")
+            if not live.get("ready", False):
+                # Five synchronized 10-Hz states and four applied controls are
+                # required by K2. Do not invoke the K2 model with fabricated
+                # history during the initial warm-up or after a timing gap.
+                self.env.latest_diffusion_output = None
+                self.env.latest_diffusion_jtp_diagnostics = {
+                    "status": live.get("status"),
+                    "history_state_counts": live.get("history_state_counts"),
+                    "history_control_counts": live.get("history_control_counts"),
+                }
+                for vehicle in self.env.controlled_vehicles:
+                    vehicle.latest_diffusion_jtp_success = False
+                    vehicle.latest_diffusion_jtp_status = live.get("status", "history_warmup")
+                    vehicle.latest_diffusion_control_sequence = None
+                return
+            features.update(live["context"])
+            if jtp_enabled:
+                jtp_inputs = live
+
+        output = runtime.infer(features, jtp_inputs=jtp_inputs)
+        self.env.latest_diffusion_output = output
+        self.env.latest_diffusion_jtp_diagnostics = output.get("jtp_diagnostics", {})
+        self._publish_diffusion_runtime_trajectories(output, diffusion_config)
 
     def _publish_diffusion_runtime_trajectories(
         self,
@@ -653,6 +702,31 @@ class MultiAgentAction(ActionType):
         self.env.latest_diffusion_sparse_trajectory = selected_sparse.copy()
 
         vehicles = list(self.env.controlled_vehicles)
+        controls_raw = output.get("control")
+        controls_nominal_raw = output.get("control_nominal")
+        jtp_success = bool(np.asarray(output.get("jtp_success", False)).reshape(-1)[0])
+        jtp_status = str(output.get("jtp_status", "disabled"))
+        if controls_raw is not None:
+            controls = np.asarray(controls_raw, dtype=np.float32)
+            if controls.ndim != 3 or controls.shape[0] != len(vehicles) or controls.shape[-1] != 2:
+                raise RuntimeError(
+                    f"Invalid Diffusion control output shape {controls.shape}; "
+                    f"expected [N,H,2] with N={len(vehicles)}"
+                )
+            controls_nominal = (None if controls_nominal_raw is None else
+                                np.asarray(controls_nominal_raw, dtype=np.float32))
+            for ego_idx, vehicle in enumerate(vehicles):
+                vehicle.latest_diffusion_control_sequence = controls[ego_idx].copy()
+                vehicle.latest_diffusion_control_nominal = (
+                    None if controls_nominal is None else controls_nominal[ego_idx].copy())
+                vehicle.latest_diffusion_jtp_success = jtp_success
+                vehicle.latest_diffusion_jtp_status = jtp_status
+        else:
+            for vehicle in vehicles:
+                vehicle.latest_diffusion_control_sequence = None
+                vehicle.latest_diffusion_control_nominal = None
+                vehicle.latest_diffusion_jtp_success = False
+                vehicle.latest_diffusion_jtp_status = jtp_status
         if selected_sparse.shape[0] != len(vehicles):
             raise RuntimeError(
                 "Diffusion batch/controlled-vehicle mismatch: "
@@ -677,10 +751,13 @@ class MultiAgentAction(ActionType):
         )
 
         dense_local = np.asarray(dense_local_raw, dtype=np.float32)
-        dense_velocity_local = np.asarray(
-            output["trajectory_dense_velocity"],
-            dtype=np.float32,
-        )
+        dense_velocity_raw = output.get("trajectory_dense_velocity")
+        if dense_velocity_raw is None:
+            origin = np.zeros_like(dense_local[:, :1])
+            dense_velocity_raw = np.diff(
+                np.concatenate((origin, dense_local), axis=1), axis=1
+            ) / 0.1
+        dense_velocity_local = np.asarray(dense_velocity_raw, dtype=np.float32)
         dense_time = np.asarray(
             output["trajectory_dense_time_s"],
             dtype=np.float32,
@@ -769,10 +846,16 @@ class MultiAgentAction(ActionType):
 
         # STAGE_A_SPLINE_RUNTIME_V1
         # Never label an executing Diffusion path as Polynomial expert data.
-        if planner_flag.get("Diffusion", {}).get(
-            "diffusion_execution_enabled",
-            False,
-        ):
+        diffusion_runtime_config = dict(planner_flag.get("Diffusion", {}) or {})
+        config_yaml = diffusion_runtime_config.get("config_yaml")
+        if config_yaml is not None:
+            from highway_env.planner.diffusion.config.experiment import load_mode_yaml, runtime_settings
+            effective = runtime_settings(load_mode_yaml(config_yaml))
+            effective.update({key: value for key, value in diffusion_runtime_config.items()
+                              if key != "config_yaml"})
+            diffusion_runtime_config = effective
+        if (diffusion_runtime_config.get("diffusion_execution_enabled", False)
+                or diffusion_runtime_config.get("jtp_control_execution_enabled", False)):
             return None
 
         if planner_flag.get("type") != "Polynomial":
@@ -1002,6 +1085,7 @@ class MultiAgentAction(ActionType):
         self._run_diffusion_shadow(
             features,
             planner_flag,
+            target_lane_indices=vehicle_actions["lane index"],
         )
 
         env_state = (

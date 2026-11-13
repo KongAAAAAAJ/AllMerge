@@ -1709,8 +1709,32 @@ class FOLLOWVehicle(ControlledVehicle):
         if planner is not None and planner["state"] is True:
             diffusion_config = planner.get("Diffusion", {})
 
+            # TRACE_JTP_CONTROL_EXECUTION_V1: execute the first verified
+            # projected control pair. A failed/warming-up projection falls
+            # through to the existing Polynomial controller below.
+            jtp_control_enabled = bool(
+                diffusion_config.get("jtp_control_execution_enabled", False)
+            )
+            jtp_controls = getattr(self, "latest_diffusion_control_sequence", None)
+            jtp_success = bool(getattr(self, "latest_diffusion_jtp_success", False))
+            if jtp_control_enabled and jtp_success and jtp_controls is not None:
+                jtp_controls = np.asarray(jtp_controls, dtype=np.float32)
+                if jtp_controls.ndim != 2 or jtp_controls.shape[0] < 1 or jtp_controls.shape[1] != 2:
+                    raise RuntimeError(
+                        f"Invalid projected JTP controls: {jtp_controls.shape}; expected [H>=1,2]"
+                    )
+                action = {
+                    "acceleration": float(jtp_controls[0, 0]),
+                    "steering": float(jtp_controls[0, 1]),
+                }
+                path = {
+                    "source": "Diffusion-Joint-Trajectory-Projection-Control",
+                    "jtp_status": getattr(self, "latest_diffusion_jtp_status", "unknown"),
+                }
+                self.latest_planner_trajectory = None
+
             # STAGE_A_SPLINE_RUNTIME_V1
-            if diffusion_config.get("diffusion_execution_enabled", False):
+            elif diffusion_config.get("diffusion_execution_enabled", False):
                 dense_world = getattr(
                     self,
                     "latest_diffusion_dense_trajectory_world",
