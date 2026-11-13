@@ -106,57 +106,76 @@ def build_joint_qp(
     A_eq = sparse.hstack((sparse.eye(n_tau, format="csc"), -j_tau_u), format="csc")
     blocks.append(A_eq); lower.append(np.zeros(n_tau)); upper.append(np.zeros(n_tau))
 
-    # Full-horizon stability inequalities.
+    profile = cfg.get("constraint_profile", {})
+    enabled = {
+        "stability": bool(profile.get("stability", True)),
+        "road_geometry": bool(profile.get("road_geometry", True)),
+        "collision": bool(profile.get("collision", True)),
+        "control_box": bool(profile.get("control_box", True)),
+        "control_rate": bool(profile.get("control_rate", True)),
+        "trust_region": bool(profile.get("trust_region", True)),
+    }
+
+    # Optional full-horizon chassis-stability inequalities.
     g_stab = np.concatenate([_as_np(g).reshape(-1) for g in g_stability])
-    if g_stab.size:
+    if enabled["stability"] and g_stab.size:
         A_stab = sparse.hstack((sparse.csc_matrix((g_stab.size, n_tau)), j_stab_u), format="csc")
         blocks.append(A_stab); lower.append(np.full(g_stab.size, -np.inf)); upper.append(-g_stab)
+    else:
+        g_stab = np.empty(0, dtype=np.float64)
 
-    # Road-boundary and curvature inequalities.
+    # Road-boundary inequalities. Curvature can be disabled in the staged
+    # lightweight profile by geometry_residual before reaching this builder.
     g_geo = np.concatenate([_as_np(g).reshape(-1) for g in g_geometry])
-    if g_geo.size:
+    if enabled["road_geometry"] and g_geo.size:
         A_geo = sparse.hstack((j_geo_tau, sparse.csc_matrix((g_geo.size, n_u))), format="csc")
         blocks.append(A_geo); lower.append(np.full(g_geo.size, -np.inf)); upper.append(-g_geo)
+    else:
+        g_geo = np.empty(0, dtype=np.float64)
 
     # Joint inter-truck and external-traffic collision inequalities.
     g_col = _as_np(g_collision).reshape(-1)
-    if g_col.size:
+    if enabled["collision"] and g_col.size:
         if j_col_tau.shape != (g_col.size, n_tau):
             raise ValueError(f"Collision Jacobian shape {j_col_tau.shape} != {(g_col.size, n_tau)}")
         A_col = sparse.hstack((j_col_tau, sparse.csc_matrix((g_col.size, n_u))), format="csc")
         blocks.append(A_col); lower.append(np.full(g_col.size, -np.inf)); upper.append(-g_col)
+    else:
+        g_col = np.empty(0, dtype=np.float64)
 
-    # Physical acceleration and steering bounds on the control nodes.
+    # Physical acceleration and steering magnitude bounds on control nodes.
     control_cfg = cfg["control"]
     lower_u = np.tile([float(control_cfg["acceleration_min_mps2"]),
                        float(control_cfg["steering_min_rad"])], n * k)
     upper_u = np.tile([float(control_cfg["acceleration_max_mps2"]),
                        float(control_cfg["steering_max_rad"])], n * k)
     A_box = sparse.hstack((sparse.csc_matrix((n_u, n_tau)), sparse.eye(n_u, format="csc")), format="csc")
-    blocks.append(A_box)
-    lower.append(lower_u - u.reshape(-1)); upper.append(upper_u - u.reshape(-1))
+    if enabled["control_box"]:
+        blocks.append(A_box)
+        lower.append(lower_u - u.reshape(-1)); upper.append(upper_u - u.reshape(-1))
 
-    # Rate constraints include the last measured/applied control at k=-1.
-    d_one = _rate_matrix(k)
-    d_all = _block_diag([d_one] * n)
-    rate_base = u.copy()
-    rate_base[:, 0, :] -= prev
-    if k > 1:
-        rate_base[:, 1:, :] = u[:, 1:, :] - u[:, :-1, :]
-    rate_limit = np.tile([float(control_cfg["acceleration_rate_max_mps3"]) *
-                          float(cfg["execution"]["dt_s"]),
-                          float(control_cfg["steering_rate_max_radps"]) *
-                          float(cfg["execution"]["dt_s"])], n * k)
-    A_rate = sparse.hstack((sparse.csc_matrix((n_u, n_tau)), d_all), format="csc")
-    blocks.append(A_rate)
-    lower.append(-rate_limit - rate_base.reshape(-1))
-    upper.append(rate_limit - rate_base.reshape(-1))
+    # Optional control-rate inequalities; disabled in the lightweight profile.
+    if enabled["control_rate"]:
+        d_one = _rate_matrix(k)
+        d_all = _block_diag([d_one] * n)
+        rate_base = u.copy()
+        rate_base[:, 0, :] -= prev
+        if k > 1:
+            rate_base[:, 1:, :] = u[:, 1:, :] - u[:, :-1, :]
+        rate_limit = np.tile([float(control_cfg["acceleration_rate_max_mps3"]) *
+                              float(cfg["execution"]["dt_s"]),
+                              float(control_cfg["steering_rate_max_radps"]) *
+                              float(cfg["execution"]["dt_s"])], n * k)
+        A_rate = sparse.hstack((sparse.csc_matrix((n_u, n_tau)), d_all), format="csc")
+        blocks.append(A_rate)
+        lower.append(-rate_limit - rate_base.reshape(-1))
+        upper.append(rate_limit - rate_base.reshape(-1))
 
-    # Infinity-norm trust region in normalized physical-control coordinates.
-    trust_scale = np.tile(np.asarray(control_cfg["trust_scale"], dtype=np.float64), n * k)
-    trust = float(trust_radius) * trust_scale
-    A_trust = A_box
-    blocks.append(A_trust); lower.append(-trust); upper.append(trust)
+    # SCP trust region is an algorithmic safeguard, not a physical constraint.
+    if enabled["trust_region"]:
+        trust_scale = np.tile(np.asarray(control_cfg["trust_scale"], dtype=np.float64), n * k)
+        trust = float(trust_radius) * trust_scale
+        blocks.append(A_box); lower.append(-trust); upper.append(trust)
 
     A = sparse.vstack(blocks, format="csc")
     l = np.concatenate(lower)
@@ -173,9 +192,10 @@ def build_joint_qp(
             "stability_rows": int(g_stab.size),
             "geometry_rows": int(g_geo.size),
             "collision_rows": int(g_col.size),
-            "control_box_rows": n_u,
-            "control_rate_rows": n_u,
-            "trust_region_rows": n_u,
+            "control_box_rows": n_u if enabled["control_box"] else 0,
+            "control_rate_rows": n_u if enabled["control_rate"] else 0,
+            "trust_region_rows": n_u if enabled["trust_region"] else 0,
+            "active_constraints": [key for key, value in enabled.items() if value],
             "total_constraint_rows": int(A.shape[0]),
         },
     )

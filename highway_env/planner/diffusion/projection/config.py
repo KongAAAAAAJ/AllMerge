@@ -82,6 +82,11 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("geometry.footprint requires circle_offsets_m and positive circle_radius_m")
 
     collision = cfg["collision"]
+    if collision.get("qp_compact_footprints", False):
+        if not collision.get("qp_ego_circle_offsets_m") or float(collision.get("qp_ego_circle_radius_m", 0.0)) <= 0:
+            raise ValueError("Compact collision footprint requires ego offsets and positive radius")
+        if not collision.get("qp_external_circle_offsets_m") or float(collision.get("qp_external_circle_radius_m", 0.0)) <= 0:
+            raise ValueError("Compact collision footprint requires external offsets and positive radius")
     if float(collision.get("clearance_m", -1.0)) < 0:
         raise ValueError("collision.clearance_m must be nonnegative")
     external = collision.get("external_footprint", {})
@@ -126,6 +131,13 @@ def validate_jtp_config(cfg: dict) -> None:
     for key in ("road_residual_m", "curvature_residual_per_m2", "collision_residual_m2"):
         if float(merit_scales.get(key, 0.0)) <= 0:
             raise ValueError(f"optimization.merit_scales.{key} must be positive")
+
+    profile = cfg.get("constraint_profile", {})
+    for name in ("stability", "road_geometry", "collision", "control_box", "control_rate", "trust_region"):
+        if name in profile and not isinstance(profile[name], bool):
+            raise ValueError(f"constraint_profile.{name} must be boolean")
+    if profile.get("road_geometry", True) is False and profile.get("collision", True) is False and profile.get("control_box", True) is False:
+        raise ValueError("At least one safety/control constraint group must remain enabled")
 
     qp = cfg["qp"]
     if int(qp.get("max_iter", 0)) < 1 or float(qp.get("eps_abs", 0.0)) <= 0 or float(qp.get("eps_rel", 0.0)) <= 0:

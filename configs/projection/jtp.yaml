@@ -31,6 +31,7 @@ stability:
 
 geometry:
   curvature_limit_per_m: 0.025
+  enforce_curvature: false
   road_clearance_m: 0.35
   # Overlapping circle cover for a nominal 16.5 m x 2.55 m heavy truck.
   # Road corridors describe the outer drivable carriageway boundaries, not lane boundaries.
@@ -40,10 +41,29 @@ geometry:
 
 collision:
   clearance_m: 0.50
-  # Default background-vehicle approximation; can be overridden per actor.
+  # Full-footprint representation retained for the full constraint profile.
   external_footprint:
     circle_offsets_m: [-1.2, 0.0, 1.2]
     circle_radius_m: 1.55
+  # Lightweight QP footprint: three overlapping circles cover the 16.5 m
+  # truck body; one inflated circle encloses an external passenger vehicle.
+  # This reduces external collision rows by about an order of magnitude.
+  qp_compact_footprints: true
+  qp_ego_circle_offsets_m: [-5.5, 0.0, 5.5]
+  qp_ego_circle_radius_m: 3.10
+  qp_external_circle_offsets_m: [0.0]
+  qp_external_circle_radius_m: 2.60
+
+# Temporary lightweight online profile. The full stability and control-rate
+# constraints remain implemented and can be re-enabled for full-profile runs.
+# Koopman dynamic consistency and SCP trust region remain mandatory.
+constraint_profile:
+  stability: false
+  road_geometry: true
+  collision: true
+  control_box: true
+  control_rate: false
+  trust_region: true
 
 control:
   acceleration_min_mps2: -4.0

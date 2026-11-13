@@ -1,0 +1,39 @@
+{
+  "package_id": "trace_jtp_lightweight_profile",
+  "version": "1.0.0",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "installed_at": "2026-11-13T22:10:04",
+  "rolled_back": false,
+  "files": [
+    {
+      "path": "configs/projection/jtp.yaml",
+      "before_sha256": "3e441be4d4a56db60c66c9d0162de7fadf9244ae33f33c424306e0897b940f7b",
+      "after_sha256": "b3558d61fb8a1b760303d3760b9684f255eee84729455718c2f169e5eef4be6e"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/config.py",
+      "before_sha256": "7a4418d711ab8622a6ccf56227af3458543b99cc176e0a2de71cc1b2300054f6",
+      "after_sha256": "07adb1cd10421684b8166dec305f120b0bc68233e2af37340cd826158cdccac1"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/geometry.py",
+      "before_sha256": "4856480731a74bb790d8d29cd360c9bfe54118eb2aa520dd3bedbbf65203b56b",
+      "after_sha256": "190790a4865b83252fd29de49803516e0664ee9602916182d1ecc8343f742f84"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/qp_builder.py",
+      "before_sha256": "d80f6aedb63c0c1c9e3dd2bfc3585e403369abe24f26b61a9ebd968e270f4087",
+      "after_sha256": "cc6bb8e4c628d501cfaf755ae9744f26ce5f40db9a369cfd8cb4d9e84555fe37"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/scp_solver.py",
+      "before_sha256": "9d2fd97e00fff28993f9cf201dae48a353bf2f34ee897867a7c06325959daa03",
+      "after_sha256": "78290dd8b9a844e41785fb8fc94dbac2e5c8cb677201efae4eb0c8726dce7a78"
+    },
+    {
+      "path": "tests/test_joint_trajectory_projection.py",
+      "before_sha256": "0b9dd38527ff896c28315a9d23c02df94e484456e4e5922b291fd49201e8cf16",
+      "after_sha256": "352ae2b2e8ab6139e988de65d8df5c971184625e06dcf8216bbfaba693c0caaa"
+    }
+  ]
+}

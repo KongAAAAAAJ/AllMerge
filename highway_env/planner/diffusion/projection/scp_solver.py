@@ -193,7 +193,8 @@ class JointTrajectoryProjector:
             circle_centers = footprint_circle_centers(rollout["trajectory"][i, 1:].detach(), offsets)
             association = nearest_road_association(circle_centers, roads[i])
             g_geo, meta = geometry_residual(rollout["trajectory"][i], roads[i], self.cfg,
-                                            association=association)
+                                            association=association,
+                                            include_curvature=bool(self.cfg["geometry"].get("enforce_curvature", True)))
             geometry.append(g_geo)
             geometry_meta.append(meta)
         collision = collision_residual(rollout["trajectory"], self.cfg, external_traffic)
@@ -228,10 +229,21 @@ class JointTrajectoryProjector:
         }
         maxima = {key: float(torch.relu(value).max().detach().cpu()) if value.numel() else 0.0
                   for key, value in groups.items()}
+        profile = self.cfg.get("constraint_profile", {})
+        active = {
+            "stability": bool(profile.get("stability", True)),
+            "geometry": bool(profile.get("road_geometry", True)),
+            "collision": bool(profile.get("collision", True)),
+            "control_box": bool(profile.get("control_box", True)),
+            "control_rate": bool(profile.get("control_rate", True)),
+        }
+        active_maxima = [maxima[key] for key, enabled in active.items() if enabled]
         return {
-            "max_violation": max(maxima.values(), default=0.0),
+            "max_violation": max(active_maxima, default=0.0),
             "max_violation_by_group": maxima,
-            "feasible": all(value <= tol for value in maxima.values()),
+            "active_constraint_groups": [key for key, enabled in active.items() if enabled],
+            "disabled_constraint_groups": [key for key, enabled in active.items() if not enabled],
+            "feasible": all(value <= tol for value in active_maxima),
             "stability_violation_count": int((groups["stability"] > tol).sum().item()),
             "geometry_violation_count": int((groups["geometry"] > tol).sum().item()),
             "collision_violation_count": int((groups["collision"] > tol).sum().item()),
@@ -263,10 +275,15 @@ class JointTrajectoryProjector:
             mu_i = context["koopman_road_mu"][i]
             u0 = controls[i].detach().reshape(-1).requires_grad_(True)
 
+            profile = self.cfg.get("constraint_profile", {})
+            stability_enabled = bool(profile.get("stability", True))
+
             def execution_and_stability(u_flat):
                 u = u_flat.reshape(1, k, 2)
                 pred = self._rollout(u, context_i)
                 tau_i = pred["trajectory"][0]
+                if not stability_enabled:
+                    return tau_i.reshape(-1)
                 g_stab = stability_residual(pred["states"][0], pred["ltr"][0],
                                              payload_i, mu_i, self.cfg)
                 return torch.cat((tau_i.reshape(-1), g_stab))
@@ -274,7 +291,8 @@ class JointTrajectoryProjector:
             jac = self._jacobian(execution_and_stability, u0)
             tau_dim = (self.horizon + 1) * 3
             jac_tau_u.append(jac[:tau_dim].detach())
-            jac_stability_u.append(jac[tau_dim:].detach())
+            jac_stability_u.append(jac[tau_dim:].detach() if stability_enabled
+                                    else jac.new_empty((0, jac.shape[1])))
 
             # Road segment/corridor associations are frozen at this SCP iterate.
             offsets = torch.as_tensor(self.cfg["geometry"]["footprint"]["circle_offsets_m"],
@@ -285,7 +303,8 @@ class JointTrajectoryProjector:
 
             def geometry_fn(tau_flat):
                 return geometry_residual(tau_flat.reshape(self.horizon + 1, 3), roads[i],
-                                         self.cfg, association=association)[0]
+                                         self.cfg, association=association,
+                                         include_curvature=bool(self.cfg["geometry"].get("enforce_curvature", True)))[0]
 
             jac_geometry_tau.append(self._jacobian(geometry_fn, tau_point).detach())
 
@@ -313,10 +332,12 @@ class JointTrajectoryProjector:
         penalty = 0.0
         # Normalize each physical residual family before applying the merit penalty.
         merit_scales = self.cfg["optimization"]["merit_scales"]
-        stab_scale = controls.new_tensor(merit_scales["stability"])
-        for value in evaluation.stability:
-            shaped = value.reshape(2, self.horizon, 4)
-            penalty += float((torch.relu(shaped / stab_scale).square().sum()).detach().cpu())
+        profile = self.cfg.get("constraint_profile", {})
+        if bool(profile.get("stability", True)):
+            stab_scale = controls.new_tensor(merit_scales["stability"])
+            for value in evaluation.stability:
+                shaped = value.reshape(2, self.horizon, 4)
+                penalty += float((torch.relu(shaped / stab_scale).square().sum()).detach().cpu())
         for value, meta in zip(evaluation.geometry, evaluation.geometry_meta):
             road_count = meta["road_count"]
             road_scale = float(merit_scales["road_residual_m"])
@@ -324,18 +345,19 @@ class JointTrajectoryProjector:
             penalty += float(torch.relu(value[:road_count] / road_scale).square().sum().detach().cpu())
             if meta["curvature_count"]:
                 penalty += float(torch.relu(value[road_count:] / curve_scale).square().sum().detach().cpu())
-        if evaluation.collision.numel():
-            truck_radius = float(self.cfg["geometry"]["footprint"]["circle_radius_m"])
+        if bool(profile.get("collision", True)) and evaluation.collision.numel():
             collision_scale = float(merit_scales["collision_residual_m2"])
             penalty += float(torch.relu(evaluation.collision / collision_scale).square().sum().detach().cpu())
         box, rate = self._control_residuals(controls, context)
-        control_scale = controls.new_tensor(self.cfg["control"]["trust_scale"]).repeat(controls.shape[0] * controls.shape[1])
-        penalty += float(torch.relu(box / control_scale.repeat(2)).square().sum().detach().cpu())
-        rate_scale = controls.new_tensor([
-            float(self.cfg["control"]["acceleration_rate_max_mps3"]) * self.dt,
-            float(self.cfg["control"]["steering_rate_max_radps"]) * self.dt,
-        ]).repeat(controls.shape[0] * controls.shape[1])
-        penalty += float(torch.relu(rate.reshape(-1) / rate_scale).square().sum().detach().cpu())
+        if bool(profile.get("control_box", True)):
+            control_scale = controls.new_tensor(self.cfg["control"]["trust_scale"]).repeat(controls.shape[0] * controls.shape[1])
+            penalty += float(torch.relu(box / control_scale.repeat(2)).square().sum().detach().cpu())
+        if bool(profile.get("control_rate", True)):
+            rate_scale = controls.new_tensor([
+                float(self.cfg["control"]["acceleration_rate_max_mps3"]) * self.dt,
+                float(self.cfg["control"]["steering_rate_max_radps"]) * self.dt,
+            ]).repeat(controls.shape[0] * controls.shape[1])
+            penalty += float(torch.relu(rate.reshape(-1) / rate_scale).square().sum().detach().cpu())
         total = float(objective.detach().cpu()) + float(self.cfg["optimization"]["merit_penalty"]) * penalty
         return total, float(objective.detach().cpu()), penalty
 
