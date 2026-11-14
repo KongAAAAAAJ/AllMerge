@@ -141,7 +141,7 @@ def _paper_style(plt):
 
 
 PAPER_COLORS = {
-    'EDMDc': '#777777',
+    'EDMDc': '#A3C7C5',
     'Parametric EDMDc': '#E07A3F',
     'K0': '#4C9FD6',
     'K1-P': '#55A868',
@@ -188,7 +188,7 @@ def _boxplot_with_points(ax, arrays, labels, colors, *, positions=None,
             if not len(values):
                 continue
             jitter = rng.uniform(-widths * 0.31, widths * 0.31, size=len(values))
-            ax.scatter(x + jitter, values, s=10, color=color, alpha=0.48,
+            ax.scatter(x + jitter, values, s=4, color=color, alpha=0.3,
                        edgecolors='none', zorder=3)
     ax.set_xticks(positions)
     if show_xticklabels:
@@ -204,7 +204,7 @@ def plot_six_models(path, output, dt):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+    from mpl_toolkits.axes_grid1.inset_locator import mark_inset
 
     _paper_style(plt)
     fig, axs = plt.subplots(1, 2, figsize=(11.2, 4.0),
@@ -231,10 +231,15 @@ def plot_six_models(path, output, dt):
                   fontsize=6.8, color='#555555')
     ax_curve.tick_params(labelsize=8.5)
 
-    # Preserve the full-scale comparison while enlarging the four neural variants.
+    # Preserve the full-scale comparison while enlarging the four neural variants. 左侧箱线图
     zoom_kinds = ('K0', 'K1-P', 'K1-F', 'K2')
-    inset = inset_axes(ax_curve, width='48%', height='48%', loc='lower right',
-                       borderpad=1.15)
+    # Fractions of the parent axes: left/bottom margins and width/height. 
+    curve_inset_left = 0.06  # 距主图左边界
+    curve_inset_bottom = 0.25  # 距主图底边界
+    curve_inset_width = 0.50  # 宽度
+    curve_inset_height = 0.50  # 高度
+    inset = ax_curve.inset_axes([curve_inset_left, curve_inset_bottom,
+                                 curve_inset_width, curve_inset_height])
     for kind in zoom_kinds:
         mean, std = curve_stats[kind]
         t = np.arange(len(mean), dtype=np.float64) * dt
@@ -245,38 +250,52 @@ def plot_six_models(path, output, dt):
     all_zoom = np.concatenate([curve_stats[k][0] + curve_stats[k][1]
                                for k in zoom_kinds])
     upper = max(float(np.quantile(all_zoom, 0.99)) * 1.12, 0.5)
-    inset.set_xlim(float(time_s[0]), float(time_s[-1]))
-    inset.set_ylim(0.0, upper)
+    inset.set_xlim(float(3.0), float(4.0))  # 显示范围
+    inset.set_ylim(1.1, 2.6)
     inset.grid(alpha=0.2, linewidth=0.45)
     inset.tick_params(labelsize=6.5, direction='in')
-    inset.text(0.5, 0.97, 'Neural variants', transform=inset.transAxes,
-               ha='center', va='top', fontsize=6.5)
+    # inset.text(0.5, 0.97, 'Neural variants', transform=inset.transAxes,
+    #            ha='center', va='top', fontsize=6.5)
+    mark_inset(ax_curve, inset, loc1=2, loc2=4, fc='none',
+               ec='#666666', lw=0.75, alpha=0.85)
 
     arrays = [[ep['ADE (m)'] for ep in output[kind]['episodes']] for kind in MODELS]
     colors = [PAPER_COLORS[k] for k in MODELS]
     _boxplot_with_points(ax_box, arrays, MODELS, colors, widths=0.48, fontsize=8)
     ax_box.set_ylabel('Episode-level ADE (m)', fontsize=9)
+    ax_box.set_ylim(0, 25)  # 图(b)主图 y 轴范围
     ax_box.set_title('(b) Test episode distributions', fontsize=10, pad=8)
     ax_box.grid(axis='y', alpha=0.24, linewidth=0.6)
     ax_box.tick_params(axis='y', labelsize=8.5)
 
-    # A dedicated inset prevents the large Parametric-EDMDc tail from hiding
+    # A dedicated inset prevents the large Parametric-EDMDc tail from hiding 右侧箱线图
     # the small but meaningful distribution differences among K0/K1-P/K1-F/K2.
-    box_inset = inset_axes(ax_box, width='54%', height='52%', loc='upper right',
-                           borderpad=1.0)
+    # Anchor this inset using right/top margins, also in parent-axes fractions.
+    box_inset_right = 0.08
+    box_inset_top = 0.10
+    box_inset_width = 0.50
+    box_inset_height = 0.50
+    box_inset = ax_box.inset_axes([
+        1.0 - box_inset_right - box_inset_width,
+        1.0 - box_inset_top - box_inset_height,
+        box_inset_width, box_inset_height])
     neural_arrays = [arrays[MODELS.index(k)] for k in zoom_kinds]
     neural_colors = [PAPER_COLORS[k] for k in zoom_kinds]
+    neural_positions = np.asarray([MODELS.index(k) + 1 for k in zoom_kinds])
     _boxplot_with_points(box_inset, neural_arrays, zoom_kinds, neural_colors,
-                         positions=np.arange(1, 5), widths=0.48,
+                         positions=neural_positions, widths=0.48,
                          fontsize=6.3, scatter=True)
+    box_inset.set_xlim(neural_positions.min() - 0.5, neural_positions.max() + 0.5)
     finite = np.concatenate([np.asarray(x, dtype=float) for x in neural_arrays if len(x)])
     q_hi = float(np.quantile(finite, 0.985)) if len(finite) else 1.0
-    box_inset.set_ylim(0.0, max(q_hi * 1.18, 0.5))
+    box_inset.set_ylim(0.3, 1.9)  # 右侧箱线图
     box_inset.grid(axis='y', alpha=0.2, linewidth=0.4)
     box_inset.tick_params(axis='y', labelsize=6.2)
-    box_inset.text(0.5, 0.97, 'K0–K2 detail', transform=box_inset.transAxes,
-                   ha='center', va='top', fontsize=6.5)
+    # box_inset.text(0.5, 0.97, 'K0–K2 detail', transform=box_inset.transAxes,
+    #                ha='center', va='top', fontsize=6.5)
     box_inset.tick_params(axis='x', labelrotation=0)
+    mark_inset(ax_box, box_inset, loc1=2, loc2=4, fc='none',
+               ec='#666666', lw=0.75, alpha=0.85)
 
     fig.subplots_adjust(left=0.085, right=0.985, bottom=0.22, top=0.88, wspace=0.28)
     path = Path(path)
