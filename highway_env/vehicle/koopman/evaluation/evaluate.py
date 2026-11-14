@@ -375,11 +375,30 @@ def _add_k2_local_detail(ax, time_s, ground_truth, predictions, dt, window_s=0.8
     return True
 
 
+def _chassis_one_step_batch(ep, start, history_steps, count):
+    """Independent true-history windows, each with exactly one future control."""
+    origins = range(start, start + count)
+    return {
+        'state_hist': torch.from_numpy(np.stack([
+            ep.states[k-history_steps+1:k+1] for k in origins]).copy()),
+        'control_hist': torch.from_numpy(np.stack([
+            ep.controls[k-history_steps+1:k] for k in origins]).copy()),
+        'future_controls': torch.from_numpy(np.stack([
+            ep.controls[k:k+1] for k in origins]).copy()),
+        'target_poses': torch.from_numpy(np.stack([
+            ep.poses[k:k+2] for k in origins]).copy()),
+        'conditions': torch.tensor([
+            [float(ep.info['payload_kg']), float(ep.info['road_mu'])]
+            for _ in origins], dtype=torch.float32),
+    }
+
+
 def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                             data_root=None, device='auto', seed=None, models=None):
-    """One 3x3 PDF: three reproducibly sampled held-out 4s windows x three responses.
+    """One 3x3 PDF of independent one-step predictions along held-out sequences.
 
-    Every model receives the SAME history and future controls for a given row.
+    At each origin, every model receives the same TRUE history and one control.
+    Predictions are never fed back; h+1 origins predict targets 1 through h+1.
     This plot is exploratory/diagnostic: sampled episodes need not have matching
     input sequences across rows, so it is not a controlled payload/mu comparison.
     """
@@ -387,12 +406,13 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     data = cfg['data']
     h = int(data.get('horizon_steps', 40))
     dt = float(data.get('dt_s', .1))
+    history_steps = int(data.get('history_steps', 5))
     splits, manifest = load_shared(cfg, project_root, data_root)
     selected = splits[split]
     if not selected:
         raise ValueError(f'No episodes in frozen {split} split for chassis comparison')
     ds = KoopmanWindowDataset(selected,
-        history_steps=int(data.get('history_steps', 5)), horizon_steps=h,
+        history_steps=history_steps, horizon_steps=h + 1,
         warmup_s=float(data.get('warmup_s', 1.0)),
         window_stride=1, dt=dt)
     if len(ds) < 3:
@@ -426,7 +446,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     headings = ('Yaw rate (rad/s)', 'Roll angle (deg)', 'LTR')
     for col, heading in enumerate(headings):
         axs[0, col].set_title(heading, fontsize=11, pad=9)
-    time_s = np.arange(h + 1, dtype=np.float64) * dt
+    time_s = np.arange(1, h + 2, dtype=np.float64) * dt
     styles = {
         'EDMDc': (PAPER_COLORS['EDMDc'], ':'),
         'Parametric EDMDc': (PAPER_COLORS['Parametric EDMDc'], '--'),
@@ -442,11 +462,11 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             row_predictions = {kind: [] for kind in models}
             ei, start = ds.keys[index]
             ep = ds.episodes[ei]
-            item = ds[index]
-            batch = {k: v.unsqueeze(0) for k, v in item.items()}
-            true_states = item['target_states'].numpy()
-            true_ltr = item['target_ltr'].numpy().astype(np.float64)
-            true_ltr[~item['ltr_valid'].numpy()] = np.nan
+            batch = _chassis_one_step_batch(ep, start, history_steps, h + 1)
+            # Align each one-step output with the next recorded state.
+            true_states = ep.states[start+1:start+h+2]
+            true_ltr = np.asarray(ep.ltr[start+1:start+h+2], dtype=np.float64).copy()
+            true_ltr[~np.isfinite(true_ltr)] = np.nan
             gt = (true_states[:, 2], np.rad2deg(true_states[:, 3]), true_ltr)
             for col, values in enumerate(gt):
                 row_ground_truth.append(np.asarray(values, dtype=float))
@@ -455,8 +475,8 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             for kind in models:
                 with torch.inference_mode():
                     prediction = _run_model(loaded_models[kind], kind, batch, device, dt)
-                states = prediction['states'][0].detach().cpu().numpy()
-                ltr = prediction['ltr'][0].detach().cpu().numpy()
+                states = prediction['states'][:, 1].detach().cpu().numpy()
+                ltr = prediction['ltr'][:, 1].detach().cpu().numpy()
                 if states.shape != (h + 1, 5) or ltr.shape != (h + 1,):
                     raise ValueError(f'{kind} prediction shape mismatch on {ep.id}')
                 if not (np.isfinite(states).all() and np.isfinite(ltr).all()):
@@ -496,12 +516,19 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                 axs[row, col].grid(alpha=.22, linewidth=.6)
                 axs[row, col].tick_params(labelsize=8)
                 if row == 2:
-                    axs[row, col].set_xlabel('Prediction horizon (s)', fontsize=9)
+                    axs[row, col].set_xlabel('Time from first input (s)', fontsize=9)
             best_col = int(np.argmax(local_gains))
             _add_k2_local_detail(axs[row, best_col], time_s, row_ground_truth[best_col],
                                  {k: row_predictions[k][best_col] for k in models}, dt)
             records.append({
                 'example': row + 1,
+                'prediction_mode': 'one_step_true_history',
+                'prediction_steps': 1,
+                'prediction_count': h + 1,
+                'first_target_index': int(start + 1),
+                'last_target_index': int(start + h + 1),
+                'first_target_time_s': float(ep.time_s[start + 1]),
+                'last_target_time_s': float(ep.time_s[start + h + 1]),
                 'episode_id': ep.id,
                 'episode_path': str(ep.path),
                 'start_index': int(start),
@@ -532,7 +559,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
         writer = csv.DictWriter(f, fieldnames=list(records[0]))
         writer.writeheader()
         writer.writerows(records)
-    print(f'[CHASSIS] 3 sampled {split} windows; {len(models)} models + TruckSim -> {pdf_path}', flush=True)
+    print(f'[CHASSIS] 3 sampled {split} windows; {len(models)} models + TruckSim; one-step predictions with true history -> {pdf_path}', flush=True)
     return pdf_path
 
 def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=None,offset_s=None):

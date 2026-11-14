@@ -21,3 +21,10 @@ requested order is used in tables and plots. Names containing spaces must be
 quoted, for example `--models EDMDc "Parametric EDMDc" K2`.
 Output filenames remain unchanged; rerunning for the same split replaces the
 existing comparison CSVs and PDFs.
+
+`koopman_chassis_responses.pdf` uses independent one-step predictions with
+recorded true history refreshed at every input time. With `horizon_steps: 40`,
+input origins 0 through 40 predict targets 1 through 41 (0.1 through 4.1 s
+relative to the first input when `dt_s: 0.1`). Each origin retains the configured
+`history_steps`; predicted states are never fed into the next origin's history.
+The metric tables and `koopman_prediction_errors.pdf` still use multistep rollouts.
