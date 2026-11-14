@@ -104,15 +104,210 @@ def _ridge_fit_stats(gram, rhs, count, ridge):
     return beta/scale[:,None]
 
 
-def fit_edmd(model, episodes):
-    """One-step EDMDc identification using all TRAIN episodes (no val/test)."""
+
+def _edmd_condition_grid(episodes):
+    return sorted({(float(ep.info['payload_kg']), float(ep.info['road_mu']))
+                   for ep in episodes})
+
+
+def _edmd_condition_radius(a0, ap, am, model, conditions):
+    mean = model.condition_mean.detach().cpu().numpy().astype(np.float64)
+    std = model.condition_std.detach().cpu().numpy().astype(np.float64)
+    radius = 0.0
+    for payload, friction in conditions:
+        raw_c = np.asarray([payload, friction], dtype=np.float64)
+        c = (np.clip(raw_c, model.condition_min.detach().cpu().numpy(),
+                     model.condition_max.detach().cpu().numpy()) - mean) / std
+        aa = a0 + c[0] * ap + c[1] * am
+        eig = np.linalg.eigvals(aa[1:, 1:])
+        if not np.isfinite(eig).all():
+            return float('inf')
+        radius = max(radius, float(np.max(np.abs(eig))))
+    return radius
+
+
+def _edmd_apply_factor(model, raw_a, raw_ap, raw_am, learned_rows, factor):
+    with torch.no_grad():
+        model.A.copy_(torch.as_tensor(raw_a, dtype=model.A.dtype, device=model.A.device))
+        model.A_payload.copy_(torch.as_tensor(raw_ap, dtype=model.A_payload.dtype, device=model.A_payload.device))
+        model.A_friction.copy_(torch.as_tensor(raw_am, dtype=model.A_friction.dtype, device=model.A_friction.device))
+        model.A[learned_rows, :] *= float(factor)
+        model.A_payload[learned_rows, :] *= float(factor)
+        model.A_friction[learned_rows, :] *= float(factor)
+
+
+
+def _edmd_validation_metrics(model, episodes, config):
+    """Evaluate candidate with the exact frozen-window protocol used by evaluate.py."""
+    import math
+    h = int(config.get('horizon_steps', 40))
+    history = int(model.history_steps)
+    dt = float(config.get('dt_s', 0.1))
+    warmup_s = float(config.get('warmup_s', 1.0))
+    stride = int(config.get('eval_stride', 5))
+    batch_size = max(1, int(config.get('batch_size', 256)))
+    if h < 1 or stride < 1 or dt <= 0:
+        raise ValueError('Invalid Parametric EDMDc validation configuration')
+    # Materialize the same episode-window starts as KoopmanWindowDataset.
+    arrays = {k: [] for k in ('sh','uh','fu','ip','ts','tp','tl','cond','ep_idx')}
+    ep_meta = []
+    for ei, ep in enumerate(episodes):
+        start = max(history - 1, int(math.ceil(warmup_s / dt - 1e-8)))
+        last = len(ep.states) - 1 - h
+        starts = list(range(start, last + 1, stride))
+        if not starts:
+            ep_meta.append((str(getattr(ep, 'id', ei)), float(ep.info['payload_kg']),
+                            float(ep.info['road_mu']), 0))
+            continue
+        arrays['sh'].append(np.stack([ep.states[k-history+1:k+1] for k in starts]).astype(np.float32))
+        arrays['uh'].append(np.stack([ep.controls[k-history+1:k] for k in starts]).astype(np.float32))
+        arrays['fu'].append(np.stack([ep.controls[k:k+h] for k in starts]).astype(np.float32))
+        arrays['ip'].append(np.stack([ep.poses[k] for k in starts]).astype(np.float32))
+        arrays['ts'].append(np.stack([ep.states[k:k+h+1] for k in starts]).astype(np.float32))
+        arrays['tp'].append(np.stack([ep.poses[k:k+h+1] for k in starts]).astype(np.float32))
+        arrays['tl'].append(np.stack([ep.ltr[k:k+h+1] for k in starts]).astype(np.float32))
+        arrays['cond'].append(np.repeat(np.asarray([[float(ep.info['payload_kg']),
+                                                      float(ep.info['road_mu'])]], dtype=np.float32),
+                                        len(starts), axis=0))
+        arrays['ep_idx'].append(np.full(len(starts), ei, dtype=np.int32))
+        ep_meta.append((str(getattr(ep, 'id', ei)), float(ep.info['payload_kg']),
+                        float(ep.info['road_mu']), len(starts)))
+    if not arrays['sh']:
+        return {'valid': False, 'reason': 'no valid validation windows'}
+    for key in arrays:
+        arrays[key] = np.concatenate(arrays[key], axis=0)
+    n_ep = len(episodes)
+    # Accumulate exact episode-level sufficient statistics, matching evaluate.py.
+    pe_sum = np.zeros((n_ep, h + 1), dtype=np.float64)
+    fde_sum = np.zeros(n_ep, dtype=np.float64)
+    yaw_sum = np.zeros(n_ep, dtype=np.float64)
+    roll_sum = np.zeros(n_ep, dtype=np.float64)
+    ltr_sum = np.zeros(n_ep, dtype=np.float64)
+    ltr_count = np.zeros(n_ep, dtype=np.int64)
+    window_count = np.zeros(n_ep, dtype=np.int64)
+    device = model.A.device
+    model.eval()
+    with torch.inference_mode():
+        for offset in range(0, len(arrays['sh']), batch_size):
+            sl = slice(offset, offset + batch_size)
+            ep_ids = arrays['ep_idx'][sl]
+            def tensor(key):
+                return torch.from_numpy(arrays[key][sl]).to(device)
+            pred = model.predict_all(
+                tensor('sh'), tensor('uh'), tensor('fu'),
+                initial_pose=tensor('ip'), dt=dt, conditions=tensor('cond'))
+            ps = pred['states'].detach().cpu().numpy()
+            pp = pred['pose'].detach().cpu().numpy()
+            pl = pred['ltr'].detach().cpu().numpy()
+            ts = arrays['ts'][sl]
+            tp = arrays['tp'][sl]
+            tl = arrays['tl'][sl]
+            if not (np.isfinite(ps).all() and np.isfinite(pp).all() and np.isfinite(pl).all()):
+                return {'valid': False, 'reason': 'nonfinite validation rollout'}
+            pos = np.linalg.norm(pp[..., :2] - tp[..., :2], axis=-1)
+            yaw_sq = np.square(ps[:, 1:, 2] - ts[:, 1:, 2]).sum(axis=1)
+            roll_sq = np.square(np.rad2deg(ps[:, 1:, 3] - ts[:, 1:, 3])).sum(axis=1)
+            ltr_mask = np.isfinite(tl[:, 1:]) & np.isfinite(pl[:, 1:])
+            ltr_sq = np.square(pl[:, 1:] - tl[:, 1:])
+            np.add.at(pe_sum, ep_ids, pos)
+            np.add.at(fde_sum, ep_ids, pos[:, -1])
+            np.add.at(yaw_sum, ep_ids, yaw_sq)
+            np.add.at(roll_sum, ep_ids, roll_sq)
+            np.add.at(ltr_sum, ep_ids, np.where(ltr_mask, ltr_sq, 0.0).sum(axis=1))
+            np.add.at(ltr_count, ep_ids, ltr_mask.sum(axis=1))
+            window_count += np.bincount(ep_ids, minlength=n_ep)
+    rows = []
+    for ei, (ep_id, payload, friction, _) in enumerate(ep_meta):
+        nw = int(window_count[ei])
+        if nw == 0 or ltr_count[ei] == 0:
+            continue
+        curve = pe_sum[ei] / nw
+        rows.append({
+            'episode_id': ep_id, 'windows': nw,
+            'ADE (m)': float(curve[1:].mean()),
+            'FDE (m)': float(fde_sum[ei] / nw),
+            'Yaw Rate RMSE (rad/s)': float(np.sqrt(yaw_sum[ei] / (nw * h))),
+            'Roll RMSE (deg)': float(np.sqrt(roll_sum[ei] / (nw * h))),
+            'LTR RMSE': float(np.sqrt(ltr_sum[ei] / ltr_count[ei])),
+            'curve': curve.tolist(), 'payload_kg': payload, 'road_mu': friction,
+        })
+    if not rows:
+        return {'valid': False, 'reason': 'no valid validation episodes'}
+    keys = ('ADE (m)', 'FDE (m)', 'Yaw Rate RMSE (rad/s)', 'Roll RMSE (deg)', 'LTR RMSE')
+    summary = {key: float(np.mean([r[key] for r in rows])) for key in keys}
+    fdes = np.asarray([r['FDE (m)'] for r in rows], dtype=np.float64)
+    group_fde = {}
+    for row in rows:
+        key = (row['payload_kg'], row['road_mu'])
+        group_fde.setdefault(key, []).append(row['FDE (m)'])
+    group_means = {f'{k[0]:g}|{k[1]:g}': float(np.mean(v)) for k, v in group_fde.items()}
+    summary['P95 FDE (m)'] = float(np.quantile(fdes, 0.95))
+    summary['Max condition mean FDE (m)'] = float(max(group_means.values()))
+    return {'valid': True, 'summary': summary, 'episodes': rows,
+            'condition_fde': group_means}
+
+
+def _edmd_objective(metrics, scales):
+    weights = {
+        'ADE (m)': 0.30,
+        'FDE (m)': 0.25,
+        'P95 FDE (m)': 0.15,
+        'Max condition mean FDE (m)': 0.10,
+        'LTR RMSE': 0.10,
+        'Yaw Rate RMSE (rad/s)': 0.05,
+        'Roll RMSE (deg)': 0.05,
+    }
+    return float(sum(w * metrics[k] / max(scales[k], 1e-8) for k, w in weights.items()))
+
+
+def _edmd_fit_rollout_ltr_decoder(model, episodes, ridge):
+    """Fit LTR decoder on model-generated latent rollouts using TRAIN episodes only."""
+    gram = rhs = None
+    count = 0
+    h = model.history_steps
+    device = model.A.device
+    with torch.inference_mode():
+        for ep in episodes:
+            if len(ep.states) <= h or not np.isfinite(ep.ltr[h-1:]).any():
+                continue
+            sh = torch.from_numpy(ep.states[:h].astype(np.float32)).unsqueeze(0).to(device)
+            uh = torch.from_numpy(ep.controls[:h-1].astype(np.float32)).unsqueeze(0).to(device)
+            cond = torch.tensor([[float(ep.info['payload_kg']), float(ep.info['road_mu'])]],
+                                dtype=torch.float32, device=device)
+            z = model.lift(sh, uh)
+            aa, bb = model.matrices(cond)
+            c = ((cond[:, 0].clamp(min=model.condition_min[0], max=model.condition_max[0])
+                  - model.condition_mean[0]) / model.condition_std[0]).item()
+            for k in range(h-1, len(ep.states)):
+                label = float(ep.ltr[k])
+                if np.isfinite(label):
+                    zv = z[0].detach().cpu().numpy().astype(np.float64)
+                    feat = np.concatenate((zv, zv * c)) if model.variant == 'Parametric EDMDc' else zv
+                    if gram is None:
+                        gram = np.zeros((len(feat), len(feat)), dtype=np.float64)
+                        rhs = np.zeros((len(feat), 1), dtype=np.float64)
+                    gram += np.outer(feat, feat)
+                    rhs[:, 0] += feat * label
+                    count += 1
+                if k < len(ep.states) - 1:
+                    u = (torch.from_numpy(ep.controls[k].astype(np.float32)).to(device)
+                         - model.control_mean) / model.control_std
+                    z = torch.bmm(aa, z.unsqueeze(-1)).squeeze(-1) + torch.bmm(
+                        bb, u.reshape(1, 2, 1)).squeeze(-1)
+    if count == 0:
+        raise ValueError('No valid rollout-aligned LTR training labels')
+    beta = _ridge_fit_stats(gram, rhs, count, ridge).reshape(-1)
+    return beta[:model.latent_dim], (beta[model.latent_dim:] if model.variant == 'Parametric EDMDc'
+                                     else np.zeros(model.latent_dim, dtype=np.float64))
+
+def fit_edmd(model, episodes, validation_episodes=None, validation_config=None):
+    """Fit EDMDc; Parametric EDMDc uses validation-selected shift-preserving stabilization."""
     gram=rhs=ltr_gram=ltr_rhs=None
     transitions=labels=0
     history=model.history_steps
     with torch.no_grad():
         for ep in episodes:
             if len(ep.states)<=history:continue
-            # Work from full state/control recordings, NOT overlapping 40step windows.
             hist_s=np.stack([ep.states[k-history+1:k+1] for k in range(history-1,len(ep.states)-1)])
             hist_u=np.stack([ep.controls[k-history+1:k] for k in range(history-1,len(ep.states)-1)])
             next_s=np.stack([ep.states[k-history+2:k+2] for k in range(history-1,len(ep.states)-1)])
@@ -124,9 +319,7 @@ def fit_edmd(model, episodes):
             condition=np.asarray([float(ep.info['payload_kg']),float(ep.info['road_mu'])],dtype=np.float64)
             c=(condition-model.condition_mean.numpy())/model.condition_std.numpy()
             base=np.concatenate((z,u),axis=1)
-            if model.variant=='Parametric EDMDc':
-                features=np.concatenate((base,base*c[0],base*c[1]),axis=1)
-            else:features=base
+            features=np.concatenate((base,base*c[0],base*c[1]),axis=1) if model.variant=='Parametric EDMDc' else base
             if gram is None:
                 gram=np.zeros((features.shape[1],features.shape[1]),np.float64)
                 rhs=np.zeros((features.shape[1],model.latent_dim),np.float64)
@@ -150,7 +343,6 @@ def fit_edmd(model, episodes):
     beta=_ridge_fit_stats(gram,rhs,transitions,model.ridge)
     d=model.latent_dim
     A=beta[:d].T.copy();B=beta[d:d+2].T.copy()
-    # Constant dictionary entry must stay invariant under every input/condition.
     A[0,:]=0.;A[0,0]=1.;B[0,:]=0.
     model.A.copy_(torch.as_tensor(A,dtype=torch.float32))
     model.B.copy_(torch.as_tensor(B,dtype=torch.float32))
@@ -161,180 +353,186 @@ def fit_edmd(model, episodes):
             aa[0,:]=0.;bb[0,:]=0.
             getattr(model,'A_'+field).copy_(torch.tensor(aa,dtype=torch.float32))
             getattr(model,'B_'+field).copy_(torch.tensor(bb,dtype=torch.float32))
-    # Preserve the deterministic delay-stack transitions and stabilize only
-    # the learned lifted-dynamics rows for Parametric EDMDc.
-    payload_values=sorted({float(ep.info['payload_kg']) for ep in episodes})
-    friction_values=sorted({float(ep.info['road_mu']) for ep in episodes})
 
+    # Preserve the original EDMDc baseline and its legacy stabilization behavior.
     if model.variant=='EDMDc':
-        # Keep the original EDMDc baseline exactly on its legacy path.
+        payload_values=sorted({float(ep.info['payload_kg']) for ep in episodes})
+        friction_values=sorted({float(ep.info['road_mu']) for ep in episodes})
         max_radius=0.0
         aa=model.A[1:,1:].numpy().astype(np.float64).copy()
         max_radius=float(max(abs(np.linalg.eigvals(aa))))
-        ridge_pre_shift_radius=max_radius
-        pre_stabilization_radius=max_radius
         multiplier=min(1.0,model.spectral_cap/max(max_radius,1e-12))
-        if multiplier<1.0:
-            model.A[1:,1:]*=multiplier
-        stabilization_policy='legacy_uniform_shrink'
-        stabilization_applied=multiplier<1.0
-        post_stabilization_radius=max_radius*multiplier
-        shift_structure_enforced=False
-    else:
-        # Snapshot the unconstrained Ridge matrices for diagnostics.
-        ridge_A0=model.A.numpy().astype(np.float64).copy()
-        ridge_Ap=model.A_payload.numpy().astype(np.float64).copy()
-        ridge_Am=model.A_friction.numpy().astype(np.float64).copy()
-        # z = [bias, state history, control history, quadratic(current state)].
-        # The delay-stack shifts are deterministic identities, not quantities
-        # that should be estimated by Ridge from highly correlated samples.
-        h=model.history_steps
-        d=model.latent_dim
-        state_start=1
-        control_start=1+5*h
-        poly_start=control_start+2*(h-1)
-        learned_rows=np.concatenate((
-            np.arange(state_start+(h-1)*5,state_start+h*5,dtype=np.int64),
-            np.arange(poly_start,d,dtype=np.int64),
-        ))
+        if multiplier<1.0:model.A[1:,1:]*=multiplier
+        ltr_beta=_ridge_fit_stats(ltr_gram,ltr_rhs,labels,model.ridge).reshape(-1)
+        model.ltr_C.copy_(torch.as_tensor(ltr_beta[:d],dtype=torch.float32))
+        return {'transitions':transitions,'ltr_labels':labels,'dictionary_dim':d,'ridge':model.ridge,
+                'pre_stabilization_radius':max_radius,'post_stabilization_radius':max_radius*multiplier,
+                'stabilization_factor':multiplier,'stabilization_policy':'legacy_uniform_shrink',
+                'shift_structure_enforced':False,'validation_selection':None}
 
-        with torch.no_grad():
-            # Constant dictionary entry.
-            model.A[0,:].zero_()
-            model.A[0,0]=1.0
-            model.B[0,:].zero_()
-            for key in ('A_payload','A_friction','B_payload','B_friction'):
-                getattr(model,key)[0,:].zero_()
+    # Enforce exact deterministic history shifts before considering stabilization.
+    h=model.history_steps
+    state_start=1
+    control_start=1+5*h
+    poly_start=control_start+2*(h-1)
+    learned_rows=np.concatenate((
+        np.arange(state_start+(h-1)*5,state_start+h*5,dtype=np.int64),
+        np.arange(poly_start,d,dtype=np.int64),
+    ))
+    with torch.no_grad():
+        model.A[0,:].zero_();model.A[0,0]=1.0;model.B[0,:].zero_()
+        for key in ('A_payload','A_friction','B_payload','B_friction'):
+            getattr(model,key)[0,:].zero_()
+        for t in range(h-1):
+            for j in range(5):
+                row=state_start+t*5+j;col=state_start+(t+1)*5+j
+                for key in ('A','A_payload','A_friction'):getattr(model,key)[row,:].zero_()
+                model.A[row,col]=1.0
+                for key in ('B','B_payload','B_friction'):getattr(model,key)[row,:].zero_()
+        for t in range(max(h-2,0)):
+            for j in range(2):
+                row=control_start+t*2+j;col=control_start+(t+1)*2+j
+                for key in ('A','A_payload','A_friction'):getattr(model,key)[row,:].zero_()
+                model.A[row,col]=1.0
+                for key in ('B','B_payload','B_friction'):getattr(model,key)[row,:].zero_()
+        if h>1:
+            for j in range(2):
+                row=control_start+(h-2)*2+j
+                for key in ('A','A_payload','A_friction'):getattr(model,key)[row,:].zero_()
+                for key in ('B','B_payload','B_friction'):getattr(model,key)[row,:].zero_()
+                model.B[row,j]=1.0
 
-            # State-history shift: x[t+1] in the next stack equals x[t+2]
-            # in the current stack for the first h-1 history slots.
-            for t in range(h-1):
-                for j in range(5):
-                    row=state_start+t*5+j
-                    col=state_start+(t+1)*5+j
-                    for key in ('A','A_payload','A_friction'):
-                        getattr(model,key)[row,:].zero_()
-                    model.A[row,col]=1.0
-                    for key in ('B','B_payload','B_friction'):
-                        getattr(model,key)[row,:].zero_()
+    raw_a=model.A.detach().cpu().numpy().astype(np.float64).copy()
+    raw_ap=model.A_payload.detach().cpu().numpy().astype(np.float64).copy()
+    raw_am=model.A_friction.detach().cpu().numpy().astype(np.float64).copy()
+    condition_grid=_edmd_condition_grid(list(episodes)+(list(validation_episodes) if validation_episodes else []))
+    ridge_pre_shift_radius=_edmd_condition_radius(
+        model.A.detach().cpu().numpy().astype(np.float64),
+        model.A_payload.detach().cpu().numpy().astype(np.float64),
+        model.A_friction.detach().cpu().numpy().astype(np.float64),model,condition_grid)
+    pre_stabilization_radius=_edmd_condition_radius(raw_a,raw_ap,raw_am,model,condition_grid)
 
-            # Control-history shift for the first h-2 slots.
-            for t in range(max(h-2,0)):
-                for j in range(2):
-                    row=control_start+t*2+j
-                    col=control_start+(t+1)*2+j
-                    for key in ('A','A_payload','A_friction'):
-                        getattr(model,key)[row,:].zero_()
-                    model.A[row,col]=1.0
-                    for key in ('B','B_payload','B_friction'):
-                        getattr(model,key)[row,:].zero_()
-
-            # The newest control-history slot is exactly the current input u_k.
-            if h>1:
-                for j in range(2):
-                    row=control_start+(h-2)*2+j
-                    for key in ('A','A_payload','A_friction'):
-                        getattr(model,key)[row,:].zero_()
-                    for key in ('B','B_payload','B_friction'):
-                        getattr(model,key)[row,:].zero_()
-                    model.B[row,j]=1.0
-
-        # Record the radius before imposing exact shift rows. This is useful
-        # for auditing the Ridge solution and comparing old checkpoints.
-        condition_mean=model.condition_mean.numpy().astype(np.float64)
-        condition_std=model.condition_std.numpy().astype(np.float64)
-        A0=model.A.numpy().astype(np.float64).copy()
-        Ap=model.A_payload.numpy().astype(np.float64).copy()
-        Am=model.A_friction.numpy().astype(np.float64).copy()
-
-        def _condition_radius(a0,ap,am):
-            radius=0.0
-            for payload in payload_values:
-                for friction in friction_values:
-                    c=(np.asarray([payload,friction],dtype=np.float64)-condition_mean)/condition_std
-                    aa=a0+c[0]*ap+c[1]*am
-                    eig=np.linalg.eigvals(aa[1:,1:])
-                    radius=max(radius,float(np.max(np.abs(eig))))
-            return radius
-
-        ridge_pre_shift_radius=_condition_radius(ridge_A0,ridge_Ap,ridge_Am)
-        pre_stabilization_radius=_condition_radius(A0,Ap,Am)
-
-        def _radius_for_factor(factor):
-            a0=A0.copy()
-            ap=Ap.copy()
-            am=Am.copy()
-            a0[learned_rows,:]*=factor
-            ap[learned_rows,:]*=factor
-            am[learned_rows,:]*=factor
-            return _condition_radius(a0,ap,am)
-
-        if pre_stabilization_radius<=model.spectral_cap:
-            multiplier=1.0
-        else:
-            # Find the largest shared factor that satisfies the spectral cap
-            # over the complete observed payload x friction condition grid.
-            # A coarse scan avoids assuming global monotonicity of rho(A(alpha));
-            # bisection then refines the upper edge of the largest feasible cell.
-            alpha_grid=np.linspace(0.0,1.0,65)
-            radii=[_radius_for_factor(float(a)) for a in alpha_grid]
-            feasible=[i for i,r in enumerate(radii) if r<=model.spectral_cap]
-            if not feasible:
-                raise RuntimeError(
-                    'Parametric EDMDc shift-preserving stabilization could not '
-                    'find a feasible learned-dynamics factor.'
-                )
-            i=max(feasible)
-            if i==len(alpha_grid)-1:
-                multiplier=1.0
-            else:
-                lo=float(alpha_grid[i])
-                hi=float(alpha_grid[i+1])
-                for _ in range(28):
-                    mid=0.5*(lo+hi)
-                    if _radius_for_factor(mid)<=model.spectral_cap:
-                        lo=mid
-                    else:
-                        hi=mid
-                multiplier=lo
-
-        with torch.no_grad():
-            model.A[learned_rows,:]=model.A[learned_rows,:]*multiplier
-            model.A_payload[learned_rows,:]=model.A_payload[learned_rows,:]*multiplier
-            model.A_friction[learned_rows,:]=model.A_friction[learned_rows,:]*multiplier
-
-        post_stabilization_radius=_condition_radius(
-            model.A.numpy().astype(np.float64).copy(),
-            model.A_payload.numpy().astype(np.float64).copy(),
-            model.A_friction.numpy().astype(np.float64).copy(),
-        )
-        stabilization_policy='shift_preserving_learned_rows'
-        stabilization_applied=multiplier<0.999999
-        shift_structure_enforced=True
-        if post_stabilization_radius>model.spectral_cap+1e-6:
-            raise RuntimeError(
-                'Parametric EDMDc stabilization failed to meet spectral cap: '
-                f'{post_stabilization_radius:.8f} > {model.spectral_cap:.8f}'
-            )
-        if stabilization_applied:
-            warnings.warn(
-                'Parametric EDMDc applied shift-preserving stabilization to '
-                f'learned dynamics rows only (factor={multiplier:.6f}, '
-                f'radius={pre_stabilization_radius:.6f}->{post_stabilization_radius:.6f}).',
-                RuntimeWarning,
-            )
-        max_radius=pre_stabilization_radius
-
+    # Fit the original teacher-forced LTR decoder first. It is retained as an
+    # explicit comparator against the rollout-aligned decoder below.
     ltr_beta=_ridge_fit_stats(ltr_gram,ltr_rhs,labels,model.ridge).reshape(-1)
-    model.ltr_C.copy_(torch.as_tensor(ltr_beta[:d],dtype=torch.float32))
-    if model.variant=='Parametric EDMDc':
-        model.ltr_C_payload.copy_(torch.as_tensor(ltr_beta[d:],dtype=torch.float32))
-    return {'transitions':transitions, 'ltr_labels':labels,
-            'dictionary_dim':d,'ridge':model.ridge,
-            'ridge_pre_shift_radius':float(ridge_pre_shift_radius),
-            'pre_stabilization_radius':float(pre_stabilization_radius),
-            'post_stabilization_radius':float(post_stabilization_radius),
-            'stabilization_factor':float(multiplier),
-            'stabilization_applied':bool(stabilization_applied),
-            'stabilization_policy':stabilization_policy,
-            'shift_structure_enforced':bool(shift_structure_enforced)}
+    teacher_ltr_c=ltr_beta[:d].copy()
+    teacher_ltr_cp=(ltr_beta[d:].copy() if model.variant=='Parametric EDMDc'
+                    else np.zeros(d,dtype=np.float64))
+
+    def radius_at(alpha):
+        aa=raw_a.copy();ap=raw_ap.copy();am=raw_am.copy()
+        aa[learned_rows,:]*=float(alpha)
+        ap[learned_rows,:]*=float(alpha)
+        am[learned_rows,:]*=float(alpha)
+        return _edmd_condition_radius(aa,ap,am,model,condition_grid)
+
+    # Coarse scan then refine the largest feasible alpha. The scan does not
+    # assume monotonicity of spectral radius with respect to alpha.
+    alpha_scan=np.linspace(0.0,1.0,101)
+    radii=[radius_at(float(a)) for a in alpha_scan]
+    feasible=[i for i,r in enumerate(radii) if np.isfinite(r) and r<=model.spectral_cap]
+    if not feasible:
+        raise RuntimeError('No shift-preserving Parametric EDMDc factor satisfies spectral_cap.')
+    imax=max(feasible)
+    if imax==len(alpha_scan)-1:
+        max_feasible=1.0
+    else:
+        lo=float(alpha_scan[imax]);hi=float(alpha_scan[imax+1])
+        for _ in range(32):
+            mid=0.5*(lo+hi)
+            if radius_at(mid)<=model.spectral_cap:lo=mid
+            else:hi=mid
+        max_feasible=lo
+
+    # Validation-driven search over all feasible factors. Coarse candidates
+    # span [0,max_feasible]; a local refinement is added around the best one.
+    coarse=np.linspace(max(0.0,max_feasible*0.55),max_feasible,13)
+    candidates=set(float(x) for x in coarse)
+    validation_episodes=list(validation_episodes or [])
+    validation_config=dict(validation_config or {})
+    candidate_records=[]
+    if validation_episodes:
+        for alpha in sorted(candidates):
+            _edmd_apply_factor(model,raw_a,raw_ap,raw_am,learned_rows,alpha)
+            radius=radius_at(alpha)
+            if radius>model.spectral_cap+1e-6:continue
+            result=_edmd_validation_metrics(model,validation_episodes,validation_config)
+            if result.get('valid'):
+                candidate_records.append({'alpha':alpha,'radius':radius,'metrics':result['summary']})
+        if not candidate_records:
+            raise RuntimeError('All validation-scored Parametric EDMDc candidates were invalid.')
+        metric_keys=('ADE (m)','FDE (m)','P95 FDE (m)','Max condition mean FDE (m)',
+                     'LTR RMSE','Yaw Rate RMSE (rad/s)','Roll RMSE (deg)')
+        scales={k:min(r['metrics'][k] for r in candidate_records) for k in metric_keys}
+        scored=[(_edmd_objective(r['metrics'],scales),r['alpha']) for r in candidate_records]
+        best_score,best_alpha=min(scored,key=lambda x:(x[0],-x[1]))
+        step=max_feasible/12.0
+        refine=np.linspace(max(0.0,best_alpha-step),min(max_feasible,best_alpha+step),11)
+        known={round(r['alpha'],10) for r in candidate_records}
+        for alpha in refine:
+            alpha=float(alpha)
+            if round(alpha,10) in known:continue
+            radius=radius_at(alpha)
+            if radius>model.spectral_cap+1e-6:continue
+            _edmd_apply_factor(model,raw_a,raw_ap,raw_am,learned_rows,alpha)
+            result=_edmd_validation_metrics(model,validation_episodes,validation_config)
+            if result.get('valid'):
+                candidate_records.append({'alpha':alpha,'radius':radius,'metrics':result['summary']})
+        scales={k:min(r['metrics'][k] for r in candidate_records) for k in metric_keys}
+        scored=[(_edmd_objective(r['metrics'],scales),r['alpha']) for r in candidate_records]
+        best_score,best_alpha=min(scored,key=lambda x:(x[0],-x[1]))
+        for record in candidate_records:
+            record['objective']=_edmd_objective(record['metrics'],scales)
+        selection_enabled=True
+    else:
+        best_alpha=max_feasible
+        best_score=None
+        selection_enabled=False
+    _edmd_apply_factor(model,raw_a,raw_ap,raw_am,learned_rows,best_alpha)
+    post_stabilization_radius=radius_at(best_alpha)
+    if post_stabilization_radius>model.spectral_cap+1e-6:
+        raise RuntimeError('Selected Parametric EDMDc candidate violates spectral_cap.')
+
+    # Compare teacher-forced LTR decoding against a decoder fitted on model-
+    # generated TRAIN rollouts. The validation split selects the decoder only.
+    model.ltr_C.copy_(torch.as_tensor(teacher_ltr_c,dtype=torch.float32))
+    model.ltr_C_payload.copy_(torch.as_tensor(teacher_ltr_cp,dtype=torch.float32))
+    teacher_ltr_metrics=None
+    rollout_ltr_metrics=None
+    if validation_episodes:
+        teacher_eval=_edmd_validation_metrics(model,validation_episodes,validation_config)
+        teacher_ltr_metrics=(teacher_eval['summary']['LTR RMSE'] if teacher_eval.get('valid') else None)
+    rollout_c,rollout_cp=_edmd_fit_rollout_ltr_decoder(model,episodes,model.ridge)
+    model.ltr_C.copy_(torch.as_tensor(rollout_c,dtype=torch.float32))
+    model.ltr_C_payload.copy_(torch.as_tensor(rollout_cp,dtype=torch.float32))
+    if validation_episodes:
+        rollout_eval=_edmd_validation_metrics(model,validation_episodes,validation_config)
+        rollout_ltr_metrics=(rollout_eval['summary']['LTR RMSE'] if rollout_eval.get('valid') else None)
+        if (teacher_ltr_metrics is not None and
+                (rollout_ltr_metrics is None or rollout_ltr_metrics >= teacher_ltr_metrics)):
+            model.ltr_C.copy_(torch.as_tensor(teacher_ltr_c,dtype=torch.float32))
+            model.ltr_C_payload.copy_(torch.as_tensor(teacher_ltr_cp,dtype=torch.float32))
+            ltr_decoder_policy='teacher_forced_ridge'
+        else:
+            ltr_decoder_policy='rollout_aligned_ridge'
+    else:
+        ltr_decoder_policy='rollout_aligned_ridge'
+    return {
+        'transitions':transitions,'ltr_labels':labels,'dictionary_dim':d,'ridge':model.ridge,
+        'ridge_pre_shift_radius':float(ridge_pre_shift_radius),
+        'pre_stabilization_radius':float(pre_stabilization_radius),
+        'post_stabilization_radius':float(post_stabilization_radius),
+        'stabilization_factor':float(best_alpha),
+        'stabilization_applied':bool(best_alpha<0.999999),
+        'stabilization_policy':'validation_selected_shift_preserving_learned_rows',
+        'shift_structure_enforced':True,
+        'validation_selection':{
+            'enabled':bool(selection_enabled),
+            'objective':'0.30*ADE + 0.25*FDE + 0.15*P95FDE + 0.10*max_condition_mean_FDE + 0.10*LTR + 0.05*Yaw + 0.05*Roll; each metric normalized by the minimum among feasible candidates',
+            'best_objective':None if best_score is None else float(best_score),
+            'candidates':candidate_records,
+        },
+        'ltr_decoder_policy':ltr_decoder_policy,
+        'ltr_teacher_forced_val_rmse':teacher_ltr_metrics,
+        'ltr_rollout_aligned_val_rmse':rollout_ltr_metrics,
+    }

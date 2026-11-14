@@ -12,13 +12,21 @@ def train_edmd(kind,cfg,project_root,splits,manifest):
     model=PolynomialEDMDc(kind,history_steps=int(cfg['data'].get('history_steps',5)),
         normalization=manifest['normalization'],condition_normalization=manifest['condition_normalization'],
         ridge=float(mcfg.get('ridge',1e-3)))
-    stats=fit_edmd(model,splits['train'])
+    validation_config={
+        'dt_s':float(cfg['data'].get('dt_s',.1)),
+        'horizon_steps':int(cfg['data'].get('horizon_steps',40)),
+        'warmup_s':float(cfg['data'].get('warmup_s',1.0)),
+        'eval_stride':int(cfg['data'].get('eval_stride',5)),
+        'batch_size':int(cfg.get('edmd',{}).get('validation_batch_size',256)),
+    }
+    stats=fit_edmd(model,splits['train'],
+        validation_episodes=splits.get('val',[]),
+        validation_config=validation_config)
     out=resolve(project_root,Path(cfg['outputs']['checkpoints'])/kind.lower().replace(' ','_'))
     out.mkdir(parents=True,exist_ok=True)
 
-    # PARAMETRIC_EDMDC_VARIANT_BACKUP_V2
-    # Keep the previous Parametric EDMDc checkpoint before writing a new
-    # shift-preserving model. Preserve both historical variants separately.
+    # PARAMETRIC_EDMDC_CHECKPOINT_BACKUP_V22
+    # Preserve every prior Parametric EDMDc variant before replacing best.pt.
     if kind=='Parametric EDMDc':
         for source_name in ('best.pt','last.pt'):
             source=out/source_name
@@ -29,18 +37,17 @@ def train_edmd(kind,cfg,project_root,splits,manifest):
             except TypeError:
                 previous=torch.load(source,map_location='cpu')
             previous_stats=previous.get('stats',{}) if isinstance(previous,dict) else {}
-            previous_factor=float(previous_stats.get('stabilization_factor',1.0))
-            previous_policy=previous_stats.get('stabilization_policy','legacy_uniform_shrink')
-            previous_radius=float(previous_stats.get(
-                'pre_stabilization_radius',
-                previous_stats.get('ridge_pre_shift_radius',0.0)
-            ))
-            if previous_policy=='shift_preserving_learned_rows':
+            policy=previous_stats.get('stabilization_policy','legacy_uniform_shrink')
+            if policy=='validation_selected_shift_preserving_learned_rows':
                 continue
-            if (previous_policy=='preserve_identified_matrices'
-                    or (previous_factor>=0.999999 and previous_radius>1.02+1e-6)):
+            if policy=='shift_preserving_learned_rows':
+                tag='shift_preserving_v2_1'
+            elif policy=='preserve_identified_matrices' or (
+                    float(previous_stats.get('stabilization_factor',1.0))>=0.999999
+                    and float(previous_stats.get('pre_stabilization_radius',
+                        previous_stats.get('ridge_pre_shift_radius',0.0)))>1.02+1e-6):
                 tag='no_shrink'
-            elif previous_factor<0.999999:
+            elif float(previous_stats.get('stabilization_factor',1.0))<0.999999:
                 tag='uniform_shrink'
             else:
                 tag='previous'

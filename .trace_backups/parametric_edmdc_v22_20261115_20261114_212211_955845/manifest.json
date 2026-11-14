@@ -1,0 +1,13 @@
+{
+  "installer": "parametric_edmdc_v22_20261115",
+  "created_at": "2026-11-14T21:22:11",
+  "project_root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "backups": [
+    "highway_env\\vehicle\\koopman\\models\\edmd.py",
+    "highway_env\\vehicle\\koopman\\training\\edmd_train.py"
+  ],
+  "original_sha256": {
+    "highway_env\\vehicle\\koopman\\models\\edmd.py": "b108d45e975b93b628d03a6cf564b67feb5f894799733085125c020e16197d21",
+    "highway_env\\vehicle\\koopman\\training\\edmd_train.py": "6cb5ba6d5c632db56d7a0b092ece7a62bde664659b9fecbe32ca351d58038b38"
+  }
+}
