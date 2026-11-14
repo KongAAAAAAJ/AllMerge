@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import torch
 
-from .types import ExternalTraffic, RoadGeometry
+from .types import RoadGeometry
 
 
 def wrap_angle(angle: torch.Tensor) -> torch.Tensor:
@@ -21,7 +21,7 @@ def footprint_circle_centers(poses: torch.Tensor, offsets_m: torch.Tensor) -> to
 
 
 def nearest_road_association(points_xy: torch.Tensor, road: RoadGeometry) -> tuple[torch.Tensor, torch.Tensor]:
-    """Freeze nearest corridor/segment IDs for one SCP linearization."""
+    """Freeze nearest corridor/segment IDs for one local projection update."""
     center, _, _ = road.tensors(device=points_xy.device, dtype=points_xy.dtype)
     starts = center[:, :-1]
     delta = center[:, 1:] - starts
@@ -91,7 +91,6 @@ def geometry_residual(
     cfg: dict,
     *,
     association=None,
-    include_curvature: bool = True,
 ) -> tuple[torch.Tensor, dict]:
     geometry_cfg = cfg["geometry"]
     footprint = geometry_cfg["footprint"]
@@ -102,79 +101,10 @@ def geometry_residual(
         clearance_m=float(geometry_cfg["road_clearance_m"]),
         association=association,
     )
-    curvature_res = (curvature_residual(poses, float(geometry_cfg["curvature_limit_per_m"]))
-                     if include_curvature else poses.new_empty((0,)))
+    curvature_res = curvature_residual(poses, float(geometry_cfg["curvature_limit_per_m"]))
     return torch.cat((road_res, curvature_res)), {
         "road_count": int(road_res.numel()),
         "curvature_count": int(curvature_res.numel()),
     }
 
 
-def collision_residual(
-    trajectories: torch.Tensor,
-    cfg: dict,
-    external_traffic: ExternalTraffic | None = None,
-) -> torch.Tensor:
-    """Pairwise controlled-truck and controlled-to-background circle constraints."""
-    if trajectories.ndim != 3 or trajectories.shape[-1] != 3:
-        raise ValueError("trajectories must be [N,H+1,3]")
-    n, steps, _ = trajectories.shape
-    device, dtype = trajectories.device, trajectories.dtype
-    collision_cfg = cfg["collision"]
-    footprint = cfg["geometry"]["footprint"]
-    margin = float(collision_cfg["clearance_m"])
-    compact = collision_cfg.get("qp_compact_footprints", False)
-    if compact:
-        offsets = torch.as_tensor(collision_cfg["qp_ego_circle_offsets_m"], device=device, dtype=dtype)
-        radius = float(collision_cfg["qp_ego_circle_radius_m"])
-    else:
-        offsets = torch.as_tensor(footprint["circle_offsets_m"], device=device, dtype=dtype)
-        radius = float(footprint["circle_radius_m"])
-    controlled_centers = torch.stack([
-        footprint_circle_centers(trajectories[i, 1:], offsets) for i in range(n)
-    ])
-    values = []
-
-    for i in range(n):
-        for other in range(i + 1, n):
-            delta = controlled_centers[i][:, :, None, :] - controlled_centers[other][:, None, :, :]
-            threshold = 2.0 * radius + margin
-            values.append((threshold * threshold - delta.square().sum(-1)).reshape(-1))
-
-    if external_traffic is not None:
-        ext_poses, ext_offsets, ext_radius = external_traffic.tensors(
-            device=device, dtype=dtype, expected_steps=steps)
-        if ext_offsets is None:
-            ext_offsets = torch.as_tensor(collision_cfg["external_footprint"]["circle_offsets_m"],
-                                          device=device, dtype=dtype)
-        if ext_radius is None:
-            ext_radius = torch.as_tensor(collision_cfg["external_footprint"]["circle_radius_m"],
-                                         device=device, dtype=dtype)
-        if compact:
-            # Three overlapping truck circles cover the long vehicle body; one
-            # inflated circle encloses each external passenger vehicle. This
-            # reduces pairwise rows from C_ego*C_actor to 3 per actor and step.
-            actor_offsets = torch.as_tensor(collision_cfg["qp_external_circle_offsets_m"],
-                                            device=device, dtype=dtype)
-            actor_radius = float(collision_cfg["qp_external_circle_radius_m"])
-        for a in range(ext_poses.shape[0]):
-            if compact:
-                offsets_a = actor_offsets
-                radii_a = torch.full((actor_offsets.numel(),), actor_radius, device=device, dtype=dtype)
-            else:
-                offsets_a = ext_offsets if ext_offsets.ndim == 1 else ext_offsets[a]
-                radii_a = ext_radius
-                if radii_a.ndim == 0:
-                    radii_a = radii_a.expand(offsets_a.numel())
-                elif radii_a.ndim == 2:
-                    radii_a = radii_a[a]
-            if radii_a.numel() != offsets_a.numel():
-                raise ValueError("External circle_radius_m must be scalar or match circle_offsets_m")
-            ext_centers_a = footprint_circle_centers(ext_poses[a, 1:], offsets_a)
-            for i in range(n):
-                ego_centers = controlled_centers[i]
-                delta = ego_centers[:, :, None, :] - ext_centers_a[:, None, :, :]
-                thresholds = radius + radii_a[None, None, :] + margin
-                values.append((thresholds.square() - delta.square().sum(-1)).reshape(-1))
-
-    return torch.cat(values) if values else trajectories.new_empty((0,))

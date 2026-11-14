@@ -42,44 +42,11 @@ python -m highway_env.planner.diffusion.diagnostics.validation.smoke_test
 Training entry points remain in `scripts/training/`; the unified configuration
 is `configs/train/diffusion.yaml`.
 
-## TRACE control-space inference with Joint Trajectory Projection
 
-JTP is an optional inference-only post-process for the control-space planner.
-It does not modify the denoiser architecture, diffusion checkpoint, or training
-losses. Enable it in the environment's `Planner.Diffusion` configuration:
+## Joint Trajectory Projection (JTP)
 
-```yaml
-output_space: control
-jtp_enabled: true
-jtp_config: configs/projection/jtp.yaml
-jtp_runtime_config: configs/projection/jtp_runtime.yaml
-jtp_control_execution_enabled: false
-# A control checkpoint trained with execution.model=koopman_k2 is required.
-checkpoint: outputs/your_control_checkpoint/best.pt
-diffusion_spline_enabled: false
-diffusion_execution_enabled: false
-```
-
-The online environment collects five consecutive 10-Hz TruckSim states and
-four previously applied reference-control pairs. The first four planner calls
-are warm-up only; K2 inference and JTP begin once the synchronized history is
-available. A timing gap resets the history window instead of fabricating or
-misaligning samples.
-
-Set `runtime.context.payload_kg` and `runtime.context.road_mu` in
-`configs/projection/jtp_runtime.yaml`, or expose these physical values on each
-controlled vehicle. They are explicit operating conditions and are never
-inferred from the scene. The numerical constraint limits and QP/SCP parameters
-remain in `configs/projection/jtp.yaml`. The road corridor is built from the current and target
-road-network lane groups. Background traffic is predicted with the same
-constant-velocity assumption used by Adaptive Anchor evaluation.
-
-If `jtp_control_execution_enabled` is true, the controller applies the first
-projected `[acceleration, front-wheel steering]` pair only when JTP returns a
-nonlinear-constraint-verified feasible result. During warm-up or after a JTP
-failure, the existing Polynomial controller remains active. With this option
-false, JTP runs in shadow mode and publishes its projected trajectories and
-controls for inspection without changing vehicle actuation.
-
-Runtime diagnostics include `jtp_success`, `jtp_status`, `jtp_max_violation`,
-`jtp_iterations`, `jtp_latency_ms`, and the nominal/projected control sequences.
+The final TRACE constraint-projection method is named **Joint Trajectory
+Projection (JTP)**. Its adaptive active-set weighted joint projection implementation and provisional
+constraint configuration are documented in
+`highway_env/planner/diffusion/projection/README.md` and
+`configs/projection/jtp.yaml`. The former curvature-only projection module is no longer part of the active source tree.

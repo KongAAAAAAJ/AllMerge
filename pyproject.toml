@@ -9,6 +9,11 @@ description = "Vehicle simulation, expert data collection, diffusion planning an
 requires-python = ">=3.10"
 readme = "README.md"
 
+[project.optional-dependencies]
+jtp = [
+    "PyYAML>=6.0",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["highway_env*", "data_pipeline*", "learning*", "simulation*", "evaluation*", "scripts*"]

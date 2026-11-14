@@ -171,7 +171,6 @@ class ControlDiffusionRuntime:
                     nominal_controls=nominal_control,
                     context=context,
                     road_geometry=jtp_inputs['road_geometry'],
-                    external_traffic=jtp_inputs.get('external_traffic'),
                 )
                 jtp_status = str(projected.status)
                 jtp_success = bool(projected.success)

@@ -19,11 +19,7 @@ import numpy as np
 import torch
 import yaml
 
-from highway_env.planner.diffusion.projection.types import (
-    ExternalTraffic,
-    RoadGeometry,
-    constant_velocity_poses,
-)
+from highway_env.planner.diffusion.projection.types import RoadGeometry
 
 
 def load_jtp_runtime_config(path) -> dict:
@@ -69,7 +65,6 @@ class LiveK2ContextBuilder:
         runtime = self.config.get("runtime", {}) or {}
         self.context_cfg = dict(runtime.get("context", {}) or {})
         self.road_cfg = dict(runtime.get("road", {}) or {})
-        self.external_cfg = dict(runtime.get("external_traffic", {}) or {})
         self._histories: dict[int, _VehicleHistory] = {}
 
         self.sample_dt_s = float(self.context_cfg.get("sample_dt_s", 0.1))
@@ -360,67 +355,6 @@ class LiveK2ContextBuilder:
             right_width_m=torch.as_tensor(np.stack(right_widths), dtype=torch.float32),
         )
 
-    def _build_external_traffic(self, env, feature_builder, controlled_vehicles) -> ExternalTraffic | None:
-        if not bool(self.external_cfg.get("enabled", True)):
-            return None
-        max_distance = float(self.external_cfg.get("max_distance_m", 120.0))
-        max_actors = int(self.external_cfg.get("max_actors", 16))
-        if max_distance <= 0 or max_actors < 0:
-            raise ValueError("Invalid JTP external-traffic configuration")
-        controlled_ids = {id(vehicle) for vehicle in controlled_vehicles}
-        controlled_positions = [np.asarray(vehicle.position, dtype=np.float64) for vehicle in controlled_vehicles]
-        actors = []
-        for actor in getattr(env.road, "vehicles", []):
-            if id(actor) in controlled_ids:
-                continue
-            position = np.asarray(getattr(actor, "position", [np.nan, np.nan]), dtype=np.float64)
-            if position.shape != (2,) or not np.isfinite(position).all():
-                continue
-            distance = min(float(np.linalg.norm(position - p)) for p in controlled_positions)
-            if distance > max_distance:
-                continue
-            if feature_builder is None or not hasattr(feature_builder, "_vehicle_world_motion"):
-                raise RuntimeError(
-                    "JTP external-traffic constraints require the shared AllMergeFeatureBuilder"
-                )
-            try:
-                world_velocity, _ = feature_builder._vehicle_world_motion(actor)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Cannot construct constant-velocity prediction for nearby actor "
-                    f"{type(actor).__name__}: {exc}"
-                ) from exc
-            velocity = np.asarray(world_velocity, dtype=np.float64).reshape(2)
-            yaw = float(getattr(actor, "heading", 0.0))
-            length = float(getattr(actor, "LENGTH", 4.5))
-            width = float(getattr(actor, "WIDTH", 1.8))
-            if not np.isfinite([*velocity, yaw, length, width]).all() or length <= 0 or width <= 0:
-                continue
-            actors.append((distance, np.asarray([position[0], position[1], velocity[0], velocity[1], yaw]),
-                           length, width))
-        actors.sort(key=lambda item: item[0])
-        actors = actors[:max_actors]
-        if not actors:
-            return None
-
-        initial = torch.as_tensor(np.stack([item[1] for item in actors]), dtype=torch.float32)
-        horizon = int(self.config["execution"]["horizon_steps"])
-        dt = float(self.config["execution"]["dt_s"])
-        poses = constant_velocity_poses(initial, horizon, dt)
-        offsets, radii = [], []
-        for _, _, length, width in actors:
-            # Three overlapping circles exactly cover the oriented rectangle
-            # when each radius spans half the inter-circle gap and half width.
-            offset = np.asarray([-length / 3.0, 0.0, length / 3.0], dtype=np.float32)
-            radius = float(np.sqrt((length / 6.0) ** 2 + (width / 2.0) ** 2))
-            offsets.append(offset)
-            radii.append(np.full(3, radius, dtype=np.float32))
-        return ExternalTraffic(
-            poses_world=poses,
-            circle_offsets_m=torch.as_tensor(np.stack(offsets), dtype=torch.float32),
-            circle_radius_m=torch.as_tensor(np.stack(radii), dtype=torch.float32),
-        )
-
     def build(self, env, feature_builder, target_lane_indices, *, include_projection_inputs: bool) -> dict[str, Any]:
         vehicles = list(env.controlled_vehicles)
         if not vehicles:
@@ -483,6 +417,4 @@ class LiveK2ContextBuilder:
                 self._build_road_geometry(env, vehicle, lane_index)
                 for vehicle, lane_index in zip(vehicles, target_lane_indices)
             ]
-            result["external_traffic"] = self._build_external_traffic(
-                env, feature_builder, vehicles)
         return result

@@ -1,0 +1,111 @@
+{
+  "package_id": "trace_jtp_active_projection",
+  "version": "1.0.1",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "installed_at": "2026-11-14T15:42:31",
+  "rolled_back": false,
+  "operations": [
+    {
+      "path": "configs/projection/jtp.yaml",
+      "action": "replace",
+      "before_sha256": "b3558d61fb8a1b760303d3760b9684f255eee84729455718c2f169e5eef4be6e",
+      "after_sha256": "5a2011d1b0e3c685ed0493a182f22abdd1d12382cdee54e545503436f6867a61"
+    },
+    {
+      "path": "configs/projection/jtp_runtime.yaml",
+      "action": "replace",
+      "before_sha256": "5e6433d0abef85ef9cbb4ef241bfbdddad66f35b8e242b7a01627bd9640253cd",
+      "after_sha256": "a84f9020a82a9c00a8d7d8ab8c03ad8d5c23b35198f07699352cfb14f3fb1cad"
+    },
+    {
+      "path": "pyproject.toml",
+      "action": "replace",
+      "before_sha256": "6b41ffbc3014aec06dd630ae85ff05016282fa74e9ac0b0e4a9e6c9e71101025",
+      "after_sha256": "43a42e7878cdddb4816704410b522300ff53791e383f8f7b02830a63d9598865"
+    },
+    {
+      "path": "highway_env/planner/diffusion/README.md",
+      "action": "replace",
+      "before_sha256": "6a1834e91ad829e40d91e955e487ce1bbc5ac34bdc70bab685b7b5e942d9b76b",
+      "after_sha256": "3c8f048a7387ee2ca0323416343d96286b4248d3bffa46941300c77456984021"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/README.md",
+      "action": "replace",
+      "before_sha256": "acb065367ae3a2945b0f1f0492db5b4d83e2c9ae2145e1d7860c07dca733df56",
+      "after_sha256": "8f09d8aaf59c902350fe98353459e23eba00cfcce17472fec6ba884d2f6c1a88"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/__init__.py",
+      "action": "replace",
+      "before_sha256": "ca6410e5abe36e1f20c28b9c514167a3a133e51bd1dcc9eabfc06f8261126883",
+      "after_sha256": "ee1b93cca38fbf0d085ab625fd2d7e8dbda30990a3c80ea02691aa44bd598d30"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/config.py",
+      "action": "replace",
+      "before_sha256": "07adb1cd10421684b8166dec305f120b0bc68233e2af37340cd826158cdccac1",
+      "after_sha256": "52564b7b9eb75ce6f9eaf02387436d36a3ef97a35d916785ecc54e899a3e0c01"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/geometry.py",
+      "action": "replace",
+      "before_sha256": "190790a4865b83252fd29de49803516e0664ee9602916182d1ecc8343f742f84",
+      "after_sha256": "65d4de04cbd34cf742d8ecff988be01676a3f85ec36f71e3a6d28683f23f5a02"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/types.py",
+      "action": "replace",
+      "before_sha256": "67486053d48b7de4d4e74dac2d8147a2eef2ed8387931db3e803616145d582ac",
+      "after_sha256": "4a2c5ef853e8e0637e58b4718e4cc31393d375b84a7a85fb0a0557cd5d54a92b"
+    },
+    {
+      "path": "tests/test_joint_trajectory_projection.py",
+      "action": "replace",
+      "before_sha256": "352ae2b2e8ab6139e988de65d8df5c971184625e06dcf8216bbfaba693c0caaa",
+      "after_sha256": "00cb64853a900b05ecca729dc386b41510625c7cfe81081b2254114e5e3439f8"
+    },
+    {
+      "path": "tests/test_jtp_runtime_integration.py",
+      "action": "replace",
+      "before_sha256": "a3608e6277091be4d27f2123066c87379e9078ad8445b513dc71364b0ca8ed68",
+      "after_sha256": "ed98d9659e7a24794c80278484589d2c631a6c7ca7e09ba1cf14ac25bae72c06"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/control.py",
+      "action": "replace",
+      "before_sha256": "ce767849c4a41d8685a5a511e4786bc19fd943fc2135d7b98ee2f38960214bab",
+      "after_sha256": "935d13ac44c4c1b318cd016d88095e0f66e2434a39861a77c80e4093b04e2614"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/jtp_context.py",
+      "action": "replace",
+      "before_sha256": "d70a565a01cc0b68dca57f2da032de3b2e0c32e563f3814cbc3c329d59a2d4a3",
+      "after_sha256": "4df3f7f4b9711fede585c2dbe13e6853734f8d0a2fd1cccf5d4ae94a5c6fcc9f"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/joint_solver.py",
+      "action": "add",
+      "before_sha256": null,
+      "after_sha256": "05f393032eff196a63cd47a8f76ba1c24dc0369355c523ed13c5ebdaa79b4d0f"
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/scp_solver.py",
+      "action": "delete",
+      "before_sha256": "78290dd8b9a844e41785fb8fc94dbac2e5c8cb677201efae4eb0c8726dce7a78",
+      "after_sha256": null
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/qp_builder.py",
+      "action": "delete",
+      "before_sha256": "cc6bb8e4c628d501cfaf755ae9744f26ce5f40db9a369cfd8cb4d9e84555fe37",
+      "after_sha256": null
+    },
+    {
+      "path": "requirements-jtp.txt",
+      "action": "delete",
+      "before_sha256": "7077c25dc8c3a03de92f37ae86780e212fc42599f0646ef7b8d5fc049710ffbb",
+      "after_sha256": null
+    }
+  ]
+}

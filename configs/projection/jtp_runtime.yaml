@@ -19,7 +19,3 @@ runtime:
     forward_range_m: 180.0
     include_connected_road_segments: true
     search_lateral_range_m: 40.0
-  external_traffic:
-    enabled: true
-    max_distance_m: 120.0
-    max_actors: 16
