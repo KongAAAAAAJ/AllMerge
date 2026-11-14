@@ -1,5 +1,6 @@
 """EDMDc and Parametric EDMDc identification on frozen train episodes."""
 from pathlib import Path
+import shutil
 import torch
 from highway_env.vehicle.koopman.models.edmd import PolynomialEDMDc,fit_edmd
 from highway_env.vehicle.koopman.training.base_train import save_checkpoint
@@ -14,6 +15,28 @@ def train_edmd(kind,cfg,project_root,splits,manifest):
     stats=fit_edmd(model,splits['train'])
     out=resolve(project_root,Path(cfg['outputs']['checkpoints'])/kind.lower().replace(' ','_'))
     out.mkdir(parents=True,exist_ok=True)
+
+    # Preserve the previous Parametric EDMDc checkpoint when it was trained
+    # with the legacy uniform-shrink rule. This makes the before/after model
+    # available for an explicit counterfactual evaluation after retraining.
+    if kind=='Parametric EDMDc':
+        for source_name,backup_name in (('best.pt','best_uniform_shrink.pt'),
+                                        ('last.pt','last_uniform_shrink.pt')):
+            source=out/source_name
+            backup=out/backup_name
+            if not source.is_file() or backup.exists():
+                continue
+            try:
+                previous=torch.load(source,map_location='cpu',weights_only=True)
+            except TypeError:
+                previous=torch.load(source,map_location='cpu')
+            previous_stats=previous.get('stats',{}) if isinstance(previous,dict) else {}
+            previous_factor=float(previous_stats.get('stabilization_factor',1.0))
+            previous_policy=previous_stats.get('stabilization_policy','legacy_uniform_shrink')
+            if previous_factor<0.999999 and previous_policy=='legacy_uniform_shrink':
+                shutil.copy2(source,backup)
+                print(f'[BACKUP] preserved legacy uniformly-shrunk checkpoint -> {backup}',flush=True)
+
     state={'model_type':kind,'architecture':'Polynomial_EDMDc_StageC',
            'model_kwargs':{'variant':kind,'history_steps':model.history_steps,
                            'ridge':model.ridge},

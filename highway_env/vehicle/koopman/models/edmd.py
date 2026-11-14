@@ -8,6 +8,7 @@ TruckSim-supervised LTR decoder. Only training episodes are used for fitting.
 from __future__ import annotations
 import numpy as np
 import torch
+import warnings
 from torch import nn
 from highway_env.vehicle.koopman.models.base_model import rollout_pose
 
@@ -160,9 +161,13 @@ def fit_edmd(model, episodes):
             aa[0,:]=0.;bb[0,:]=0.
             getattr(model,'A_'+field).copy_(torch.tensor(aa,dtype=torch.float32))
             getattr(model,'B_'+field).copy_(torch.tensor(bb,dtype=torch.float32))
-    # Multistep EDMD baselines require a numerically stable lifted propagator.
-    # Select one shared shrink factor over the cartesian condition grid so the
-    # parametric A(theta) stays affine; the constant dictionary entry is fixed.
+    # Diagnose the learned lifted dynamics over the observed condition grid.
+    # Do not apply a post-hoc global shrink to Parametric EDMDc: the lifted
+    # vector contains explicit delay-state/control histories whose transition
+    # rows encode temporal shifts. Scaling the whole non-constant A submatrix
+    # changes those identified shift coefficients and breaks the delay-stack
+    # structure. For this controlled ablation, preserve the raw Ridge solution
+    # and report its spectral radius instead of silently modifying it.
     payload_values=sorted({float(ep.info['payload_kg']) for ep in episodes})
     friction_values=sorted({float(ep.info['road_mu']) for ep in episodes})
     max_radius=0.0
@@ -175,15 +180,40 @@ def fit_edmd(model, episodes):
                 aa+=normalized[1]*model.A_friction[1:,1:].numpy()
             radius=max(abs(np.linalg.eigvals(aa)))
             max_radius=max(max_radius,float(radius))
-    multiplier=min(1.0,model.spectral_cap/max(max_radius,1e-12))
-    if multiplier<1.0:
-        model.A[1:,1:]*=multiplier
-        if model.variant=='Parametric EDMDc':
-            model.A_payload[1:,1:]*=multiplier
-            model.A_friction[1:,1:]*=multiplier
+
+    # Keep the original EDMDc baseline behavior unchanged. In the current
+    # reference run its factor is 1.0, so no modification is applied.
+    # Parametric EDMDc deliberately disables this legacy uniform shrink so
+    # the effect can be measured independently in the next train/eval run.
+    multiplier=1.0
+    stabilization_applied=False
+    stabilization_policy='preserve_identified_matrices'
+    if model.variant=='EDMDc':
+        multiplier=min(1.0,model.spectral_cap/max(max_radius,1e-12))
+        stabilization_policy='legacy_uniform_shrink'
+        if multiplier<1.0:
+            model.A[1:,1:]*=multiplier
+            stabilization_applied=True
+
+    post_stabilization_radius=max_radius
+    if model.variant=='EDMDc' and multiplier<1.0:
+        post_stabilization_radius=max_radius*multiplier
+    if model.variant=='Parametric EDMDc' and max_radius>model.spectral_cap:
+        warnings.warn(
+            'Parametric EDMDc lifted spectral radius exceeds the configured cap '
+            f'({max_radius:.6f} > {model.spectral_cap:.6f}); preserving the raw '
+            'Ridge-identified matrices for the no-shrink ablation. Inspect '
+            'multistep rollout errors and numerical stability during evaluation.',
+            RuntimeWarning,
+        )
     ltr_beta=_ridge_fit_stats(ltr_gram,ltr_rhs,labels,model.ridge).reshape(-1)
     model.ltr_C.copy_(torch.as_tensor(ltr_beta[:d],dtype=torch.float32))
     if model.variant=='Parametric EDMDc':
         model.ltr_C_payload.copy_(torch.as_tensor(ltr_beta[d:],dtype=torch.float32))
     return {'transitions':transitions, 'ltr_labels':labels,
-            'dictionary_dim':d,'ridge':model.ridge,'pre_stabilization_radius':max_radius,'stabilization_factor':multiplier}
+            'dictionary_dim':d,'ridge':model.ridge,
+            'pre_stabilization_radius':max_radius,
+            'post_stabilization_radius':post_stabilization_radius,
+            'stabilization_factor':multiplier,
+            'stabilization_applied':stabilization_applied,
+            'stabilization_policy':stabilization_policy}

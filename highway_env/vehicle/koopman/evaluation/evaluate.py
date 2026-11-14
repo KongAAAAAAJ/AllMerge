@@ -101,24 +101,38 @@ def evaluate_one(cfg,project_root,kind,split='test',data_root=None,device='auto'
     return {'summary':summary,'curve':curve,'episodes':rows,'split_sha256':manifest['sha256']}
 
 
-def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128,chassis_seed=None):
+def _selected_models(models=None):
+    """Validate a nonempty model selection, preserving the requested order."""
+    selected = tuple(MODELS if models is None else models)
+    if not selected:
+        raise ValueError('Select at least one model')
+    unknown = [kind for kind in selected if kind not in MODELS]
+    if unknown:
+        raise ValueError(f'Unknown models: {unknown}')
+    if len(set(selected)) != len(selected):
+        raise ValueError('Model selection contains duplicates')
+    return selected
+
+
+def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128,chassis_seed=None, models=None):
+    models = _selected_models(models)
     output={}
-    for kind in MODELS:
+    for kind in models:
         output[kind]=evaluate_one(cfg,project_root,kind,split,data_root,device,batch_size)
     out=resolve(project_root,Path(cfg['outputs']['evaluation'])/split)
     out.mkdir(parents=True,exist_ok=True)
     with (out/'koopman_prediction_accuracy.csv').open('w',newline='',encoding='utf-8-sig') as f:
         w=csv.writer(f);w.writerow(['Model',*PAPER_COLUMNS])
-        for kind in MODELS:w.writerow([kind,*[output[kind]['summary'][k] for k in PAPER_COLUMNS]])
+        for kind in models:w.writerow([kind,*[output[kind]['summary'][k] for k in PAPER_COLUMNS]])
     with (out/'koopman_prediction_errors_curve.csv').open('w',newline='',encoding='utf-8-sig') as f:
-        w=csv.writer(f);w.writerow(['time_s',*MODELS])
+        w=csv.writer(f);w.writerow(['time_s',*models])
         dt=float(cfg['data'].get('dt_s',.1))
-        for j in range(len(output['K0']['curve'])):
-            w.writerow([j*dt,*[output[kind]['curve'][j] for kind in MODELS]])
-    plot_six_models(out/'koopman_prediction_errors.pdf',output,dt)
+        for j in range(len(output[models[0]]['curve'])):
+            w.writerow([j*dt,*[output[kind]['curve'][j] for kind in models]])
+    plot_six_models(out/'koopman_prediction_errors.pdf',output,dt,models=models)
     plot_chassis_comparison(cfg, project_root, out, split=split, data_root=data_root,
-                            device=device, seed=chassis_seed)
-    print(f'[COMPARE] Six models tested on SAME {split} episodes; paper table and PDF -> {out}',flush=True)
+                            device=device, seed=chassis_seed, models=models)
+    print(f'[COMPARE] {len(models)} models tested on SAME {split} episodes; paper table and PDF -> {out}',flush=True)
     return output
 
 
@@ -200,7 +214,8 @@ def _boxplot_with_points(ax, arrays, labels, colors, *, positions=None,
     return bp
 
 
-def plot_six_models(path, output, dt):
+def plot_six_models(path, output, dt, models=None):
+    models = _selected_models(models)
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -212,7 +227,7 @@ def plot_six_models(path, output, dt):
     ax_curve, ax_box = axs
     time_s = None
     curve_stats = {}
-    for kind in MODELS:
+    for kind in models:
         mean, std = _episode_curve_stats(output[kind])
         t = np.arange(len(mean), dtype=np.float64) * dt
         time_s = t
@@ -232,36 +247,37 @@ def plot_six_models(path, output, dt):
     ax_curve.tick_params(labelsize=8.5)
 
     # Preserve the full-scale comparison while enlarging the four neural variants. 左侧箱线图
-    zoom_kinds = ('K0', 'K1-P', 'K1-F', 'K2')
-    # Fractions of the parent axes: left/bottom margins and width/height. 
-    curve_inset_left = 0.06  # 距主图左边界
-    curve_inset_bottom = 0.25  # 距主图底边界
-    curve_inset_width = 0.50  # 宽度
-    curve_inset_height = 0.50  # 高度
-    inset = ax_curve.inset_axes([curve_inset_left, curve_inset_bottom,
-                                 curve_inset_width, curve_inset_height])
-    for kind in zoom_kinds:
-        mean, std = curve_stats[kind]
-        t = np.arange(len(mean), dtype=np.float64) * dt
-        color = PAPER_COLORS[kind]
-        inset.plot(t, mean, color=color, linewidth=1.45)
-        inset.fill_between(t, np.maximum(0.0, mean - std), mean + std,
-                           color=color, alpha=0.12, linewidth=0)
-    all_zoom = np.concatenate([curve_stats[k][0] + curve_stats[k][1]
-                               for k in zoom_kinds])
-    upper = max(float(np.quantile(all_zoom, 0.99)) * 1.12, 0.5)
-    inset.set_xlim(float(3.0), float(4.0))  # 显示范围
-    inset.set_ylim(1.1, 2.6)
-    inset.grid(alpha=0.2, linewidth=0.45)
-    inset.tick_params(labelsize=6.5, direction='in')
-    # inset.text(0.5, 0.97, 'Neural variants', transform=inset.transAxes,
-    #            ha='center', va='top', fontsize=6.5)
-    mark_inset(ax_curve, inset, loc1=2, loc2=4, fc='none',
-               ec='#666666', lw=0.75, alpha=0.85)
+    zoom_kinds = tuple(k for k in models if k in ('K0', 'K1-P', 'K1-F', 'K2'))
+    if zoom_kinds:
+        # Fractions of the parent axes: left/bottom margins and width/height. 
+        curve_inset_left = 0.06  # 距主图左边界
+        curve_inset_bottom = 0.25  # 距主图底边界
+        curve_inset_width = 0.50  # 宽度
+        curve_inset_height = 0.50  # 高度
+        inset = ax_curve.inset_axes([curve_inset_left, curve_inset_bottom,
+                                     curve_inset_width, curve_inset_height])
+        for kind in zoom_kinds:
+            mean, std = curve_stats[kind]
+            t = np.arange(len(mean), dtype=np.float64) * dt
+            color = PAPER_COLORS[kind]
+            inset.plot(t, mean, color=color, linewidth=1.45)
+            inset.fill_between(t, np.maximum(0.0, mean - std), mean + std,
+                               color=color, alpha=0.12, linewidth=0)
+        all_zoom = np.concatenate([curve_stats[k][0] + curve_stats[k][1]
+                                   for k in zoom_kinds])
+        upper = max(float(np.quantile(all_zoom, 0.99)) * 1.12, 0.5)
+        inset.set_xlim(float(3.0), float(4.0))  # 显示范围
+        inset.set_ylim(1.1, 2.6)
+        inset.grid(alpha=0.2, linewidth=0.45)
+        inset.tick_params(labelsize=6.5, direction='in')
+        # inset.text(0.5, 0.97, 'Neural variants', transform=inset.transAxes,
+        #            ha='center', va='top', fontsize=6.5)
+        mark_inset(ax_curve, inset, loc1=2, loc2=4, fc='none',
+                   ec='#666666', lw=0.75, alpha=0.85)
 
-    arrays = [[ep['ADE (m)'] for ep in output[kind]['episodes']] for kind in MODELS]
-    colors = [PAPER_COLORS[k] for k in MODELS]
-    _boxplot_with_points(ax_box, arrays, MODELS, colors, widths=0.48, fontsize=8)
+    arrays = [[ep['ADE (m)'] for ep in output[kind]['episodes']] for kind in models]
+    colors = [PAPER_COLORS[k] for k in models]
+    _boxplot_with_points(ax_box, arrays, models, colors, widths=0.48, fontsize=8)
     ax_box.set_ylabel('Episode-level ADE (m)', fontsize=9)
     ax_box.set_ylim(0, 25)  # 图(b)主图 y 轴范围
     ax_box.set_title('(b) Test episode distributions', fontsize=10, pad=8)
@@ -270,32 +286,33 @@ def plot_six_models(path, output, dt):
 
     # A dedicated inset prevents the large Parametric-EDMDc tail from hiding 右侧箱线图
     # the small but meaningful distribution differences among K0/K1-P/K1-F/K2.
-    # Anchor this inset using right/top margins, also in parent-axes fractions.
-    box_inset_right = 0.08
-    box_inset_top = 0.10
-    box_inset_width = 0.50
-    box_inset_height = 0.50
-    box_inset = ax_box.inset_axes([
-        1.0 - box_inset_right - box_inset_width,
-        1.0 - box_inset_top - box_inset_height,
-        box_inset_width, box_inset_height])
-    neural_arrays = [arrays[MODELS.index(k)] for k in zoom_kinds]
-    neural_colors = [PAPER_COLORS[k] for k in zoom_kinds]
-    neural_positions = np.asarray([MODELS.index(k) + 1 for k in zoom_kinds])
-    _boxplot_with_points(box_inset, neural_arrays, zoom_kinds, neural_colors,
-                         positions=neural_positions, widths=0.48,
-                         fontsize=6.3, scatter=True)
-    box_inset.set_xlim(neural_positions.min() - 0.5, neural_positions.max() + 0.5)
-    finite = np.concatenate([np.asarray(x, dtype=float) for x in neural_arrays if len(x)])
-    q_hi = float(np.quantile(finite, 0.985)) if len(finite) else 1.0
-    box_inset.set_ylim(0.3, 1.9)  # 右侧箱线图
-    box_inset.grid(axis='y', alpha=0.2, linewidth=0.4)
-    box_inset.tick_params(axis='y', labelsize=6.2)
-    # box_inset.text(0.5, 0.97, 'K0–K2 detail', transform=box_inset.transAxes,
-    #                ha='center', va='top', fontsize=6.5)
-    box_inset.tick_params(axis='x', labelrotation=0)
-    mark_inset(ax_box, box_inset, loc1=2, loc2=4, fc='none',
-               ec='#666666', lw=0.75, alpha=0.85)
+    if zoom_kinds:
+        # Anchor this inset using right/top margins, also in parent-axes fractions.
+        box_inset_right = 0.08
+        box_inset_top = 0.10
+        box_inset_width = 0.50
+        box_inset_height = 0.50
+        box_inset = ax_box.inset_axes([
+            1.0 - box_inset_right - box_inset_width,
+            1.0 - box_inset_top - box_inset_height,
+            box_inset_width, box_inset_height])
+        neural_arrays = [arrays[models.index(k)] for k in zoom_kinds]
+        neural_colors = [PAPER_COLORS[k] for k in zoom_kinds]
+        neural_positions = np.asarray([models.index(k) + 1 for k in zoom_kinds])
+        _boxplot_with_points(box_inset, neural_arrays, zoom_kinds, neural_colors,
+                             positions=neural_positions, widths=0.48,
+                             fontsize=6.3, scatter=True)
+        box_inset.set_xlim(neural_positions.min() - 0.5, neural_positions.max() + 0.5)
+        finite = np.concatenate([np.asarray(x, dtype=float) for x in neural_arrays if len(x)])
+        q_hi = float(np.quantile(finite, 0.985)) if len(finite) else 1.0
+        box_inset.set_ylim(0.3, 1.9)  # 右侧箱线图
+        box_inset.grid(axis='y', alpha=0.2, linewidth=0.4)
+        box_inset.tick_params(axis='y', labelsize=6.2)
+        # box_inset.text(0.5, 0.97, 'K0–K2 detail', transform=box_inset.transAxes,
+        #                ha='center', va='top', fontsize=6.5)
+        box_inset.tick_params(axis='x', labelrotation=0)
+        mark_inset(ax_box, box_inset, loc1=2, loc2=4, fc='none',
+                   ec='#666666', lw=0.75, alpha=0.85)
 
     fig.subplots_adjust(left=0.085, right=0.985, bottom=0.22, top=0.88, wspace=0.28)
     path = Path(path)
@@ -359,13 +376,14 @@ def _add_k2_local_detail(ax, time_s, ground_truth, predictions, dt, window_s=0.8
 
 
 def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
-                            data_root=None, device='auto', seed=None):
+                            data_root=None, device='auto', seed=None, models=None):
     """One 3x3 PDF: three reproducibly sampled held-out 4s windows x three responses.
 
     Every model receives the SAME history and future controls for a given row.
     This plot is exploratory/diagnostic: sampled episodes need not have matching
     input sequences across rows, so it is not a controlled payload/mu comparison.
     """
+    models = _selected_models(models)
     data = cfg['data']
     h = int(data.get('horizon_steps', 40))
     dt = float(data.get('dt_s', .1))
@@ -392,12 +410,12 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
         chosen = [int(i) for i in rng.choice(len(ds), size=3, replace=False)]
 
     device = choose_device(device)
-    models = {}
-    for kind in MODELS:
+    loaded_models = {}
+    for kind in models:
         model, ck = load_model(kind, model_checkpoint(cfg, project_root, kind), device)
         if ck.get('split_sha256') != manifest['sha256']:
             raise ValueError(f'{kind} checkpoint uses a different frozen partition')
-        models[kind] = model
+        loaded_models[kind] = model
 
     import matplotlib
     matplotlib.use('Agg')
@@ -421,7 +439,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     try:
         for row, index in enumerate(chosen):
             row_ground_truth = []
-            row_predictions = {kind: [] for kind in MODELS}
+            row_predictions = {kind: [] for kind in models}
             ei, start = ds.keys[index]
             ep = ds.episodes[ei]
             item = ds[index]
@@ -434,9 +452,9 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                 row_ground_truth.append(np.asarray(values, dtype=float))
                 axs[row, col].plot(time_s, values, label='TruckSim', color='black',
                                    linewidth=2.0, zorder=10)
-            for kind in MODELS:
+            for kind in models:
                 with torch.inference_mode():
-                    prediction = _run_model(models[kind], kind, batch, device, dt)
+                    prediction = _run_model(loaded_models[kind], kind, batch, device, dt)
                 states = prediction['states'][0].detach().cpu().numpy()
                 ltr = prediction['ltr'][0].detach().cpu().numpy()
                 if states.shape != (h + 1, 5) or ltr.shape != (h + 1,):
@@ -464,21 +482,24 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             local_gains = []
             for col in range(3):
                 gt_values = row_ground_truth[col]
-                k2_error = np.abs(row_predictions['K2'][col] - gt_values)
+                k2_error = (np.abs(row_predictions['K2'][col] - gt_values)
+                            if 'K2' in models else np.zeros_like(gt_values))
                 width = max(3, min(len(k2_error), int(round(.8 / dt))))
                 scores = []
                 for baseline_kind in ('K0', 'K1-P', 'K1-F'):
+                    if baseline_kind not in models or 'K2' not in models:
+                        continue
                     gain = np.abs(row_predictions[baseline_kind][col] - gt_values) - k2_error
                     score = float(np.max(np.convolve(gain, np.ones(width) / width, mode='valid'))) if width < len(gain) else float(np.mean(gain))
                     scores.append(score)
-                local_gains.append(max(scores))
+                local_gains.append(max(scores, default=-np.inf))
                 axs[row, col].grid(alpha=.22, linewidth=.6)
                 axs[row, col].tick_params(labelsize=8)
                 if row == 2:
                     axs[row, col].set_xlabel('Prediction horizon (s)', fontsize=9)
             best_col = int(np.argmax(local_gains))
             _add_k2_local_detail(axs[row, best_col], time_s, row_ground_truth[best_col],
-                                 {k: row_predictions[k][best_col] for k in MODELS}, dt)
+                                 {k: row_predictions[k][best_col] for k in models}, dt)
             records.append({
                 'example': row + 1,
                 'episode_id': ep.id,
@@ -493,7 +514,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             })
         handles, labels = axs[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5, .025),
-                   ncol=7, fontsize=8.5, frameon=False, columnspacing=1.35, handlelength=2.5)
+                   ncol=len(models) + 1, fontsize=8.5, frameon=False, columnspacing=1.35, handlelength=2.5)
         # fig.suptitle('Chassis response prediction: six Koopman models vs TruckSim',
         #              fontsize=13, y=.991)
         # Different rows can have different inputs: this is NOT a controlled
@@ -511,7 +532,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
         writer = csv.DictWriter(f, fieldnames=list(records[0]))
         writer.writeheader()
         writer.writerows(records)
-    print(f'[CHASSIS] 3 sampled {split} windows; 6 models + TruckSim -> {pdf_path}', flush=True)
+    print(f'[CHASSIS] 3 sampled {split} windows; {len(models)} models + TruckSim -> {pdf_path}', flush=True)
     return pdf_path
 
 def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=None,offset_s=None):
