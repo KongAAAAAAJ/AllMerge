@@ -6,7 +6,7 @@ CHECKPOINT="${CHECKPOINT:?Set CHECKPOINT to a W2 .ckpt or exported runtime .pt}"
 DATASET_ROOT="${DATASET_ROOT:-data/expert/allmerge_planner_v1}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/diffusion_pretrain/open_loop_eval}"
 
-"${PYTHON_BIN}" -m scripts.evaluation.eval_diffusion_open_loop \
+"${PYTHON_BIN}" -m evaluation.eval_diffusion_open_loop \
   --checkpoint "${CHECKPOINT}" \
   --dataset-root "${DATASET_ROOT}" \
   --split val \

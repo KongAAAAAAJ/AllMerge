@@ -9,7 +9,6 @@ implementations live in their corresponding business packages.
 | `data/split_expert_dataset.py` | Dataset split generation |
 | `training/run_diffusion.py` | Trajectory/control diffusion training |
 | `training/train_grpo.py` | GRPO fine-tuning |
-| `evaluation/eval_diffusion_open_loop.py` | Offline diffusion evaluation |
 | `diagnostics/analyze_expert_dataset.py` | Expert dataset statistics |
 | `diagnostics/overfit_diagnostics.py` | Model/data fitting diagnostics |
 | `simulation/run_test.py` | Scenario execution |
@@ -26,6 +25,7 @@ users do not need a separate TruckSim entry script.
 
 Implementation locations:
 
+- `evaluation/`: unified offline evaluation entry points and shared evaluation modules; see [evaluation/README.md](../evaluation/README.md).
 - `data_pipeline/expert_collection/collector.py`: scenario collection and shards.
 - `data_pipeline/expert_collection/runner.py`: TruckSim episode scheduling and recovery.
 - `highway_env/planner/diffusion/training/trajectory.py` and `control.py`: trainers.

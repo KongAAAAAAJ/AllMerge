@@ -24,7 +24,9 @@ python -m data_pipeline.expert_collection.collector --help
 python -m evaluation.expert_dataset_validation --help
 python -m highway_env.planner.diffusion.training.trajectory --help
 python -m scripts.training.train_grpo --help
-python -m scripts.evaluation.eval_diffusion_open_loop --help
+python -m evaluation.eval_diffusion_open_loop --help
+python evaluation/ablation/run_anchor.py --help
+python evaluation/ablation/run_fuel_aware.py --help
 python -m scripts.diagnostics.overfit_diagnostics --help
 python -m scripts.simulation.run_test
 python -m pytest

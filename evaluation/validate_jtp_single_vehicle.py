@@ -21,8 +21,8 @@ import torch
 import yaml
 
 # Resolve the repository root robustly for direct script execution.
-# The script is located at <repo>/scripts/evaluation/, so parents[2] is the
-# repository root. Marker-based discovery avoids future path-depth mistakes.
+# The script is located at <repo>/evaluation/. Marker-based discovery avoids
+# depending on path depth when finding the repository root.
 if __package__ in (None, ""):
     _script_path = Path(__file__).resolve()
     _repo_root = next(
