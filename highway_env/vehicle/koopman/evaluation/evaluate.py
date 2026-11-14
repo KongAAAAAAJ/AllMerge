@@ -114,7 +114,7 @@ def _selected_models(models=None):
     return selected
 
 
-def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128,chassis_seed=None, models=None):
+def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_size=128,chassis_seed=None, models=None, chassis_steps=(3,)):
     models = _selected_models(models)
     output={}
     for kind in models:
@@ -130,8 +130,8 @@ def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_siz
         for j in range(len(output[models[0]]['curve'])):
             w.writerow([j*dt,*[output[kind]['curve'][j] for kind in models]])
     plot_six_models(out/'koopman_prediction_errors.pdf',output,dt,models=models)
-    plot_chassis_comparison(cfg, project_root, out, split=split, data_root=data_root,
-                            device=device, seed=chassis_seed, models=models)
+    plot_chassis_comparisons(cfg, project_root, out, split=split, data_root=data_root,
+                             device=device, seed=chassis_seed, models=models, steps=chassis_steps)
     print(f'[COMPARE] {len(models)} models tested on SAME {split} episodes; paper table and PDF -> {out}',flush=True)
     return output
 
@@ -375,8 +375,109 @@ def _add_k2_local_detail(ax, time_s, ground_truth, predictions, dt, window_s=0.8
     return True
 
 
-def _chassis_one_step_batch(ep, start, history_steps, count):
-    """Independent true-history windows, each with exactly one future control."""
+# Paper chassis figure: fractions of EACH parent axes (left, bottom, width, height).
+CHASSIS_TRUTH_COLOR = '#0072BD'
+# Main-panel limits: zero-based (row, column). None keeps automatic limits.
+# xlim: seconds; ylim columns: yaw rate (rad/s), roll angle (deg), LTR.
+CHASSIS_MAIN_LIMITS = {
+    (0, 0): {'xlim': None, 'ylim': (-0.18, 0.3)},
+    (0, 1): {'xlim': None, 'ylim': None},
+    (0, 2): {'xlim': None, 'ylim': None},
+    (1, 0): {'xlim': None, 'ylim': None},
+    (1, 1): {'xlim': None, 'ylim': None},
+    (1, 2): {'xlim': None, 'ylim': None},
+    (2, 0): {'xlim': None, 'ylim': None},
+    (2, 1): {'xlim': None, 'ylim': None},
+    (2, 2): {'xlim': None, 'ylim': None},
+}
+
+CHASSIS_INSET_DEFAULTS = {
+    'bounds': (0.54, 0.12, 0.43, 0.40),  # (距左边, 距底边, 宽度, 高度)，均为所在主图的比例
+    'xlim': None,             # 时间范围，单位秒；3 步图默认数据时间为 0.3～4.3 秒
+    'ylim': None,             # 纵轴范围，三列分别为 rad/s、度、LTR
+    'window_s': 0.8,          
+    'ylim_pad': 0.16,         # Padding as a fraction of the local response span.
+    'connector_corners': (2, 4),
+}
+# 精确调整koopman_chassis_responses_3step.pdf 3*3组图 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+CHASSIS_INSET_OVERRIDES = {
+    (0, 0): {
+        'bounds': (0.34, 0.1, 0.43, 0.40),
+        'xlim': (1.2, 1.8),
+        'ylim': (0.14, 0.25),
+    }, 
+    (0, 1): {}, (0, 2): {},
+    (1, 0): {}, (1, 1): {}, (1, 2): {},
+    (2, 0): {}, (2, 1): {}, (2, 2): {},
+}
+
+
+def _add_chassis_detail(ax, time_s, ground_truth, predictions, dt, row, col):
+    """Always show detail; choose the largest mean neural-baseline minus K2 error.
+
+    A nonpositive gain still gets an inset, without claiming a K2 advantage.
+    All selected model curves remain visible for an honest local comparison.
+    """
+    from mpl_toolkits.axes_grid1.inset_locator import mark_inset
+    settings = {**CHASSIS_INSET_DEFAULTS, **CHASSIS_INSET_OVERRIDES.get((row, col), {})}
+    t = np.asarray(time_s, dtype=float)
+    gt = np.asarray(ground_truth, dtype=float)
+    neural = [k for k in ('K0', 'K1-P', 'K1-F', 'K2') if k in predictions]
+    baselines = [k for k in neural if k != 'K2']
+    width = min(len(t), max(2, int(round(settings['window_s'] / dt)) + 1))
+    start, best_score = 0, -np.inf
+    if 'K2' in predictions and baselines:
+        k2_error = np.abs(np.asarray(predictions['K2']) - gt)
+        baseline_error = np.mean([np.abs(np.asarray(predictions[k]) - gt)
+                                  for k in baselines], axis=0)
+        gain = baseline_error - k2_error
+        for i in range(len(t) - width + 1):
+            local_gain = gain[i:i+width]
+            if np.isfinite(local_gain).all():
+                score = float(np.mean(local_gain))
+                if score > best_score:
+                    start, best_score = i, score
+    xlim = settings['xlim']
+    if xlim is None:
+        xlim = (float(t[start]), float(t[start + width - 1]))
+    if len(xlim) != 2 or xlim[0] >= xlim[1]:
+        raise ValueError(f'Invalid chassis inset xlim for panel {(row, col)}')
+    inset = ax.inset_axes(settings['bounds'])
+    # Copy main-panel styles so the inset and figure legend agree.
+    for line in ax.lines:
+        inset.plot(line.get_xdata(), line.get_ydata(), color=line.get_color(),
+                   linestyle=line.get_linestyle(),
+                   linewidth=1.45 if line.get_label() == 'K2' else 1.05,
+                   alpha=line.get_alpha(), zorder=line.get_zorder())
+    inset.set_xlim(*xlim)
+    ylim = settings['ylim']
+    if ylim is None:
+        mask = (t >= xlim[0]) & (t <= xlim[1])
+        if not mask.any():
+            raise ValueError(f'Chassis inset xlim contains no samples for panel {(row, col)}')
+        detail_kinds = neural or list(predictions)
+        local = np.concatenate([gt[mask], *[np.asarray(predictions[k])[mask]
+                                           for k in detail_kinds]])
+        local = local[np.isfinite(local)]
+        if not len(local):
+            local = np.array([0.0])
+        span = max(float(np.ptp(local)), 1e-4)
+        padding = max(settings['ylim_pad'] * span, 1e-6)
+        ylim = (float(local.min() - padding), float(local.max() + padding))
+    if len(ylim) != 2 or ylim[0] >= ylim[1]:
+        raise ValueError(f'Invalid chassis inset ylim for panel {(row, col)}')
+    inset.set_ylim(*ylim)
+    inset.grid(alpha=0.2, linewidth=0.4)
+    inset.tick_params(labelsize=5.5, pad=1, direction='in')
+    loc1, loc2 = settings['connector_corners']
+    mark_inset(ax, inset, loc1=loc1, loc2=loc2, fc='none',
+               ec='#888888', lw=0.55, alpha=0.8)
+    return {'xlim': tuple(xlim), 'ylim': tuple(ylim),
+            'mean_baseline_minus_k2_error': float(best_score) if np.isfinite(best_score) else None}
+
+
+def _chassis_prediction_batch(ep, start, history_steps, count, prediction_steps):
+    """Independent true-history windows with prediction_steps future controls."""
     origins = range(start, start + count)
     return {
         'state_hist': torch.from_numpy(np.stack([
@@ -384,9 +485,9 @@ def _chassis_one_step_batch(ep, start, history_steps, count):
         'control_hist': torch.from_numpy(np.stack([
             ep.controls[k-history_steps+1:k] for k in origins]).copy()),
         'future_controls': torch.from_numpy(np.stack([
-            ep.controls[k:k+1] for k in origins]).copy()),
+            ep.controls[k:k+prediction_steps] for k in origins]).copy()),
         'target_poses': torch.from_numpy(np.stack([
-            ep.poses[k:k+2] for k in origins]).copy()),
+            ep.poses[k:k+prediction_steps+1] for k in origins]).copy()),
         'conditions': torch.tensor([
             [float(ep.info['payload_kg']), float(ep.info['road_mu'])]
             for _ in origins], dtype=torch.float32),
@@ -394,15 +495,22 @@ def _chassis_one_step_batch(ep, start, history_steps, count):
 
 
 def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
-                            data_root=None, device='auto', seed=None, models=None):
-    """One 3x3 PDF of independent one-step predictions along held-out sequences.
+                            data_root=None, device='auto', seed=None, models=None,
+                            prediction_steps=3, sampling_steps=None):
+    """One 3x3 PDF of fixed-lead predictions with refreshed true histories.
 
-    At each origin, every model receives the same TRUE history and one control.
-    Predictions are never fed back; h+1 origins predict targets 1 through h+1.
+    At each origin, all models receive the same TRUE history and future controls.
+    Within each prediction, latent states recur for prediction_steps transitions.
+    The next origin resets to true history; h+1 terminal outputs are plotted.
     This plot is exploratory/diagnostic: sampled episodes need not have matching
     input sequences across rows, so it is not a controlled payload/mu comparison.
     """
     models = _selected_models(models)
+    if not isinstance(prediction_steps, int) or prediction_steps < 1:
+        raise ValueError('prediction_steps must be a positive integer')
+    sampling_steps = max(10, prediction_steps) if sampling_steps is None else sampling_steps
+    if sampling_steps < prediction_steps:
+        raise ValueError('sampling_steps must cover prediction_steps')
     data = cfg['data']
     h = int(data.get('horizon_steps', 40))
     dt = float(data.get('dt_s', .1))
@@ -412,7 +520,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     if not selected:
         raise ValueError(f'No episodes in frozen {split} split for chassis comparison')
     ds = KoopmanWindowDataset(selected,
-        history_steps=history_steps, horizon_steps=h + 1,
+        history_steps=history_steps, horizon_steps=h + sampling_steps,
         warmup_s=float(data.get('warmup_s', 1.0)),
         window_stride=1, dt=dt)
     if len(ds) < 3:
@@ -441,12 +549,12 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     _paper_style(plt)
-    fig, axs = plt.subplots(3, 3, figsize=(14.0, 10.0), sharex=True,
+    fig, axs = plt.subplots(3, 3, figsize=(14.0, 10.0), sharex=False,
                             gridspec_kw={'wspace': .22, 'hspace': .27})
     headings = ('Yaw rate (rad/s)', 'Roll angle (deg)', 'LTR')
     for col, heading in enumerate(headings):
         axs[0, col].set_title(heading, fontsize=11, pad=9)
-    time_s = np.arange(1, h + 2, dtype=np.float64) * dt
+    time_s = np.arange(prediction_steps, h + prediction_steps + 1, dtype=np.float64) * dt
     styles = {
         'EDMDc': (PAPER_COLORS['EDMDc'], ':'),
         'Parametric EDMDc': (PAPER_COLORS['Parametric EDMDc'], '--'),
@@ -462,21 +570,21 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             row_predictions = {kind: [] for kind in models}
             ei, start = ds.keys[index]
             ep = ds.episodes[ei]
-            batch = _chassis_one_step_batch(ep, start, history_steps, h + 1)
-            # Align each one-step output with the next recorded state.
-            true_states = ep.states[start+1:start+h+2]
-            true_ltr = np.asarray(ep.ltr[start+1:start+h+2], dtype=np.float64).copy()
+            batch = _chassis_prediction_batch(ep, start, history_steps, h + 1, prediction_steps)
+            # Align the terminal output with the truth prediction_steps ahead.
+            true_states = ep.states[start+prediction_steps:start+h+prediction_steps+1]
+            true_ltr = np.asarray(ep.ltr[start+prediction_steps:start+h+prediction_steps+1], dtype=np.float64).copy()
             true_ltr[~np.isfinite(true_ltr)] = np.nan
             gt = (true_states[:, 2], np.rad2deg(true_states[:, 3]), true_ltr)
             for col, values in enumerate(gt):
                 row_ground_truth.append(np.asarray(values, dtype=float))
-                axs[row, col].plot(time_s, values, label='TruckSim', color='black',
-                                   linewidth=2.0, zorder=10)
+                axs[row, col].plot(time_s, values, label='TruckSim', color=CHASSIS_TRUTH_COLOR,
+                                   linewidth=2.0, zorder=3)
             for kind in models:
                 with torch.inference_mode():
                     prediction = _run_model(loaded_models[kind], kind, batch, device, dt)
-                states = prediction['states'][:, 1].detach().cpu().numpy()
-                ltr = prediction['ltr'][:, 1].detach().cpu().numpy()
+                states = prediction['states'][:, prediction_steps].detach().cpu().numpy()
+                ltr = prediction['ltr'][:, prediction_steps].detach().cpu().numpy()
                 if states.shape != (h + 1, 5) or ltr.shape != (h + 1,):
                     raise ValueError(f'{kind} prediction shape mismatch on {ep.id}')
                 if not (np.isfinite(states).all() and np.isfinite(ltr).all()):
@@ -488,7 +596,7 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                     axs[row, col].plot(time_s, values, label=kind, color=color,
                                        linestyle=ls, linewidth=1.65 if kind == 'K2' else 1.2,
                                        alpha=.96 if kind == 'K2' else .88,
-                                       zorder=8 if kind == 'K2' else 5)
+                                       zorder=10 if kind == 'K2' else 5)
             note = (f'load={float(ep.info["payload_kg"]):g} kg, '
                     rf'$\mu$={float(ep.info["road_mu"]):g}, '
                     rf'$v_0$={float(ep.info["vx_init_kmh"]):g} km/h')
@@ -498,37 +606,29 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                         bbox={'boxstyle': 'square,pad=0.25',
                               'facecolor': '#DDEEF5', 'edgecolor': 'none'},
                         zorder=20)
-            # Place a single inset in the most informative channel of each row.
-            local_gains = []
+            inset_details = []
             for col in range(3):
-                gt_values = row_ground_truth[col]
-                k2_error = (np.abs(row_predictions['K2'][col] - gt_values)
-                            if 'K2' in models else np.zeros_like(gt_values))
-                width = max(3, min(len(k2_error), int(round(.8 / dt))))
-                scores = []
-                for baseline_kind in ('K0', 'K1-P', 'K1-F'):
-                    if baseline_kind not in models or 'K2' not in models:
-                        continue
-                    gain = np.abs(row_predictions[baseline_kind][col] - gt_values) - k2_error
-                    score = float(np.max(np.convolve(gain, np.ones(width) / width, mode='valid'))) if width < len(gain) else float(np.mean(gain))
-                    scores.append(score)
-                local_gains.append(max(scores, default=-np.inf))
+                limits = CHASSIS_MAIN_LIMITS.get((row, col), {})
+                if limits.get('xlim') is not None:
+                    axs[row, col].set_xlim(*limits['xlim'])
+                if limits.get('ylim') is not None:
+                    axs[row, col].set_ylim(*limits['ylim'])
                 axs[row, col].grid(alpha=.22, linewidth=.6)
-                axs[row, col].tick_params(labelsize=8)
-                if row == 2:
-                    axs[row, col].set_xlabel('Time from first input (s)', fontsize=9)
-            best_col = int(np.argmax(local_gains))
-            _add_k2_local_detail(axs[row, best_col], time_s, row_ground_truth[best_col],
-                                 {k: row_predictions[k][best_col] for k in models}, dt)
+                axs[row, col].tick_params(labelsize=8, labelbottom=True)
+                axs[row, col].set_xlabel('Time from first input (s)', fontsize=9)
+                inset_details.append(_add_chassis_detail(
+                    axs[row, col], time_s, row_ground_truth[col],
+                    {k: row_predictions[k][col] for k in models}, dt, row, col))
             records.append({
                 'example': row + 1,
-                'prediction_mode': 'one_step_true_history',
-                'prediction_steps': 1,
+                'prediction_mode': 'fixed_lead_true_history',
+                'prediction_steps': prediction_steps,
+                'inset_details': json.dumps(inset_details),
                 'prediction_count': h + 1,
-                'first_target_index': int(start + 1),
-                'last_target_index': int(start + h + 1),
-                'first_target_time_s': float(ep.time_s[start + 1]),
-                'last_target_time_s': float(ep.time_s[start + h + 1]),
+                'first_target_index': int(start + prediction_steps),
+                'last_target_index': int(start + h + prediction_steps),
+                'first_target_time_s': float(ep.time_s[start + prediction_steps]),
+                'last_target_time_s': float(ep.time_s[start + h + prediction_steps]),
                 'episode_id': ep.id,
                 'episode_path': str(ep.path),
                 'start_index': int(start),
@@ -548,19 +648,38 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
         # comparison between conditions, even though each row is fair across models.
         # fig.text(.5, .085, 'Each row uses one held-out sequence; all models share its history and controls.',
         #          ha='center', va='center', fontsize=8, color='#555555')
-        fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.29)
+        # fig.text(.5, .975, f'{prediction_steps}-step-ahead prediction (true history refreshed at each origin)',
+        #          ha='center', va='top', fontsize=11)
+        fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.45)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path = output_dir / 'koopman_chassis_responses.pdf'
+        suffix = '' if prediction_steps == 1 else f'_{prediction_steps}step'
+        pdf_path = output_dir / f'koopman_chassis_responses{suffix}.pdf'
         fig.savefig(pdf_path, bbox_inches='tight')
     finally:
         plt.close(fig)
-    with (output_dir / 'koopman_chassis_examples.csv').open('w', newline='', encoding='utf-8-sig') as f:
+    with (output_dir / f'koopman_chassis_examples{suffix}.csv').open('w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=list(records[0]))
         writer.writeheader()
         writer.writerows(records)
-    print(f'[CHASSIS] 3 sampled {split} windows; {len(models)} models + TruckSim; one-step predictions with true history -> {pdf_path}', flush=True)
+    print(f'[CHASSIS] 3 sampled {split} windows; {len(models)} models + TruckSim; {prediction_steps}-step predictions with true history -> {pdf_path}', flush=True)
     return pdf_path
+
+def plot_chassis_comparisons(cfg, project_root, output_dir, *, steps=(3,),
+                             split='test', data_root=None, device='auto', seed=None,
+                             models=None):
+    """Render selected leads using identical sampled episodes and input origins."""
+    steps = tuple(steps)
+    if not steps or any(not isinstance(step, int) or step < 1 for step in steps):
+        raise ValueError('steps must contain positive integers')
+    if len(set(steps)) != len(steps):
+        raise ValueError('steps must not contain duplicates')
+    sampling_steps = max(10, max(steps))
+    return [plot_chassis_comparison(
+        cfg, project_root, output_dir, split=split, data_root=data_root,
+        device=device, seed=seed, models=models, prediction_steps=step,
+        sampling_steps=sampling_steps) for step in steps]
+
 
 def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=None,offset_s=None):
     """Controlled Fig. only with three independently recorded, matching input episodes.
