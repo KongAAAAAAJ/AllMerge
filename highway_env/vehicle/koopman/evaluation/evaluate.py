@@ -451,11 +451,15 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                                        linestyle=ls, linewidth=1.65 if kind == 'K2' else 1.2,
                                        alpha=.96 if kind == 'K2' else .88,
                                        zorder=8 if kind == 'K2' else 5)
-            note = (f'Example {row+1}\n'
-                    f'load={float(ep.info["payload_kg"]):g} kg, '
-                    f'mu={float(ep.info["road_mu"]):g}\n'
-                    f'v0={float(ep.info["vx_init_kmh"]):g} km/h')
-            axs[row, 0].set_ylabel(note, fontsize=7.8, labelpad=8)
+            note = (f'load={float(ep.info["payload_kg"]):g} kg, '
+                    rf'$\mu$={float(ep.info["road_mu"]):g}, '
+                    rf'$v_0$={float(ep.info["vx_init_kmh"]):g} km/h')
+            for ax in axs[row]:
+                ax.text(0.025, 0.965, note, transform=ax.transAxes,
+                        ha='left', va='top', fontsize=7.8, color='black',
+                        bbox={'boxstyle': 'square,pad=0.25',
+                              'facecolor': '#DDEEF5', 'edgecolor': 'none'},
+                        zorder=20)
             # Place a single inset in the most informative channel of each row.
             local_gains = []
             for col in range(3):
@@ -490,12 +494,12 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
         handles, labels = axs[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5, .025),
                    ncol=7, fontsize=8.5, frameon=False, columnspacing=1.35, handlelength=2.5)
-        fig.suptitle('Chassis response prediction: six Koopman models vs TruckSim',
-                     fontsize=13, y=.991)
+        # fig.suptitle('Chassis response prediction: six Koopman models vs TruckSim',
+        #              fontsize=13, y=.991)
         # Different rows can have different inputs: this is NOT a controlled
         # comparison between conditions, even though each row is fair across models.
-        fig.text(.5, .085, 'Each row uses one held-out sequence; all models share its history and controls.',
-                 ha='center', va='center', fontsize=8, color='#555555')
+        # fig.text(.5, .085, 'Each row uses one held-out sequence; all models share its history and controls.',
+        #          ha='center', va='center', fontsize=8, color='#555555')
         fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.29)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
