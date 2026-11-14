@@ -9,5 +9,5 @@ python evaluation/ablation/run_anchor.py --config configs/evaluation/anchor_abla
 燃油感知消融：
 
 ```bash
-python evaluation/ablation/run_fuel_aware.py --config configs/train/diffusion.yaml --checkpoint F0=PATH_F0 --checkpoint F3=PATH_F3 --split test
+python evaluation/ablation/run_fuel_aware.py --config configs/train/diffusion.yaml --checkpoint F0=all_merge\outputs\fuel_ablation\F0\best.pt --checkpoint F3=all_merge\outputs\fuel_ablation\F3\best.pt --split test
 ```
