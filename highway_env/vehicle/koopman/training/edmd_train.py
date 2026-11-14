@@ -16,15 +16,13 @@ def train_edmd(kind,cfg,project_root,splits,manifest):
     out=resolve(project_root,Path(cfg['outputs']['checkpoints'])/kind.lower().replace(' ','_'))
     out.mkdir(parents=True,exist_ok=True)
 
-    # Preserve the previous Parametric EDMDc checkpoint when it was trained
-    # with the legacy uniform-shrink rule. This makes the before/after model
-    # available for an explicit counterfactual evaluation after retraining.
+    # PARAMETRIC_EDMDC_VARIANT_BACKUP_V2
+    # Keep the previous Parametric EDMDc checkpoint before writing a new
+    # shift-preserving model. Preserve both historical variants separately.
     if kind=='Parametric EDMDc':
-        for source_name,backup_name in (('best.pt','best_uniform_shrink.pt'),
-                                        ('last.pt','last_uniform_shrink.pt')):
+        for source_name in ('best.pt','last.pt'):
             source=out/source_name
-            backup=out/backup_name
-            if not source.is_file() or backup.exists():
+            if not source.is_file():
                 continue
             try:
                 previous=torch.load(source,map_location='cpu',weights_only=True)
@@ -33,10 +31,24 @@ def train_edmd(kind,cfg,project_root,splits,manifest):
             previous_stats=previous.get('stats',{}) if isinstance(previous,dict) else {}
             previous_factor=float(previous_stats.get('stabilization_factor',1.0))
             previous_policy=previous_stats.get('stabilization_policy','legacy_uniform_shrink')
-            if previous_factor<0.999999 and previous_policy=='legacy_uniform_shrink':
-                shutil.copy2(source,backup)
-                print(f'[BACKUP] preserved legacy uniformly-shrunk checkpoint -> {backup}',flush=True)
-
+            previous_radius=float(previous_stats.get(
+                'pre_stabilization_radius',
+                previous_stats.get('ridge_pre_shift_radius',0.0)
+            ))
+            if previous_policy=='shift_preserving_learned_rows':
+                continue
+            if (previous_policy=='preserve_identified_matrices'
+                    or (previous_factor>=0.999999 and previous_radius>1.02+1e-6)):
+                tag='no_shrink'
+            elif previous_factor<0.999999:
+                tag='uniform_shrink'
+            else:
+                tag='previous'
+            backup=out/f'{source.stem}_{tag}.pt'
+            if backup.exists():
+                continue
+            shutil.copy2(source,backup)
+            print(f'[BACKUP] preserved previous Parametric EDMDc checkpoint -> {backup}',flush=True)
     state={'model_type':kind,'architecture':'Polynomial_EDMDc_StageC',
            'model_kwargs':{'variant':kind,'history_steps':model.history_steps,
                            'ridge':model.ridge},

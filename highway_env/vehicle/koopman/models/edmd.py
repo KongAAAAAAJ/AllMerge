@@ -161,59 +161,180 @@ def fit_edmd(model, episodes):
             aa[0,:]=0.;bb[0,:]=0.
             getattr(model,'A_'+field).copy_(torch.tensor(aa,dtype=torch.float32))
             getattr(model,'B_'+field).copy_(torch.tensor(bb,dtype=torch.float32))
-    # Diagnose the learned lifted dynamics over the observed condition grid.
-    # Do not apply a post-hoc global shrink to Parametric EDMDc: the lifted
-    # vector contains explicit delay-state/control histories whose transition
-    # rows encode temporal shifts. Scaling the whole non-constant A submatrix
-    # changes those identified shift coefficients and breaks the delay-stack
-    # structure. For this controlled ablation, preserve the raw Ridge solution
-    # and report its spectral radius instead of silently modifying it.
+    # Preserve the deterministic delay-stack transitions and stabilize only
+    # the learned lifted-dynamics rows for Parametric EDMDc.
     payload_values=sorted({float(ep.info['payload_kg']) for ep in episodes})
     friction_values=sorted({float(ep.info['road_mu']) for ep in episodes})
-    max_radius=0.0
-    for payload in (payload_values if model.variant=='Parametric EDMDc' else [payload_values[0]]):
-        for friction in (friction_values if model.variant=='Parametric EDMDc' else [friction_values[0]]):
-            aa=model.A[1:,1:].numpy().astype(np.float64).copy()
-            if model.variant=='Parametric EDMDc':
-                normalized=(np.asarray([payload,friction])-model.condition_mean.numpy())/model.condition_std.numpy()
-                aa+=normalized[0]*model.A_payload[1:,1:].numpy()
-                aa+=normalized[1]*model.A_friction[1:,1:].numpy()
-            radius=max(abs(np.linalg.eigvals(aa)))
-            max_radius=max(max_radius,float(radius))
 
-    # Keep the original EDMDc baseline behavior unchanged. In the current
-    # reference run its factor is 1.0, so no modification is applied.
-    # Parametric EDMDc deliberately disables this legacy uniform shrink so
-    # the effect can be measured independently in the next train/eval run.
-    multiplier=1.0
-    stabilization_applied=False
-    stabilization_policy='preserve_identified_matrices'
     if model.variant=='EDMDc':
+        # Keep the original EDMDc baseline exactly on its legacy path.
+        max_radius=0.0
+        aa=model.A[1:,1:].numpy().astype(np.float64).copy()
+        max_radius=float(max(abs(np.linalg.eigvals(aa))))
+        ridge_pre_shift_radius=max_radius
+        pre_stabilization_radius=max_radius
         multiplier=min(1.0,model.spectral_cap/max(max_radius,1e-12))
-        stabilization_policy='legacy_uniform_shrink'
         if multiplier<1.0:
             model.A[1:,1:]*=multiplier
-            stabilization_applied=True
-
-    post_stabilization_radius=max_radius
-    if model.variant=='EDMDc' and multiplier<1.0:
+        stabilization_policy='legacy_uniform_shrink'
+        stabilization_applied=multiplier<1.0
         post_stabilization_radius=max_radius*multiplier
-    if model.variant=='Parametric EDMDc' and max_radius>model.spectral_cap:
-        warnings.warn(
-            'Parametric EDMDc lifted spectral radius exceeds the configured cap '
-            f'({max_radius:.6f} > {model.spectral_cap:.6f}); preserving the raw '
-            'Ridge-identified matrices for the no-shrink ablation. Inspect '
-            'multistep rollout errors and numerical stability during evaluation.',
-            RuntimeWarning,
+        shift_structure_enforced=False
+    else:
+        # Snapshot the unconstrained Ridge matrices for diagnostics.
+        ridge_A0=model.A.numpy().astype(np.float64).copy()
+        ridge_Ap=model.A_payload.numpy().astype(np.float64).copy()
+        ridge_Am=model.A_friction.numpy().astype(np.float64).copy()
+        # z = [bias, state history, control history, quadratic(current state)].
+        # The delay-stack shifts are deterministic identities, not quantities
+        # that should be estimated by Ridge from highly correlated samples.
+        h=model.history_steps
+        d=model.latent_dim
+        state_start=1
+        control_start=1+5*h
+        poly_start=control_start+2*(h-1)
+        learned_rows=np.concatenate((
+            np.arange(state_start+(h-1)*5,state_start+h*5,dtype=np.int64),
+            np.arange(poly_start,d,dtype=np.int64),
+        ))
+
+        with torch.no_grad():
+            # Constant dictionary entry.
+            model.A[0,:].zero_()
+            model.A[0,0]=1.0
+            model.B[0,:].zero_()
+            for key in ('A_payload','A_friction','B_payload','B_friction'):
+                getattr(model,key)[0,:].zero_()
+
+            # State-history shift: x[t+1] in the next stack equals x[t+2]
+            # in the current stack for the first h-1 history slots.
+            for t in range(h-1):
+                for j in range(5):
+                    row=state_start+t*5+j
+                    col=state_start+(t+1)*5+j
+                    for key in ('A','A_payload','A_friction'):
+                        getattr(model,key)[row,:].zero_()
+                    model.A[row,col]=1.0
+                    for key in ('B','B_payload','B_friction'):
+                        getattr(model,key)[row,:].zero_()
+
+            # Control-history shift for the first h-2 slots.
+            for t in range(max(h-2,0)):
+                for j in range(2):
+                    row=control_start+t*2+j
+                    col=control_start+(t+1)*2+j
+                    for key in ('A','A_payload','A_friction'):
+                        getattr(model,key)[row,:].zero_()
+                    model.A[row,col]=1.0
+                    for key in ('B','B_payload','B_friction'):
+                        getattr(model,key)[row,:].zero_()
+
+            # The newest control-history slot is exactly the current input u_k.
+            if h>1:
+                for j in range(2):
+                    row=control_start+(h-2)*2+j
+                    for key in ('A','A_payload','A_friction'):
+                        getattr(model,key)[row,:].zero_()
+                    for key in ('B','B_payload','B_friction'):
+                        getattr(model,key)[row,:].zero_()
+                    model.B[row,j]=1.0
+
+        # Record the radius before imposing exact shift rows. This is useful
+        # for auditing the Ridge solution and comparing old checkpoints.
+        condition_mean=model.condition_mean.numpy().astype(np.float64)
+        condition_std=model.condition_std.numpy().astype(np.float64)
+        A0=model.A.numpy().astype(np.float64).copy()
+        Ap=model.A_payload.numpy().astype(np.float64).copy()
+        Am=model.A_friction.numpy().astype(np.float64).copy()
+
+        def _condition_radius(a0,ap,am):
+            radius=0.0
+            for payload in payload_values:
+                for friction in friction_values:
+                    c=(np.asarray([payload,friction],dtype=np.float64)-condition_mean)/condition_std
+                    aa=a0+c[0]*ap+c[1]*am
+                    eig=np.linalg.eigvals(aa[1:,1:])
+                    radius=max(radius,float(np.max(np.abs(eig))))
+            return radius
+
+        ridge_pre_shift_radius=_condition_radius(ridge_A0,ridge_Ap,ridge_Am)
+        pre_stabilization_radius=_condition_radius(A0,Ap,Am)
+
+        def _radius_for_factor(factor):
+            a0=A0.copy()
+            ap=Ap.copy()
+            am=Am.copy()
+            a0[learned_rows,:]*=factor
+            ap[learned_rows,:]*=factor
+            am[learned_rows,:]*=factor
+            return _condition_radius(a0,ap,am)
+
+        if pre_stabilization_radius<=model.spectral_cap:
+            multiplier=1.0
+        else:
+            # Find the largest shared factor that satisfies the spectral cap
+            # over the complete observed payload x friction condition grid.
+            # A coarse scan avoids assuming global monotonicity of rho(A(alpha));
+            # bisection then refines the upper edge of the largest feasible cell.
+            alpha_grid=np.linspace(0.0,1.0,65)
+            radii=[_radius_for_factor(float(a)) for a in alpha_grid]
+            feasible=[i for i,r in enumerate(radii) if r<=model.spectral_cap]
+            if not feasible:
+                raise RuntimeError(
+                    'Parametric EDMDc shift-preserving stabilization could not '
+                    'find a feasible learned-dynamics factor.'
+                )
+            i=max(feasible)
+            if i==len(alpha_grid)-1:
+                multiplier=1.0
+            else:
+                lo=float(alpha_grid[i])
+                hi=float(alpha_grid[i+1])
+                for _ in range(28):
+                    mid=0.5*(lo+hi)
+                    if _radius_for_factor(mid)<=model.spectral_cap:
+                        lo=mid
+                    else:
+                        hi=mid
+                multiplier=lo
+
+        with torch.no_grad():
+            model.A[learned_rows,:]=model.A[learned_rows,:]*multiplier
+            model.A_payload[learned_rows,:]=model.A_payload[learned_rows,:]*multiplier
+            model.A_friction[learned_rows,:]=model.A_friction[learned_rows,:]*multiplier
+
+        post_stabilization_radius=_condition_radius(
+            model.A.numpy().astype(np.float64).copy(),
+            model.A_payload.numpy().astype(np.float64).copy(),
+            model.A_friction.numpy().astype(np.float64).copy(),
         )
+        stabilization_policy='shift_preserving_learned_rows'
+        stabilization_applied=multiplier<0.999999
+        shift_structure_enforced=True
+        if post_stabilization_radius>model.spectral_cap+1e-6:
+            raise RuntimeError(
+                'Parametric EDMDc stabilization failed to meet spectral cap: '
+                f'{post_stabilization_radius:.8f} > {model.spectral_cap:.8f}'
+            )
+        if stabilization_applied:
+            warnings.warn(
+                'Parametric EDMDc applied shift-preserving stabilization to '
+                f'learned dynamics rows only (factor={multiplier:.6f}, '
+                f'radius={pre_stabilization_radius:.6f}->{post_stabilization_radius:.6f}).',
+                RuntimeWarning,
+            )
+        max_radius=pre_stabilization_radius
+
     ltr_beta=_ridge_fit_stats(ltr_gram,ltr_rhs,labels,model.ridge).reshape(-1)
     model.ltr_C.copy_(torch.as_tensor(ltr_beta[:d],dtype=torch.float32))
     if model.variant=='Parametric EDMDc':
         model.ltr_C_payload.copy_(torch.as_tensor(ltr_beta[d:],dtype=torch.float32))
     return {'transitions':transitions, 'ltr_labels':labels,
             'dictionary_dim':d,'ridge':model.ridge,
-            'pre_stabilization_radius':max_radius,
-            'post_stabilization_radius':post_stabilization_radius,
-            'stabilization_factor':multiplier,
-            'stabilization_applied':stabilization_applied,
-            'stabilization_policy':stabilization_policy}
+            'ridge_pre_shift_radius':float(ridge_pre_shift_radius),
+            'pre_stabilization_radius':float(pre_stabilization_radius),
+            'post_stabilization_radius':float(post_stabilization_radius),
+            'stabilization_factor':float(multiplier),
+            'stabilization_applied':bool(stabilization_applied),
+            'stabilization_policy':stabilization_policy,
+            'shift_structure_enforced':bool(shift_structure_enforced)}
