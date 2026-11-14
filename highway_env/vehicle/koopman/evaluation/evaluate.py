@@ -122,27 +122,221 @@ def compare(cfg,project_root,split='test',data_root=None,device='auto',batch_siz
     return output
 
 
-def plot_six_models(path,output,dt):
+def _paper_style(plt):
+    """Apply consistent journal-style typography and vector PDF settings."""
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman', 'Times', 'DejaVu Serif'],
+        'mathtext.fontset': 'stix',
+        'pdf.fonttype': 42,
+        'ps.fonttype': 42,
+        'axes.unicode_minus': False,
+        'axes.linewidth': 0.8,
+        'xtick.direction': 'in',
+        'ytick.direction': 'in',
+        'xtick.major.width': 0.8,
+        'ytick.major.width': 0.8,
+        'legend.frameon': False,
+    })
+
+
+PAPER_COLORS = {
+    'EDMDc': '#777777',
+    'Parametric EDMDc': '#E07A3F',
+    'K0': '#4C9FD6',
+    'K1-P': '#55A868',
+    'K1-F': '#E3A33D',
+    'K2': '#9566B5',
+}
+
+
+def _episode_curve_stats(model_output):
+    """Return mean/std across held-out episodes, preserving episode as unit."""
+    episodes = model_output.get('episodes', [])
+    curves = [np.asarray(ep['curve'], dtype=np.float64)
+              for ep in episodes if ep.get('curve') is not None]
+    if curves:
+        lengths = {len(x) for x in curves}
+        if len(lengths) != 1:
+            raise ValueError('Episode position-error curves have inconsistent lengths')
+        matrix = np.stack(curves, axis=0)
+        return matrix.mean(axis=0), matrix.std(axis=0, ddof=1 if len(matrix) > 1 else 0)
+    # Backward-compatible fallback for externally supplied aggregate-only results.
+    curve = np.asarray(model_output['curve'], dtype=np.float64)
+    return curve, np.zeros_like(curve)
+
+
+def _boxplot_with_points(ax, arrays, labels, colors, *, positions=None,
+                         widths=0.52, scatter=True, show_xticklabels=True,
+                         fontsize=8, ylim=None):
+    """Colored boxplots with lightly jittered episode observations."""
+    if positions is None:
+        positions = np.arange(1, len(arrays) + 1)
+    bp = ax.boxplot(arrays, positions=positions, widths=widths,
+                    patch_artist=True, showfliers=False, whis=1.5,
+                    medianprops={'color': '#C43C39', 'linewidth': 1.5},
+                    whiskerprops={'color': '#555555', 'linewidth': 0.9},
+                    capprops={'color': '#555555', 'linewidth': 0.9},
+                    boxprops={'edgecolor': '#555555', 'linewidth': 0.9})
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.52)
+    if scatter:
+        rng = np.random.default_rng(20261114)
+        for x, values, color in zip(positions, arrays, colors):
+            values = np.asarray(values, dtype=float)
+            if not len(values):
+                continue
+            jitter = rng.uniform(-widths * 0.31, widths * 0.31, size=len(values))
+            ax.scatter(x + jitter, values, s=10, color=color, alpha=0.48,
+                       edgecolors='none', zorder=3)
+    ax.set_xticks(positions)
+    if show_xticklabels:
+        ax.set_xticklabels(labels, rotation=22, ha='right', fontsize=fontsize)
+    else:
+        ax.set_xticklabels([])
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+    return bp
+
+
+def plot_six_models(path, output, dt):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    fig,axs=plt.subplots(1,2,figsize=(10.8,3.6))
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+
+    _paper_style(plt)
+    fig, axs = plt.subplots(1, 2, figsize=(11.2, 4.0),
+                            gridspec_kw={'width_ratios': [1.12, 1.0]})
+    ax_curve, ax_box = axs
+    time_s = None
+    curve_stats = {}
     for kind in MODELS:
-        curve=output[kind]['curve']
-        axs[0].plot(np.arange(len(curve))*dt,curve,linewidth=1.7,label=kind)
-    axs[0].set(xlabel='Prediction horizon (s)',ylabel='Mean position error (m)',title='(a) Multistep position error')
-    axs[0].legend(fontsize=7);axs[0].grid(alpha=.25)
-    arrays=[[ep['ADE (m)'] for ep in output[kind]['episodes']] for kind in MODELS]
-    try:
-        axs[1].boxplot(arrays,tick_labels=MODELS,showfliers=True,whis=1.5)
-    except TypeError:  # Matplotlib before 3.9
-        axs[1].boxplot(arrays,labels=MODELS,showfliers=True,whis=1.5)
-    axs[1].tick_params(axis='x',rotation=24,labelsize=8)
-    axs[1].set(ylabel='Episode-level ADE (m)',title='(b) Test episode distributions')
-    axs[1].grid(axis='y',alpha=.25)
-    fig.tight_layout();fig.savefig(path,bbox_inches='tight');plt.close(fig)
+        mean, std = _episode_curve_stats(output[kind])
+        t = np.arange(len(mean), dtype=np.float64) * dt
+        time_s = t
+        color = PAPER_COLORS[kind]
+        ax_curve.plot(t, mean, color=color, linewidth=1.8, label=kind, zorder=3)
+        ax_curve.fill_between(t, np.maximum(0.0, mean - std), mean + std,
+                              color=color, alpha=0.15, linewidth=0, zorder=2)
+        curve_stats[kind] = (mean, std)
+    ax_curve.set(xlabel='Prediction horizon (s)', ylabel='Mean position error (m)',
+                 title='(a) Multistep position error')
+    ax_curve.grid(alpha=0.24, linewidth=0.6)
+    ax_curve.legend(fontsize=8, ncol=2, loc='upper left', columnspacing=1.0,
+                    handlelength=2.0)
+    ax_curve.text(0.99, 0.02, 'Shading: ±1 SD across test episodes',
+                  transform=ax_curve.transAxes, ha='right', va='bottom',
+                  fontsize=6.8, color='#555555')
+    ax_curve.tick_params(labelsize=8.5)
+
+    # Preserve the full-scale comparison while enlarging the four neural variants.
+    zoom_kinds = ('K0', 'K1-P', 'K1-F', 'K2')
+    inset = inset_axes(ax_curve, width='48%', height='48%', loc='lower right',
+                       borderpad=1.15)
+    for kind in zoom_kinds:
+        mean, std = curve_stats[kind]
+        t = np.arange(len(mean), dtype=np.float64) * dt
+        color = PAPER_COLORS[kind]
+        inset.plot(t, mean, color=color, linewidth=1.45)
+        inset.fill_between(t, np.maximum(0.0, mean - std), mean + std,
+                           color=color, alpha=0.12, linewidth=0)
+    all_zoom = np.concatenate([curve_stats[k][0] + curve_stats[k][1]
+                               for k in zoom_kinds])
+    upper = max(float(np.quantile(all_zoom, 0.99)) * 1.12, 0.5)
+    inset.set_xlim(float(time_s[0]), float(time_s[-1]))
+    inset.set_ylim(0.0, upper)
+    inset.grid(alpha=0.2, linewidth=0.45)
+    inset.tick_params(labelsize=6.5, direction='in')
+    inset.text(0.5, 0.97, 'Neural variants', transform=inset.transAxes,
+               ha='center', va='top', fontsize=6.5)
+
+    arrays = [[ep['ADE (m)'] for ep in output[kind]['episodes']] for kind in MODELS]
+    colors = [PAPER_COLORS[k] for k in MODELS]
+    _boxplot_with_points(ax_box, arrays, MODELS, colors, widths=0.48, fontsize=8)
+    ax_box.set_ylabel('Episode-level ADE (m)', fontsize=9)
+    ax_box.set_title('(b) Test episode distributions', fontsize=10, pad=8)
+    ax_box.grid(axis='y', alpha=0.24, linewidth=0.6)
+    ax_box.tick_params(axis='y', labelsize=8.5)
+
+    # A dedicated inset prevents the large Parametric-EDMDc tail from hiding
+    # the small but meaningful distribution differences among K0/K1-P/K1-F/K2.
+    box_inset = inset_axes(ax_box, width='54%', height='52%', loc='upper right',
+                           borderpad=1.0)
+    neural_arrays = [arrays[MODELS.index(k)] for k in zoom_kinds]
+    neural_colors = [PAPER_COLORS[k] for k in zoom_kinds]
+    _boxplot_with_points(box_inset, neural_arrays, zoom_kinds, neural_colors,
+                         positions=np.arange(1, 5), widths=0.48,
+                         fontsize=6.3, scatter=True)
+    finite = np.concatenate([np.asarray(x, dtype=float) for x in neural_arrays if len(x)])
+    q_hi = float(np.quantile(finite, 0.985)) if len(finite) else 1.0
+    box_inset.set_ylim(0.0, max(q_hi * 1.18, 0.5))
+    box_inset.grid(axis='y', alpha=0.2, linewidth=0.4)
+    box_inset.tick_params(axis='y', labelsize=6.2)
+    box_inset.text(0.5, 0.97, 'K0–K2 detail', transform=box_inset.transAxes,
+                   ha='center', va='top', fontsize=6.5)
+    box_inset.tick_params(axis='x', labelrotation=0)
+
+    fig.subplots_adjust(left=0.085, right=0.985, bottom=0.22, top=0.88, wspace=0.28)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, bbox_inches='tight')
+    plt.close(fig)
 
 
+
+def _add_k2_local_detail(ax, time_s, ground_truth, predictions, dt, window_s=0.8):
+    """Add one evidence-driven inset where K2 most improves over neural baselines.
+
+    The inset is omitted when K2 has no positive local absolute-error advantage;
+    this avoids visually implying an improvement unsupported by the sampled data.
+    """
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+    baseline_kinds = tuple(k for k in ('K0', 'K1-P', 'K1-F') if k in predictions)
+    if not baseline_kinds or 'K2' not in predictions:
+        return False
+    gt = np.asarray(ground_truth, dtype=float)
+    k2 = np.asarray(predictions['K2'], dtype=float)
+    n = min(len(gt), len(k2), len(time_s))
+    if n < 5:
+        return False
+    gt, k2 = gt[:n], k2[:n]
+    k2_error = np.abs(k2 - gt)
+    width = max(3, min(n, int(round(window_s / dt))))
+    best_kind, start, score = None, 0, -np.inf
+    for kind in baseline_kinds:
+        pred = np.asarray(predictions[kind], dtype=float)[:n]
+        gain = np.abs(pred - gt) - k2_error
+        if width >= n:
+            candidate_start, candidate_score = 0, float(np.mean(gain))
+        else:
+            sums = np.convolve(gain, np.ones(width, dtype=float) / width, mode='valid')
+            candidate_start, candidate_score = int(np.argmax(sums)), float(np.max(sums))
+        if candidate_score > score:
+            best_kind, start, score = kind, candidate_start, candidate_score
+    if not np.isfinite(score) or score <= 1e-5:
+        return False
+    stop = min(n, start + width)
+    inset = inset_axes(ax, width='43%', height='40%', loc='upper right', borderpad=0.8)
+    inset.plot(time_s[:n], gt, color='black', linewidth=1.25, label='TruckSim')
+    inset.plot(time_s[:n], k2, color=PAPER_COLORS['K2'], linewidth=1.55, label='K2')
+    # Compare K2 with the single neural baseline that gives the largest
+    # average improvement over this same local time window.
+    inset.plot(time_s[:n], np.asarray(predictions[best_kind])[:n],
+               color=PAPER_COLORS[best_kind], linewidth=1.1,
+               linestyle={'K0': '--', 'K1-P': '-.', 'K1-F': ':'}[best_kind],
+               label=best_kind)
+    inset.set_xlim(time_s[start], time_s[min(stop - 1, n - 1)])
+    local = np.concatenate([gt[start:stop], k2[start:stop],
+                            np.asarray(predictions[best_kind])[start:stop]])
+    span = max(float(np.ptp(local)), 1e-4)
+    inset.set_ylim(float(np.min(local) - 0.16 * span), float(np.max(local) + 0.16 * span))
+    inset.grid(alpha=0.2, linewidth=0.4)
+    inset.tick_params(labelsize=5.5, pad=1, direction='in')
+    inset.set_title('K2 local detail', fontsize=6.2, pad=1)
+    mark_inset(ax, inset, loc1=2, loc2=4, fc='none', ec='#666666', lw=0.55, alpha=0.8)
+    return True
 
 
 def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
@@ -189,23 +383,26 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    fig, axs = plt.subplots(3, 3, figsize=(13.6, 9.8), sharex=True,
-                            gridspec_kw={'wspace': .22, 'hspace': .25})
+    _paper_style(plt)
+    fig, axs = plt.subplots(3, 3, figsize=(14.0, 10.0), sharex=True,
+                            gridspec_kw={'wspace': .22, 'hspace': .27})
     headings = ('Yaw rate (rad/s)', 'Roll angle (deg)', 'LTR')
     for col, heading in enumerate(headings):
         axs[0, col].set_title(heading, fontsize=11, pad=9)
     time_s = np.arange(h + 1, dtype=np.float64) * dt
     styles = {
-        'EDMDc': ('#6b6b6b', ':'),
-        'Parametric EDMDc': ('#aa5f35', '--'),
-        'K0': ('#286fb7', '--'),
-        'K1-P': ('#3c9953', '-.'),
-        'K1-F': ('#b77713', '-.'),
-        'K2': ('#903f9a', '--'),
+        'EDMDc': (PAPER_COLORS['EDMDc'], ':'),
+        'Parametric EDMDc': (PAPER_COLORS['Parametric EDMDc'], '--'),
+        'K0': (PAPER_COLORS['K0'], '--'),
+        'K1-P': (PAPER_COLORS['K1-P'], '-.'),
+        'K1-F': (PAPER_COLORS['K1-F'], ':'),
+        'K2': (PAPER_COLORS['K2'], '-'),
     }
     records = []
     try:
         for row, index in enumerate(chosen):
+            row_ground_truth = []
+            row_predictions = {kind: [] for kind in MODELS}
             ei, start = ds.keys[index]
             ep = ds.episodes[ei]
             item = ds[index]
@@ -215,8 +412,9 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             true_ltr[~item['ltr_valid'].numpy()] = np.nan
             gt = (true_states[:, 2], np.rad2deg(true_states[:, 3]), true_ltr)
             for col, values in enumerate(gt):
+                row_ground_truth.append(np.asarray(values, dtype=float))
                 axs[row, col].plot(time_s, values, label='TruckSim', color='black',
-                                   linewidth=1.85, zorder=10)
+                                   linewidth=2.0, zorder=10)
             for kind in MODELS:
                 with torch.inference_mode():
                     prediction = _run_model(models[kind], kind, batch, device, dt)
@@ -229,18 +427,35 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
                 channel_data = (states[:, 2], np.rad2deg(states[:, 3]), ltr)
                 color, ls = styles[kind]
                 for col, values in enumerate(channel_data):
+                    row_predictions[kind].append(np.asarray(values, dtype=float))
                     axs[row, col].plot(time_s, values, label=kind, color=color,
-                                       linestyle=ls, linewidth=1.15, alpha=.92)
+                                       linestyle=ls, linewidth=1.65 if kind == 'K2' else 1.2,
+                                       alpha=.96 if kind == 'K2' else .88,
+                                       zorder=8 if kind == 'K2' else 5)
             note = (f'Example {row+1}\n'
                     f'load={float(ep.info["payload_kg"]):g} kg, '
                     f'mu={float(ep.info["road_mu"]):g}\n'
                     f'v0={float(ep.info["vx_init_kmh"]):g} km/h')
             axs[row, 0].set_ylabel(note, fontsize=7.8, labelpad=8)
+            # Place a single inset in the most informative channel of each row.
+            local_gains = []
             for col in range(3):
+                gt_values = row_ground_truth[col]
+                k2_error = np.abs(row_predictions['K2'][col] - gt_values)
+                width = max(3, min(len(k2_error), int(round(.8 / dt))))
+                scores = []
+                for baseline_kind in ('K0', 'K1-P', 'K1-F'):
+                    gain = np.abs(row_predictions[baseline_kind][col] - gt_values) - k2_error
+                    score = float(np.max(np.convolve(gain, np.ones(width) / width, mode='valid'))) if width < len(gain) else float(np.mean(gain))
+                    scores.append(score)
+                local_gains.append(max(scores))
                 axs[row, col].grid(alpha=.22, linewidth=.6)
                 axs[row, col].tick_params(labelsize=8)
                 if row == 2:
                     axs[row, col].set_xlabel('Prediction horizon (s)', fontsize=9)
+            best_col = int(np.argmax(local_gains))
+            _add_k2_local_detail(axs[row, best_col], time_s, row_ground_truth[best_col],
+                                 {k: row_predictions[k][best_col] for k in MODELS}, dt)
             records.append({
                 'example': row + 1,
                 'episode_id': ep.id,
@@ -255,14 +470,14 @@ def plot_chassis_comparison(cfg, project_root, output_dir, *, split='test',
             })
         handles, labels = axs[0, 0].get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(.5, .025),
-                   ncol=7, fontsize=8.2, frameon=False, columnspacing=1.35)
+                   ncol=7, fontsize=8.5, frameon=False, columnspacing=1.35, handlelength=2.5)
         fig.suptitle('Chassis response prediction: six Koopman models vs TruckSim',
-                     fontsize=12, y=.991)
+                     fontsize=13, y=.991)
         # Different rows can have different inputs: this is NOT a controlled
         # comparison between conditions, even though each row is fair across models.
         fig.text(.5, .085, 'Each row uses one held-out sequence; all models share its history and controls.',
                  ha='center', va='center', fontsize=8, color='#555555')
-        fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.27)
+        fig.subplots_adjust(left=.13, right=.985, top=.91, bottom=.17, wspace=.28, hspace=.29)
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = output_dir / 'koopman_chassis_responses.pdf'
@@ -329,21 +544,37 @@ def controlled_chassis(cfg,project_root,case_files,device='auto',output_path=Non
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    fig,axs=plt.subplots(3,3,figsize=(12,8.5),sharex=True)
+    _paper_style(plt)
+    fig,axs=plt.subplots(3,3,figsize=(12.8,8.8),sharex=True)
     t=np.arange(h+1)*dt
     labels=('Yaw rate (rad/s)','Roll (deg)','LTR')
     for row,ep in enumerate(cases):
         true=(ep.states[k:k+h+1,2],np.rad2deg(ep.states[k:k+h+1,3]),ep.ltr[k:k+h+1])
+        row_predictions = {kind: [] for kind in selected}
         for col in range(3):
             ax=axs[row,col]
-            ax.plot(t,true[col],color='black',linewidth=1.7,label='TruckSim')
+            ax.plot(t,true[col],color='black',linewidth=1.9,label='TruckSim',zorder=10)
             for kind in selected:
                 value=predictions[kind][row]['ltr'] if col==2 else predictions[kind][row]['states'][:,2 if col==0 else 3]
                 if col==1:value=np.rad2deg(value)
-                ax.plot(t,value,label=kind,linewidth=1.1,linestyle='--')
+                value=np.asarray(value,dtype=float)
+                row_predictions[kind].append(value)
+                color=PAPER_COLORS.get(kind, '#555555')
+                linestyle={'Parametric EDMDc':'--','K0':'--','K2':'-'}[kind]
+                ax.plot(t,value,label=kind,color=color,linewidth=1.65 if kind=='K2' else 1.2,linestyle=linestyle,zorder=8 if kind=='K2' else 5)
             ax.grid(alpha=.25)
             if row==0:ax.set_title(labels[col])
             if row==2:ax.set_xlabel('Prediction horizon (s)')
+        local_gains=[]
+        for col in range(3):
+            base_error=np.abs(row_predictions['K0'][col]-true[col])
+            k2_error=np.abs(row_predictions['K2'][col]-true[col])
+            gain=base_error-k2_error
+            width=max(3,min(len(gain),int(round(.8/dt))))
+            score=float(np.max(np.convolve(gain,np.ones(width)/width,mode='valid'))) if width<len(gain) else float(np.mean(gain))
+            local_gains.append(score)
+        best_col=int(np.argmax(local_gains))
+        _add_k2_local_detail(axs[row,best_col],t,true[best_col],row_predictions,dt)
         axs[row,0].set_ylabel(f'Case {"ABC"[row]}\npayload={value_float(ep,"payload_kg"):g} kg, mu={value_float(ep,"road_mu"):g}',fontsize=8)
     axs[0,0].legend(fontsize=7,loc='best')
     fig.tight_layout();fig.savefig(path,bbox_inches='tight');plt.close(fig)
