@@ -122,8 +122,11 @@ def scenario_trucksim_config(koopman_cfg: dict, case: dict, num_egos: int,
             'exports': {
                 'ax_g': 0, 'ay_g': 1, 'vx_kmh': 2, 'vy_kmh': 3,
                 'x_m': 4, 'y_m': 5, 'roll_deg': 6,
-                'yaw_deg': 10, 'yaw_rate_deg_s': 11,
+                'body_p_deg_s': 7, 'pitch_deg': 8,
+                'body_q_deg_s': 9, 'yaw_deg': 10, 'yaw_rate_deg_s': 11,
                 'engine_rpm': 12, 'steer_left_deg': 13, 'steer_right_deg': 14,
+                # K2 online state extraction needs p, q, pitch and r to compute
+                # Euler roll rate consistently with koopman.data.processing.to_si.
                 # LTR is COMPUTED from wheel loads 15:19, never mislabel Fz as LTR.
             }
         },
