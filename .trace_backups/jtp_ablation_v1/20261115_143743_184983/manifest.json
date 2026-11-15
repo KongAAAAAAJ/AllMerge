@@ -1,0 +1,59 @@
+{
+  "version": "jtp_ablation_v1",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "files": {
+    "evaluation/ablation/jtp/__init__.py": {
+      "state": "create",
+      "sha256": "e0e6f565d09227d7b4a4565549dd4e44495ae3d5702d3d9f2669dfd14cfa118c"
+    },
+    "evaluation/ablation/jtp/data.py": {
+      "state": "create",
+      "sha256": "a94a7d6d4796d749347432b356c9ac661c13c5116d83b4d91b0f3735e76d814d"
+    },
+    "evaluation/ablation/jtp/metrics.py": {
+      "state": "create",
+      "sha256": "b55ac039481ae4da1f730bdf9c43094c674e4e0771f2bef28d9a96321ba2e7a1"
+    },
+    "evaluation/ablation/jtp/reporting.py": {
+      "state": "create",
+      "sha256": "3292aff383e0133d7b05eacc731ab8fec61bd439fb2537589a66b79bfbb69afd"
+    },
+    "evaluation/ablation/jtp/runner.py": {
+      "state": "create",
+      "sha256": "bb43b6e9a39033c644188d413c7aa5338f96ca5cc72749a175435e76b8b72f2c"
+    },
+    "evaluation/ablation/jtp/visualization.py": {
+      "state": "create",
+      "sha256": "e8db25a22a04162670e8cf5dc6d7f95af889d1b885827953394356523c02e721"
+    },
+    "evaluation/ablation/jtp/README.md": {
+      "state": "create",
+      "sha256": "bbd1a00ac68c18c964418e4f477f3cac1d8a18638012d14b1b0a80725fc9f102"
+    },
+    "evaluation/ablation/run_jtp.py": {
+      "state": "create",
+      "sha256": "fe88cb2f98cd828a255f4ed6d8a9574f1ded0e9842e2e827ccfa62db9a91c59c"
+    },
+    "configs/evaluation/jtp_ablation.yaml": {
+      "state": "create",
+      "sha256": "7197d2a35657365d59b8e23f21cd099e8f36c2f6bbcf63647ee3814cbd04ab09"
+    },
+    "tests/test_jtp_ablation.py": {
+      "state": "create",
+      "sha256": "ae990e93b0d3474dfb3bb9a34e977eff7fe9c62f35c056c470ceb9453f6abaaf"
+    }
+  },
+  "backups": [],
+  "new_files": [
+    "evaluation\\ablation\\jtp\\__init__.py",
+    "evaluation\\ablation\\jtp\\data.py",
+    "evaluation\\ablation\\jtp\\metrics.py",
+    "evaluation\\ablation\\jtp\\reporting.py",
+    "evaluation\\ablation\\jtp\\runner.py",
+    "evaluation\\ablation\\jtp\\visualization.py",
+    "evaluation\\ablation\\jtp\\README.md",
+    "evaluation\\ablation\\run_jtp.py",
+    "configs\\evaluation\\jtp_ablation.yaml",
+    "tests\\test_jtp_ablation.py"
+  ]
+}

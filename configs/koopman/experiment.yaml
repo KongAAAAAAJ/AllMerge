@@ -49,3 +49,6 @@ training:
 outputs:
   checkpoints: outputs/koopman/checkpoints/v0
   evaluation: outputs/koopman/evaluation/v0
+
+
+
