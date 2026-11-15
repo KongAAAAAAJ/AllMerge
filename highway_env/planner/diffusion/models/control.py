@@ -346,6 +346,9 @@ class ControlDiffusionPlanner(nn.Module):
             'trajectory_candidates': poses_all[:, :, 5::5, :2],
             'trajectory_mode_logits': scores,
             'trajectory_mode_idx': mode,
+            # Expose the actual post-anchor-selection validity mask so an
+            # evaluator cannot count invalid candidate modes as minADE/FDE.
+            'trajectory_candidate_valid_mask': features['mode_valid_mask'],
             'speeds': speeds,
         }
         if pred['ltr'] is not None:

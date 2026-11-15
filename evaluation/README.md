@@ -1,30 +1,13 @@
-# Offline evaluation
+# TRACE evaluation
 
-Run these commands from the project root (`all_merge/`). Evaluation entry
-points and shared evaluation modules live together in this package.
+**Current entry point:** `python -m evaluation.eval_diffusion_open_loop` now
+loads a TRACE **control-space** Diffusion checkpoint and scores its frozen-K2
+40-step trajectories; it no longer loads W2 trajectory checkpoints. See
+[`trace_planning/README.md`](trace_planning/README.md) for open-loop and
+actual TruckSim closed-loop evaluation procedures.
 
-| File | Purpose | Command |
-| --- | --- | --- |
-| `eval_diffusion_open_loop.py` | Diffusion checkpoint ADE/FDE and mode metrics | `python -m evaluation.eval_diffusion_open_loop --help` |
-| `ablation/run_anchor.py` | Paper adaptive-anchor ablation | `python evaluation/ablation/run_anchor.py --help` |
-| `ablation/run_fuel_aware.py` | Paper fuel-aware training ablation | `python evaluation/ablation/run_fuel_aware.py --help` |
-| `validate_jtp_single_vehicle.py` | Offline single-vehicle control diffusion + frozen K2 + JTP validation | `python -m evaluation.validate_jtp_single_vehicle --help` |
-| `expert_dataset_validation.py` | Expert dataset validation | `python -m evaluation.expert_dataset_validation --help` |
-| `legacy_open_loop_cli.py` | Legacy open-loop evaluation CLI | `python -m evaluation.legacy_open_loop_cli --help` |
-| `open_loop_eval.py` | Shared open-loop evaluation implementation | Imported by evaluation entry points |
-| `open_loop_metrics.py` | Shared evaluation metrics | Imported by evaluation modules |
-| `open_loop_visualization.py` | Evaluation plots and visualizations | Imported by evaluation modules |
-
-The evaluation entry points also support direct execution, for example:
-
-```powershell
-python evaluation/eval_diffusion_open_loop.py --help
-python evaluation/ablation/run_anchor.py --help
-python evaluation/ablation/run_fuel_aware.py --help
-python evaluation/validate_jtp_single_vehicle.py --help
-```
-
-Arguments and output locations are unchanged by this directory merge.
-The two main paper ablations are centralized under `evaluation/ablation/`;
-see [ablation/README.md](ablation/README.md) for commands and module ownership.
-Koopman evaluation remains under `highway_env/vehicle/koopman/evaluation/`.
+`evaluation/ablation/` retains the existing Anchor and Fuel experiments.
+`legacy_open_loop_cli.py`, `open_loop_eval.py`, `open_loop_metrics.py` and
+`open_loop_visualization.py` remain in place strictly for historical
+trajectory-space experiment compatibility. They are not used by TRACE and
+should not be used for the proposed paper's comparison table.

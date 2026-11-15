@@ -1,0 +1,38 @@
+# TRACE evaluation-only protocol; training model and physical fuel parameters
+# are read from configs/train/diffusion.yaml, architecture from .pt checkpoint.
+# Command-line options override these defaults.
+open_loop:
+  split: val
+  num_samples: 0             # complete validation split
+  batch_size: 8
+  num_workers: 0
+  device: auto
+  seeds: "0,1,2,3,4"
+  output_dir: outputs/evaluation/trace_open_loop
+  jtp_config: configs/projection/jtp.yaml
+
+closed_loop:
+  scenarios: straight,curved,merge_in,merge_out # 4 classes present; do NOT call these paper's five scenarios
+  method: TRACE
+  episodes: 10
+  seed_start: 0
+  trucksim_case: L4_MU08   # payload 3500 kg, mu 0.8; adjust for other conditions
+  koopman_config: configs/koopman/collect.yaml
+  jtp_config: configs/projection/jtp.yaml
+  jtp_runtime_config: configs/projection/jtp_runtime.yaml
+  duration: 5.0
+  group_action: 3
+  output_dir: outputs/evaluation/trace_closed_loop
+
+comparison:
+  figure_seed: 0
+  figure_scenarios: straight,merge_in,curved # only existing scenario classes
+  output_dir: outputs/evaluation/trace_comparison
+
+# Paper's proposed, but NOT yet registered in this code snapshot:
+paper_requirements:
+  expected_methods: [Expert Planner, Cooperative OCP, TransFuser, TRACE]
+  scenario_count: 5
+  representative_figure_scenarios: [emergency_braking, ramp_merging, lane_narrowing]
+  metrics: [success_pct, collision_pct, stability_violation_pct,
+            spacing_error_m, fuel_l_per_100km, planning_time_ms]
