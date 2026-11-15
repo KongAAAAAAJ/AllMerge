@@ -1,108 +1,120 @@
 # TRACE Ablation 3: Joint Trajectory Projection
 
-This sibling package to `evaluation/ablation/anchor_ablation/` and
-`evaluation/ablation/fuel_aware/` evaluates **Baseline = one frozen control
-Diffusion/K2 rollout**, and **Ours = JTP applied to that *same* selected
-control sequence and execution trajectory**. No checkpoint is retrained, and
-there is no separately seeded second inference for Ours.
+This evaluation compares **Baseline**, the raw output of one frozen control
+Diffusion/K2 inference, with **Ours**, the result returned by the same inference
+after applying the current Active-set Weighted Joint Jacobian Projection (JTP).
+No checkpoint is retrained, and Baseline/Ours use identical nominal controls
+within each synchronized frame and inference seed.
 
 ## Commands
 
 Run from the `all_merge/` worktree root:
 
 ```bash
-# Smoke test after placing the control K2 checkpoint and expert dataset at the configured paths
+# Smoke test
 python evaluation/ablation/run_jtp.py \
   --checkpoint outputs/trace_control_koopman_d2/best.pt \
   --num-frames 3 --seeds 0
 
-# Formal multi-seed offline analysis. Check limits first.
+# Formal multi-seed offline evaluation
 python evaluation/ablation/run_jtp.py \
   --checkpoint outputs/trace_control_koopman_d2/best.pt \
   --num-frames 100 --seeds 0,1,2,3,4 \
   --split test
 
-# Reject a solver that does not implement the full Section-V method
-python evaluation/ablation/run_jtp.py \
-  --checkpoint outputs/trace_control_koopman_d2/best.pt \
-  --require-paper-solver
-
+# Verify that partial JTP iterates are retained and exceptions are not hidden
 python -m pytest -q tests/test_jtp_ablation.py
 ```
 
 Use `--config configs/evaluation/jtp_ablation.yaml` or pass different paths
-with `--dataset-root`, `--jtp-config`, `--diffusion-config`, `--output-dir`.
-`--num-frames 0` uses all complete synchronized frames; default picks 100
-complete frames with a fixed sampling seed. The shared dataset is required to
-include `episode_index`, `frame_index`, `ego_index`, synchronized K2 history,
-and paired control anchors. No mixing of incomplete multi-truck frames.
+with `--dataset-root`, `--jtp-config`, `--diffusion-config`, and `--output-dir`.
+`--num-frames 0` uses all complete synchronized frames; the default selects 100
+complete frames with a fixed sampling seed. The dataset must include
+`episode_index`, `frame_index`, `ego_index`, synchronized K2 history, and paired
+control anchors. Incomplete multi-truck frames are excluded by the shared
+complete-frame selector.
 
-## Source-to-paper contract
+## Projection method and output contract
 
-- `runner.py`: one Diffusion selected-mode inference per frame/seed,
-  identical nominal controls and world-frame K2 execution in both arms;
-  synchronized N-truck JTP; exact fallback to nominal on solver failure.
-- `data.py`: reuses the existing Anchor evaluation complete-frame selector;
-  constructs same-road road corridor with full truck footprint; collects
-  noncontrolled surrounding actors across all controlled trucks; constant
-  world velocity and fixed yaw (the same CV assumption as Anchor scoring).
-- `metrics.py`: independently checks every step's yaw, beta, roll, LTR;
-  road/circle and curvature; full-circle pairwise intertruck and external
-  collision; acceleration/steering magnitude and **rate**, including the
-  previous observed control node. Collision checks include future samples
-  `t=0.1..4.0 s`; the initial t=0 pose is not controllable.
-- `reporting.py`: IEEE two-row paper table, per vehicle/seed CSVs, status and
-  solver diagnostics, paired deltas and cluster bootstrap confidence intervals
-  resampled by *physical* episode/frame (all seeds/trucks preserved).
-- `visualization.py`: six plots in the exact paper order: (a) global XY,
-  (b) detail and correction arrow, (c) curvature, (d) yaw rate,
-  (e) roll angle, (f) LTR. The scene is fixed-random, **not** selected for
-  largest improvement.
+- `joint_projector.py`: active-set, violation-weighted minimum-norm Jacobian
+  projection in the joint control space of all trucks. The local metric
+  approximates trajectory deviation under the frozen Koopman execution map.
+- `constraints.py` and `geometry.py`: full-horizon yaw-rate, sideslip, roll,
+  LTR, road-boundary, curvature, and control-magnitude residuals.
+- External-actor and inter-truck collision avoidance are handled upstream by
+  Adaptive Anchor scoring/selection. Control-rate constraints are not included
+  in the current lightweight JTP update.
+- Each sample always uses the controls and Koopman rollout returned by JTP.
+  The evaluator never replaces an infeasible or partially improved JTP result
+  with the nominal Diffusion output. If projection raises an exception or the
+  road geometry is invalid, evaluation stops and reports the error; the sample
+  is not silently skipped or relabeled as a JTP result.
+- `projector_constraints_satisfied` is only a diagnostic flag for the constraint
+  families implemented inside JTP. It is not the paper-level joint feasibility
+  metric. A returned JTP result can be partially improved while this flag is
+  false. The algorithm's best accepted iterate is retained.
+- `projection_applied` means that a vehicle's normalized control correction
+  exceeds `projection.change_tolerance`. A zero correction can occur when the
+  nominal output already satisfies the projector's internal constraints or
+  when no candidate update improves the projection merit.
 
-The metric **denominators are explicitly separated**:
+## Paper metrics and supplementary diagnostics
 
-- Joint Feas. (%): percent of synchronized **N-truck frame/seed plans** for
-  which *all trucks jointly* meet every stability, geometry, collision,
-  control and rate constraint; one joint plan counts once.
-- Geometric Viol. (%): percent of individual truck trajectories with any
-  road/curvature violation.
-- Stability Viol. (%): percent of individual truck trajectories with any
-  yaw/beta/roll/LTR violation.
-- Deviation (m): average over vehicles of mean t=1..H Euclidean XY deviation
-  from *that same* original K2 execution trajectory. Baseline is N/A.
+The four finalized paper metrics remain unchanged:
 
-Other columns (collision and control rates, success/fallback, runtime) remain
-in CSV and summary for traceability, but are not added to the four-column
-paper table.
+1. **Joint Feasibility (%)**: percentage of synchronized N-truck frame/seed
+   plans for which every controlled vehicle satisfies all independently
+   evaluated stability, geometry, collision, control-magnitude, and
+   control-rate constraints over the full prediction horizon. Each complete
+   formation plan counts once.
+2. **Geometric Violation (%)**: percentage of individual truck trajectories
+   with any road-boundary or curvature violation over the full horizon.
+3. **Stability Violation (%)**: percentage of individual truck trajectories
+   with any yaw-rate, sideslip, roll-angle, or LTR violation over the full
+   horizon.
+4. **Mean Trajectory Deviation (m)**: average over vehicles of the mean
+   pointwise XY distance at `t=1..H` between the JTP execution trajectory and
+   that same sample's nominal K2 execution trajectory. Baseline is N/A.
 
-## Critical solver compatibility warning
+The method change from SCP-QP to Jacobian projection does **not** change these
+outcome metrics. The obsolete **Projection/Solver Success Rate is removed**:
+the current method does not invoke a constrained optimization solver, and
+its internal constraint flag is not equivalent to full-plan feasibility.
 
-**As inspected in `AllMerge-main (3).zip` on 2026-11-15:** the current
-`projection/joint_solver.py` implements an active-set weighted Jacobian
-correction, explicitly *not* the final paper's SCP joint quadratic program.
-Its own `success` check excludes collision and control-rate constraints.
-Moreover, `evaluation/validate_jtp_single_vehicle.py` currently imports an
-`ExternalTraffic` symbol absent from `projection/types.py`. This new
-self-contained ablation avoids that broken script.
+The CSV and JSON outputs additionally report collision and control-magnitude/
+control-rate violation rates, normalized constraint-excess magnitudes,
+projection-applied rate, normalized control-correction magnitude, projection
+latency, and projection iterations. These diagnostics quantify partial
+improvements even when a sample remains infeasible; they are not substitutes
+for the four primary paper metrics.
 
-Therefore **the baseline and Ours CSV metrics are honest full-constraint
-measurements of the current implementation**, but the output
-`projection_ablation_table.tex` and PDF are *watermarked DIAGNOSTIC ONLY*
-until an updated JTP solver explicitly advertises all capabilities via
-`JointTrajectoryProjector.PAPER_JTP_CAPABILITIES`, and independent tests verify
-those behaviors. `--require-paper-solver` raises immediately if any are
-missing. The manifest also lists the missing capabilities.
+## Evaluation protocol
 
-## Numerical parameters
+- One complete synchronized N-truck frame is the statistical unit.
+- Baseline and Ours share the exact same raw Diffusion inference for each
+  frame/seed pair.
+- Stability and geometric constraints are checked for every future step of
+  every vehicle. Inter-truck collision is checked jointly across the formation;
+  external collision is checked against constant-velocity actor predictions.
+- Paired confidence intervals use cluster bootstrap over physical
+  episode/frame clusters, preserving all inference seeds and trucks within
+  each sampled cluster.
+- The evaluation is offline expert-data open loop. It does not measure
+  TruckSim closed-loop task success, executed spacing, fuel, or physical
+  closed-loop stability.
 
-The 2026-11-15 source does not supply calibrated experimental values for
-`collision_clearance_m`, `acceleration_rate_max_mps3`, or
-`steering_rate_max_rad_s`. The evaluation YAML contains **explicit provisional
-engineering defaults** solely for diagnostics; **they are not claimed to be
-values from the finalized paper**. Review and freeze them alongside the JTP
-stability/geometry/control YAML before collecting publication-quality results.
-The default geometry/vehicle assumptions also require confirming the road
-map representation and footprint dimensions for the actual dataset.
+## Outputs
 
-The module does not edit `anchor_ablation`, `fuel_aware`, the trained model,
-Koopman weights, the JTP solver, or any runtime inference behavior.
+- `jtp_per_vehicle.csv`: paired per-vehicle outcomes and projection diagnostics.
+- `jtp_per_seed.csv`: per-seed summaries.
+- `jtp_summary.csv`: aggregate metrics for Baseline and Ours.
+- `jtp_paired_statistics.json`: paired differences and cluster-bootstrap CIs.
+- `jtp_projection_diagnostics.json`: per-frame projection status, internal
+  constraint status, correction magnitudes, iteration counts, and latency.
+- `projection_ablation_table.tex`: four-metric paper table.
+- `projection_ablation.pdf` / `.png`: trajectory and full-horizon response plot.
+- `jtp_manifest.json`: checkpoint/config hashes, metric definitions, and
+  evaluation provenance.
+
+Numerical limits in `configs/evaluation/jtp_ablation.yaml` and
+`configs/projection/jtp.yaml` must be checked and frozen before publication.

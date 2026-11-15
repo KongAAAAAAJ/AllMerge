@@ -237,7 +237,7 @@ def evaluate_single_preprojection(plan: Mapping, cfg: Mapping, *, dt: float = 0.
     """Evaluate the selected diffusion execution trajectory before MATP.
 
     Implements the original nonlinear checks described in TRACE Section V.
-    It does not run the QP/SCP projector and does not alter controls or poses.
+    It does not run the JTP projector and does not alter controls or poses.
     """
     poses = np.asarray(plan["poses"], dtype=np.float64)
     controls = np.asarray(plan["controls"], dtype=np.float64)

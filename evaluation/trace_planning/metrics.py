@@ -164,6 +164,7 @@ def summarize_closed_loop_rows(rows: list[dict]) -> dict:
         'spacing_error_m':total_gap_abs/total_gap_n,
         'fuel_l_per_100km':100000.*total_fuel/total_distance,
         'planning_time_ms':total_time_ms/max(1,total_time_count),
-        'jtp_execution_fraction':float(sum(int(r.get('jtp_executed_steps',0)) for r in rows)/
-                                       max(1,sum(int(r.get('planning_steps',0)) for r in rows))),
+        'jtp_post_warmup_execution_fraction':float(
+            sum(int(r.get('jtp_projected_control_steps', 0)) for r in rows) /
+            max(1, sum(max(0, int(r.get('planning_steps', 0)) - 4) for r in rows))),
     }

@@ -78,3 +78,4 @@ projection:
   merit_penalty: 1000.0
   merit_tolerance: 1.0e-7
   minimum_violation_improvement: 1.0e-6
+  change_tolerance: 1.0e-6  # normalized control correction used only for projection-applied diagnostics

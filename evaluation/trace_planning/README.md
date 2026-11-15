@@ -79,12 +79,13 @@ python -m evaluation.trace_planning.closed_loop ^
 
 `closed_loop.py` writes one `.json` and one `.npz` per episode, `episodes.csv`
 and `closed_loop_summary.json` if and only if the entire set was evaluated
-successfully. A failed native episode aborts aggregation. TRACE must execute
-actual JTP control pairs: the initial four 10-Hz history samples use Polynomial
-warmup; any **post-warmup** JTP failure triggers a Polynomial fallback and the
-canonical summary refuses to call this pure TRACE. If intentionally studying
-a hybrid fallback policy, pass `--allow-fallback` to collect diagnostic data;
-**do not** report it as a pure TRACE comparison.
+`closed_loop.py` writes one `.json` and one `.npz` per episode, `episodes.csv`
+and `closed_loop_summary.json` if and only if the entire set was evaluated
+successfully. TRACE executes every control sequence returned by JTP after
+the initial four 10-Hz K2 history warmup samples. Projector-internal constraint
+violations do not trigger a switch to nominal Diffusion or Polynomial control.
+A JTP exception aborts the episode; no fallback or hybrid policy is implemented
+or accepted in the TRACE comparison.
 
 ### 3. Comparison table and figure
 

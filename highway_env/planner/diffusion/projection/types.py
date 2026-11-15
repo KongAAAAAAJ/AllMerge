@@ -46,11 +46,16 @@ class RoadGeometry:
 
 @dataclass
 class JTPResult:
+    """Best accepted JTP iterate and its Koopman execution rollout.
+
+    ``projector_constraints_satisfied`` refers only to constraint families
+    implemented inside JTP. Full-platoon feasibility is evaluated separately.
+    """
     controls: torch.Tensor
     trajectories: torch.Tensor
     states: torch.Tensor
     ltr: torch.Tensor
-    success: bool
+    projector_constraints_satisfied: bool
     status: str
     iterations: int
     diagnostics: dict

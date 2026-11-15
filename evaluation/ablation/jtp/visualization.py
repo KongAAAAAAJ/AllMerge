@@ -5,8 +5,7 @@ from pathlib import Path
 import numpy as np
 
 
-def draw_projection_figure(path: Path, figure: dict, *, dt: float, kappa_lim: float,
-                           paper_ready: bool):
+def draw_projection_figure(path: Path, figure: dict, *, dt: float, kappa_lim: float):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -84,9 +83,6 @@ def draw_projection_figure(path: Path, figure: dict, *, dt: float, kappa_lim: fl
             ax.plot(times,lim_p,c='#777777',ls='-.',label='JTP limit')
         ax.set(title=title,xlabel='Time (s)',ylabel=ylabel);ax.grid(alpha=.2)
     kappa_ax.legend(fontsize=8,ncol=3);yaw_ax.legend(fontsize=8,ncol=3)
-    if not paper_ready:
-        fig.suptitle('DIAGNOSTIC ONLY: current JTP omits joint QP, collision and rate constraints',
-                     fontsize=10,color='#a33a20')
     path.parent.mkdir(parents=True,exist_ok=True)
     fig.savefig(path,bbox_inches='tight')
     fig.savefig(path.with_suffix('.png'),dpi=220,bbox_inches='tight')

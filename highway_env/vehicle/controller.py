@@ -1710,15 +1710,15 @@ class FOLLOWVehicle(ControlledVehicle):
         if planner is not None and planner["state"] is True:
             diffusion_config = planner.get("Diffusion", {})
 
-            # TRACE_JTP_CONTROL_EXECUTION_V1: execute the first verified
-            # projected control pair. A failed/warming-up projection falls
-            # through to the existing Polynomial controller below.
+            # TRACE_JTP_CONTROL_EXECUTION_V2: execute the first control pair
+            # returned by JTP, regardless of projector-internal feasibility.
+            # Projection exceptions propagate; no nominal/Polynomial fallback
+            # is selected after a JTP call has been attempted.
             jtp_control_enabled = bool(
                 diffusion_config.get("jtp_control_execution_enabled", False)
             )
             jtp_controls = getattr(self, "latest_diffusion_control_sequence", None)
-            jtp_success = bool(getattr(self, "latest_diffusion_jtp_success", False))
-            if jtp_control_enabled and jtp_success and jtp_controls is not None:
+            if jtp_control_enabled and jtp_controls is not None:
                 jtp_controls = np.asarray(jtp_controls, dtype=np.float32)
                 if jtp_controls.ndim != 2 or jtp_controls.shape[0] < 1 or jtp_controls.shape[1] != 2:
                     raise RuntimeError(
@@ -1731,6 +1731,8 @@ class FOLLOWVehicle(ControlledVehicle):
                 path = {
                     "source": "Diffusion-Joint-Trajectory-Projection-Control",
                     "jtp_status": getattr(self, "latest_diffusion_jtp_status", "unknown"),
+                    "projector_constraints_satisfied": bool(getattr(
+                        self, "latest_diffusion_jtp_projector_constraints_satisfied", False)),
                 }
                 self.latest_planner_trajectory = None
 

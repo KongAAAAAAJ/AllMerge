@@ -50,7 +50,7 @@ def road_corridor_residual(
     """Two-sided road-boundary residuals for all footprint circles and t=1..H.
 
     Each residual must be <= 0. The closest corridor and polyline segment are
-    selected from the current SCP iterate and held fixed during linearization.
+    selected from the current JTP projection iterate and held fixed during local linearization.
     """
     centers = footprint_circle_centers(poses[1:], torch.as_tensor(
         circle_offsets_m, device=poses.device, dtype=poses.dtype))

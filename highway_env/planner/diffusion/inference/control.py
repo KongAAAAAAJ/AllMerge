@@ -73,7 +73,7 @@ class ControlDiffusionRuntime:
 
     @classmethod
     def _apply_jtp_result(cls, prediction, jtp_result, context, dt_s=0.1):
-        """Replace selected nominal output with the verified JTP solution.
+        """Replace nominal output with the controls and rollout returned by JTP.
 
         JTP returns world-frame poses; the public Diffusion runtime contract is
         ego-at-planning-time local coordinates. The conversion keeps the
@@ -150,12 +150,14 @@ class ControlDiffusionRuntime:
 
         nominal_control = prediction['control'].detach().clone()
         nominal_dense = prediction['trajectory_dense'].detach().clone()
-        jtp_success = False
+        jtp_constraints_satisfied = False
+        jtp_projection_returned = False
+        jtp_applied = False
         jtp_status = 'disabled' if not self.jtp_enabled else 'not_run'
-        jtp_error = None
         jtp_diagnostics = {}
         jtp_iterations = 0
         self.last_jtp_latency_ms = 0.0
+        jtp_control_delta_norm = 0.0
 
         if self.jtp_enabled:
             if not isinstance(jtp_inputs, dict) or not jtp_inputs.get('ready', False):
@@ -166,28 +168,30 @@ class ControlDiffusionRuntime:
             if 'road_geometry' not in jtp_inputs:
                 raise KeyError('JTP runtime inputs are missing road_geometry')
             jtp_start = time.perf_counter()
-            try:
-                projected = self.jtp_projector.project(
-                    nominal_controls=nominal_control,
-                    context=context,
-                    road_geometry=jtp_inputs['road_geometry'],
-                )
-                jtp_status = str(projected.status)
-                jtp_success = bool(projected.success)
-                jtp_iterations = int(projected.iterations)
-                jtp_diagnostics = dict(projected.diagnostics or {})
-                if jtp_success:
-                    prediction = self._apply_jtp_result(
-                        prediction, projected, context,
-                        dt_s=float(self.model.ctrl_cfg.dt))
-                # On failure, preserve the unmodified nominal Diffusion output.
-                # The caller receives an explicit failure status and can use
-                # its existing controller rather than treating this path safe.
-            except Exception as exc:
-                jtp_status = 'projection_exception'
-                jtp_error = f'{type(exc).__name__}: {exc}'
-                jtp_success = False
+            projected = self.jtp_projector.project(
+                nominal_controls=nominal_control,
+                context=context,
+                road_geometry=jtp_inputs['road_geometry'],
+            )
             self.last_jtp_latency_ms = (time.perf_counter() - jtp_start) * 1000.0
+            jtp_status = str(projected.status)
+            jtp_constraints_satisfied = bool(projected.projector_constraints_satisfied)
+            jtp_iterations = int(projected.iterations)
+            jtp_diagnostics = dict(projected.diagnostics or {})
+            jtp_projection_returned = True
+
+            # Always publish the returned JTP iterate, including partially
+            # improved iterates whose internal constraints remain violated.
+            prediction = self._apply_jtp_result(
+                prediction, projected, context, dt_s=float(self.model.ctrl_cfg.dt))
+            control_scale = nominal_control.new_tensor(
+                self.jtp_projector.cfg["control"]["trust_scale"]).view(1, 1, 2)
+            delta = (projected.controls.to(nominal_control) - nominal_control) / control_scale
+            jtp_control_delta_norm = float(torch.linalg.vector_norm(delta).detach().cpu())
+            jtp_applied = (
+                jtp_control_delta_norm >
+                float(self.jtp_projector.cfg["projection"]["change_tolerance"])
+            )
 
         self._add_dense_derivatives(prediction, dt_s=float(self.model.ctrl_cfg.dt))
         if self.device.type == 'cuda':
@@ -199,18 +203,17 @@ class ControlDiffusionRuntime:
         result['control_nominal'] = nominal_control.cpu().numpy()
         result['trajectory_dense_nominal'] = nominal_dense.cpu().numpy()
         result['jtp_enabled'] = np.asarray(self.jtp_enabled, dtype=np.bool_)
-        result['jtp_success'] = np.asarray(jtp_success, dtype=np.bool_)
-        result['jtp_applied'] = np.asarray(jtp_success, dtype=np.bool_)
+        result['jtp_projector_constraints_satisfied'] = np.asarray(
+            jtp_constraints_satisfied, dtype=np.bool_)
+        result['jtp_projection_returned'] = np.asarray(jtp_projection_returned, dtype=np.bool_)
+        result['jtp_applied'] = np.asarray(jtp_applied, dtype=np.bool_)
         result['jtp_status'] = jtp_status
-        result['jtp_error'] = jtp_error
         result['jtp_diagnostics'] = jtp_diagnostics
         result['jtp_iterations'] = np.asarray(jtp_iterations, dtype=np.int32)
         final_metrics = jtp_diagnostics.get('final_metrics', {})
         result['jtp_max_violation'] = np.asarray(
             float(final_metrics.get('max_violation', np.nan)), dtype=np.float32)
-        result['jtp_control_delta_norm'] = np.asarray(
-            float(torch.linalg.vector_norm(prediction['control'] - nominal_control).cpu()),
-            dtype=np.float32)
+        result['jtp_control_delta_norm'] = np.asarray(jtp_control_delta_norm, dtype=np.float32)
         result['jtp_latency_ms'] = np.asarray(self.last_jtp_latency_ms, dtype=np.float32)
         result['diffusion_latency_ms'] = np.asarray(self.last_diffusion_latency_ms, dtype=np.float32)
         result['latency_ms'] = np.asarray(self.last_latency_ms, dtype=np.float32)

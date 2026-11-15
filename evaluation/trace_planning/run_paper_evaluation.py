@@ -31,7 +31,6 @@ def main(argv=None):
     p.add_argument('--jtp-config', default='configs/projection/jtp.yaml')
     p.add_argument('--jtp-runtime-config', default='configs/projection/jtp_runtime.yaml')
     p.add_argument('--copy-dlls', action='store_true')
-    p.add_argument('--allow-fallback', action='store_true')
     p.add_argument('--figure-seed', type=int, default=0)
     p.add_argument('--figure-scenarios', default='straight,merge_in,curved')
     p.add_argument('--output-dir', default='outputs/evaluation/TRACE_paper_v2')
@@ -64,7 +63,6 @@ def main(argv=None):
         if method == 'TRACE':
             cmd += ['--checkpoint', a.checkpoint]
         if a.copy_dlls: cmd.append('--copy-dlls')
-        if a.allow_fallback: cmd.append('--allow-fallback')
         if a.check_only: cmd.append('--check-only')
         print('[RUN]', ' '.join(cmd), flush=True)
         if not a.check_only:

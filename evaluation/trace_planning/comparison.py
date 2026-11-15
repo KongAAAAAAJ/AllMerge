@@ -71,8 +71,8 @@ def _validate(rows, complete_paper):
         if not all(k in r for k in ('stability_steps','vehicle_steps','spacing_error_sum_m',
                                     'spacing_observations','fuel_l','distance_m','planning_time_ms')):
             raise ValueError(f'Missing physically measured paper fields: {r.get("_source")}')
-        if r['method']=='TRACE' and int(r.get('jtp_fallback_steps',0))>0:
-            raise ValueError('Mixed TRACE/Polynomial execution detected; cannot compare as pure TRACE')
+        if r['method']=='TRACE' and int(r.get('jtp_unexecuted_steps',0))>0:
+            raise ValueError('A post-warmup control step did not execute the JTP-returned sequence; cannot compare as pure TRACE')
         if not r.get('physical_sim_sha256') or not r.get('physical_dll_sha256'):
             raise ValueError(f'Missing physical .sim/.dll checksum: {r.get("_source")}')
         key=(r['method'],r['scenario'],int(r['seed']),r['physical_case'])

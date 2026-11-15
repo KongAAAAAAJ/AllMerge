@@ -675,10 +675,10 @@ class MultiAgentAction(ActionType):
                     "history_control_counts": live.get("history_control_counts"),
                 }
                 self.env.latest_diffusion_jtp_status = str(live.get("status", "history_warmup"))
-                self.env.latest_diffusion_jtp_error = None
                 for vehicle in self.env.controlled_vehicles:
-                    vehicle.latest_diffusion_jtp_success = False
+                    vehicle.latest_diffusion_jtp_projector_constraints_satisfied = False
                     vehicle.latest_diffusion_jtp_status = live.get("status", "history_warmup")
+                    vehicle.latest_diffusion_jtp_applied = False
                     vehicle.latest_diffusion_control_sequence = None
                 return
             features.update(live["context"])
@@ -689,7 +689,6 @@ class MultiAgentAction(ActionType):
         self.env.latest_diffusion_output = output
         self.env.latest_diffusion_jtp_diagnostics = output.get("jtp_diagnostics", {})
         self.env.latest_diffusion_jtp_status = str(output.get("jtp_status", "unknown"))
-        self.env.latest_diffusion_jtp_error = output.get("jtp_error")
         self._publish_diffusion_runtime_trajectories(output, diffusion_config)
 
     def _publish_diffusion_runtime_trajectories(
@@ -708,7 +707,9 @@ class MultiAgentAction(ActionType):
         vehicles = list(self.env.controlled_vehicles)
         controls_raw = output.get("control")
         controls_nominal_raw = output.get("control_nominal")
-        jtp_success = bool(np.asarray(output.get("jtp_success", False)).reshape(-1)[0])
+        jtp_constraints_satisfied = bool(np.asarray(
+            output.get("jtp_projector_constraints_satisfied", False)).reshape(-1)[0])
+        jtp_applied = bool(np.asarray(output.get("jtp_applied", False)).reshape(-1)[0])
         jtp_status = str(output.get("jtp_status", "disabled"))
         if controls_raw is not None:
             controls = np.asarray(controls_raw, dtype=np.float32)
@@ -723,13 +724,15 @@ class MultiAgentAction(ActionType):
                 vehicle.latest_diffusion_control_sequence = controls[ego_idx].copy()
                 vehicle.latest_diffusion_control_nominal = (
                     None if controls_nominal is None else controls_nominal[ego_idx].copy())
-                vehicle.latest_diffusion_jtp_success = jtp_success
+                vehicle.latest_diffusion_jtp_projector_constraints_satisfied = jtp_constraints_satisfied
+                vehicle.latest_diffusion_jtp_applied = jtp_applied
                 vehicle.latest_diffusion_jtp_status = jtp_status
         else:
             for vehicle in vehicles:
                 vehicle.latest_diffusion_control_sequence = None
                 vehicle.latest_diffusion_control_nominal = None
-                vehicle.latest_diffusion_jtp_success = False
+                vehicle.latest_diffusion_jtp_projector_constraints_satisfied = False
+                vehicle.latest_diffusion_jtp_applied = False
                 vehicle.latest_diffusion_jtp_status = jtp_status
         if selected_sparse.shape[0] != len(vehicles):
             raise RuntimeError(

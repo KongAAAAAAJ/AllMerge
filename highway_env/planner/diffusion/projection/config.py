@@ -101,7 +101,8 @@ def validate_jtp_config(cfg: dict) -> None:
     for key in ("road_m", "curvature_per_m2"):
         if float(scales.get(key, 0)) <= 0:
             raise ValueError(f"projection.residual_scales.{key} must be positive")
-    for key in ("damping", "metric_regularization", "merit_penalty", "max_step_norm"):
+    for key in ("damping", "metric_regularization", "merit_penalty", "max_step_norm",
+                "change_tolerance"):
         if float(proj.get(key, 0)) <= 0:
             raise ValueError(f"projection.{key} must be positive")
     if int(proj.get("damping_retries", 0)) < 1:
