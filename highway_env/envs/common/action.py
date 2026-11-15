@@ -674,6 +674,8 @@ class MultiAgentAction(ActionType):
                     "history_state_counts": live.get("history_state_counts"),
                     "history_control_counts": live.get("history_control_counts"),
                 }
+                self.env.latest_diffusion_jtp_status = str(live.get("status", "history_warmup"))
+                self.env.latest_diffusion_jtp_error = None
                 for vehicle in self.env.controlled_vehicles:
                     vehicle.latest_diffusion_jtp_success = False
                     vehicle.latest_diffusion_jtp_status = live.get("status", "history_warmup")
@@ -686,6 +688,8 @@ class MultiAgentAction(ActionType):
         output = runtime.infer(features, jtp_inputs=jtp_inputs)
         self.env.latest_diffusion_output = output
         self.env.latest_diffusion_jtp_diagnostics = output.get("jtp_diagnostics", {})
+        self.env.latest_diffusion_jtp_status = str(output.get("jtp_status", "unknown"))
+        self.env.latest_diffusion_jtp_error = output.get("jtp_error")
         self._publish_diffusion_runtime_trajectories(output, diffusion_config)
 
     def _publish_diffusion_runtime_trajectories(

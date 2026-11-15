@@ -1550,6 +1550,7 @@ class FOLLOWVehicle(ControlledVehicle):
 
         self.path = None
         self.latest_planner_trajectory = None
+        self.latest_control_source = None
 
         self.best_cost = None
         self.jerk = 0
@@ -1944,6 +1945,10 @@ class FOLLOWVehicle(ControlledVehicle):
                 }
 
             self.path = path
+            self.latest_control_source = (
+                str(path.get("source")) if isinstance(path, dict) and path.get("source")
+                else "Polynomial" if planner.get("type") == "Polynomial" else "other"
+            )
 
         else:
             target_lane = self.road.network.get_lane(
@@ -1971,6 +1976,7 @@ class FOLLOWVehicle(ControlledVehicle):
                 ),
                 "acceleration": acceleration,
             }
+            self.latest_control_source = "lane_follow"
 
         action["steering"] = np.clip(
             action["steering"],

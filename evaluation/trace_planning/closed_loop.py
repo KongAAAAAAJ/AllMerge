@@ -145,6 +145,8 @@ def worker(*, scenario, method, seed, checkpoint, config, jtp_config,
         pose,heading,state,ltr = _snapshot(env)
         positions,headings,states,ltrs = [pose],[heading],[state],[ltr]
         durations=[]; jtp_steps=0; jtp_fallback_steps=0; planning_steps=0
+        jtp_status_counts={}; jtp_context_status_counts={}; jtp_first_failures=[]
+        jtp_step_trace=[]
         original = env.action_type.act
         def timed_act(action):
             if torch.cuda.is_available():torch.cuda.synchronize()
@@ -161,11 +163,50 @@ def worker(*, scenario, method, seed, checkpoint, config, jtp_config,
             _,_,terminated,truncated,info=env.step(int(group_action))
             planning_steps+=1
             if method=='TRACE':
-                used = all(bool(getattr(v,'latest_diffusion_jtp_success',False))
-                           and getattr(v,'latest_planner_trajectory','sentinel') is None
-                           for v in env.controlled_vehicles)
-                if used: jtp_steps+=1
-                elif j>=4: jtp_fallback_steps+=1  # first four steps are mandatory K2 warmup
+                source_ok = all(
+                    getattr(v, 'latest_control_source', None)
+                    == 'Diffusion-Joint-Trajectory-Projection-Control'
+                    for v in env.controlled_vehicles
+                )
+                success_ok = all(bool(getattr(v, 'latest_diffusion_jtp_success', False))
+                                 for v in env.controlled_vehicles)
+                used = source_ok and success_ok
+                if used:
+                    jtp_steps += 1
+                elif j >= 4:
+                    jtp_fallback_steps += 1  # first four policy steps are K2 history warmup
+                context_status = str(getattr(env, 'latest_diffusion_jtp_context_status', 'unset'))
+                projection_status = str(getattr(env, 'latest_diffusion_jtp_status', 'unset'))
+                jtp_context_status_counts[context_status] = jtp_context_status_counts.get(context_status, 0) + 1
+                jtp_status_counts[projection_status] = jtp_status_counts.get(projection_status, 0) + 1
+                diagnostics = getattr(env, 'latest_diffusion_jtp_diagnostics', {}) or {}
+                final_metrics = diagnostics.get('final_metrics', {}) if isinstance(diagnostics, dict) else {}
+                initial_metrics = diagnostics.get('initial_metrics', {}) if isinstance(diagnostics, dict) else {}
+                metric_source = final_metrics or initial_metrics or {}
+                compact_metrics = {k: metric_source.get(k) for k in (
+                    'feasible', 'max_violation', 'max_violation_by_group',
+                    'violation_counts', 'active_counts'
+                ) if k in metric_source}
+                step_record = {
+                    'step': int(j), 'time_s': float(env.time),
+                    'executed_jtp_control': bool(used),
+                    'vehicle_success': [bool(getattr(v, 'latest_diffusion_jtp_success', False))
+                                        for v in env.controlled_vehicles],
+                    'vehicle_status': [str(getattr(v, 'latest_diffusion_jtp_status', 'unset'))
+                                       for v in env.controlled_vehicles],
+                    'vehicle_control_source': [str(getattr(v, 'latest_control_source', 'unset'))
+                                               for v in env.controlled_vehicles],
+                    'context_status': context_status,
+                    'projection_status': projection_status,
+                    'projection_error': getattr(env, 'latest_diffusion_jtp_error', None),
+                    'diagnostic_metrics': compact_metrics,
+                    'history_state_counts': diagnostics.get('history_state_counts') if isinstance(diagnostics, dict) else None,
+                    'history_control_counts': diagnostics.get('history_control_counts') if isinstance(diagnostics, dict) else None,
+                }
+                if len(jtp_step_trace) < 100:
+                    jtp_step_trace.append(step_record)
+                if not used and j >= 4 and len(jtp_first_failures) < 8:
+                    jtp_first_failures.append(step_record)
             pose,heading,state,ltr=_snapshot(env)
             time_s.append(float(env.time))
             positions.append(pose);headings.append(heading)
@@ -218,6 +259,10 @@ def worker(*, scenario, method, seed, checkpoint, config, jtp_config,
             planning_time_count=len(latency),
             planning_steps=planning_steps,
             jtp_executed_steps=jtp_steps,jtp_fallback_steps=jtp_fallback_steps,
+            jtp_projection_status_counts=jtp_status_counts,
+            jtp_context_status_counts=jtp_context_status_counts,
+            jtp_first_failures=jtp_first_failures,
+            jtp_step_trace=jtp_step_trace,
             duration_s=float(env.time),
             task_success_raw=done,
             note=('TRACE policy uses Polynomial warmup and Polynomial fallback on JTP failure'
@@ -288,8 +333,16 @@ def _runner(args):
             _write_csv(out/'episodes.csv',all_rows)
     result=summarize_closed_loop_rows(all_rows)
     if args.method=='TRACE' and any(r['jtp_executed_steps']==0 for r in all_rows):
+        failed = [r for r in all_rows if r['jtp_executed_steps'] == 0]
+        details = [{
+            'scenario': r.get('scenario'), 'seed': r.get('seed'),
+            'projection_status_counts': r.get('jtp_projection_status_counts', {}),
+            'context_status_counts': r.get('jtp_context_status_counts', {}),
+            'first_failures': r.get('jtp_first_failures', [])[:3],
+        } for r in failed]
         raise RuntimeError('At least one TRACE episode never executed JTP controls. '
-                           'This is a Polynomial fallback experiment, not a valid TRACE result.')
+                           'This is a Polynomial fallback experiment, not a valid TRACE result. '
+                           'JTP diagnostics: ' + json.dumps(details, ensure_ascii=False, default=str))
     if args.method=='TRACE' and not args.allow_fallback and any(r['jtp_fallback_steps']>0 for r in all_rows):
         raise RuntimeError('Post-warmup JTP projection fallback occurred. Metrics in episodes.csv '
                            'are diagnostic only; rerun after fixing before publishing TRACE scores. '
