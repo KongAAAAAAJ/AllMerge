@@ -118,7 +118,7 @@ def _plot_episodes(rows, scenarios, seed, output_dir):
                 continue
             with np.load(source,allow_pickle=False) as data:
                 position=data['position_m']; heading=data['heading_rad'];time_s=data['time_s']
-                gaps=center_spacing_error(position,heading,15.)
+                gaps=data['spacing_abs_error_m'] if 'spacing_abs_error_m' in data.files else center_spacing_error(position,heading,float(episode.get('spacing_target_m', 15.0)))
             for car in range(position.shape[1]):
                 ax[n,0].plot(position[:,car,0],position[:,car,1],color=palette[method],
                              alpha=1.-car*0.21,linestyle=('-','--',':')[car%3],
@@ -136,10 +136,10 @@ def _plot_episodes(rows, scenarios, seed, output_dir):
         plt.close(fig)
         return None
     out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
-    fig.savefig(out/'planning_comparison_available_scenarios.pdf')
-    fig.savefig(out/'planning_comparison_available_scenarios.png',dpi=220)
+    fig.savefig(out/'planning_comparison.pdf')
+    fig.savefig(out/'planning_comparison.png',dpi=300)
     plt.close(fig)
-    return str(out/'planning_comparison_available_scenarios.pdf')
+    return str(out/'planning_comparison.pdf')
 
 
 def evaluate(paths, *, output_dir, complete_paper=False, figure_seed=0,
@@ -161,7 +161,7 @@ def evaluate(paths, *, output_dir, complete_paper=False, figure_seed=0,
         'methods':list(grouped),'scenarios':scenarios,
         'paper_methods':list(PAPER_METHODS),
         'note':'Missing baseline values are --, never invented. Scenes/physical plants/seeds are paired exactly.',
-        'figure':'Actual recorded traces; available scenario names in title, not paper 5-scene caption',
+        'figure':'Actual recorded traces for selected representative project scenarios; 3x2 trajectory/spacing layout.',
         'figure_output':graph,
     }
     (out/'comparison_summary.json').write_text(json.dumps(dict(metrics=sums,manifest=manifest),indent=2,ensure_ascii=False),encoding='utf-8')
