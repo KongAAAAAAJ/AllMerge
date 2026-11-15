@@ -29,23 +29,35 @@ class AdaptiveCandidateBuilder:
         self.num_candidates = 36
         self.steer_residuals = (-0.006, 0.0, 0.006)
 
-    def _rollout(self, controls, initial_speed):
-        """Use the same midpoint bicycle integration as the A1 sampler."""
+    def _rollout_many(self, controls, initial_speed):
+        """Vectorized midpoint bicycle rollout over all candidate anchors."""
+        controls = np.asarray(controls, dtype=np.float32)
+        if controls.ndim != 3 or controls.shape[1:] != (self.control_steps, 2):
+            raise ValueError(
+                f"controls must be [M,{self.control_steps},2], got {controls.shape}"
+            )
+        count = controls.shape[0]
         dt, wb = self.base.control_dt, self.base.wheelbase
-        x = y = psi = 0.0
-        v = max(float(initial_speed), 0.0)
-        dense = np.zeros((self.control_steps, 2), dtype=np.float32)
-        for j, (acceleration, steering) in enumerate(controls):
-            next_v = max(0.0, v + float(acceleration) * dt)
-            vmid = 0.5 * (v + next_v)
-            yaw = vmid * np.tan(float(steering)) * dt / wb
-            x += vmid * np.cos(psi + 0.5 * yaw) * dt
-            y += vmid * np.sin(psi + 0.5 * yaw) * dt
+        x = np.zeros(count, dtype=np.float64)
+        y = np.zeros(count, dtype=np.float64)
+        psi = np.zeros(count, dtype=np.float64)
+        velocity = np.full(count, max(float(initial_speed), 0.0), dtype=np.float64)
+        dense = np.zeros((count, self.control_steps, 2), dtype=np.float32)
+        for step in range(self.control_steps):
+            acceleration = controls[:, step, 0].astype(np.float64, copy=False)
+            steering = controls[:, step, 1].astype(np.float64, copy=False)
+            next_v = np.maximum(0.0, velocity + acceleration * dt)
+            vmid = 0.5 * (velocity + next_v)
+            yaw = vmid * np.tan(steering) * dt / wb
+            heading_mid = psi + 0.5 * yaw
+            x += vmid * np.cos(heading_mid) * dt
+            y += vmid * np.sin(heading_mid) * dt
             psi += yaw
-            v = next_v
-            dense[j] = (x, y)
+            velocity = next_v
+            dense[:, step, 0] = x
+            dense[:, step, 1] = y
         stride = self.control_steps // self.horizon_steps
-        return dense[stride - 1 :: stride].copy()
+        return dense[:, stride - 1 :: stride].copy()
 
     def build_single(self, *, ego_state, map_polylines, map_valid_mask,
                      target_acceleration=0.0):
@@ -72,40 +84,65 @@ class AdaptiveCandidateBuilder:
                  (left, np.linspace(low, high, 3)),
                  (right, np.linspace(low, high, 3)))
         controls = np.zeros((36, self.control_steps, 2), dtype=np.float32)
-        tracks = np.zeros((36, self.horizon_steps, 2), dtype=np.float32)
         valid = np.zeros(36, dtype=bool)
         index = 0
+        # The steering residual is applied *after* the road-conditioned
+        # base control has been sampled.  Therefore all three residual variants
+        # share exactly the same base control sequence.  Sample it once and
+        # branch by copy instead of repeating the 40-step pure-pursuit rollout
+        # three times.
+        phase = np.sin(
+            np.pi * (np.arange(self.control_steps, dtype=np.float32) + 1.0)
+            / self.control_steps
+        ).astype(np.float32)
         for lane, speeds in lanes:
             for speed in speeds:
-                for residual in self.steer_residuals:
-                    if lane is not None:
-                        u, _ = base._sample_and_rollout(
-                            current, lane, v0, float(speed),
-                            lane_change=(lane is not current), emergency_stop=False,
-                        )
+                if lane is not None:
+                    base_u, _ = base._sample_and_rollout(
+                        current, lane, v0, float(speed),
+                        lane_change=(lane is not current), emergency_stop=False,
+                    )
+                    for residual in self.steer_residuals:
+                        u = base_u.copy()
                         if residual:
                             # Steering residual vanishes at t=0 and t=T,
                             # preventing a discontinuous initial steering jump.
-                            phase = np.sin(np.pi * (np.arange(self.control_steps) + 1)
-                                           / self.control_steps).astype(np.float32)
-                            u[:, 1] = np.clip(u[:, 1] + residual * phase,
-                                               -base.max_steer, base.max_steer)
+                            u[:, 1] = np.clip(
+                                u[:, 1] + residual * phase,
+                                -base.max_steer, base.max_steer,
+                            )
                         controls[index] = u
-                        tracks[index] = self._rollout(u, v0)
                         valid[index] = True
-                    index += 1
-        for brake in (0.35, 0.65, 1.0):
-            u, _ = base._sample_and_rollout(
-                current, current, v0, 0.0,
-                lane_change=False, emergency_stop=(brake == 1.0),
-            )
-            if brake != 1.0:
-                u[:, 0] = np.maximum(u[:, 0], -base.max_decel * brake)
+                        index += 1
+                else:
+                    # Preserve the three masked candidate slots for a missing
+                    # adjacent lane.
+                    index += len(self.steer_residuals)
+
+        # The 0.35/0.65 braking candidates share the same non-emergency base
+        # control.  Only the longitudinal clipping differs.  The emergency
+        # stop remains a separate sample because its acceleration law differs.
+        base_brake_u, _ = base._sample_and_rollout(
+            current, current, v0, 0.0,
+            lane_change=False, emergency_stop=False,
+        )
+        for brake in (0.35, 0.65):
+            u = base_brake_u.copy()
+            u[:, 0] = np.maximum(u[:, 0], -base.max_decel * brake)
             controls[index] = u
-            tracks[index] = self._rollout(u, v0)
             valid[index] = True
             index += 1
+
+        stop_u, _ = base._sample_and_rollout(
+            current, current, v0, 0.0,
+            lane_change=False, emergency_stop=True,
+        )
+        controls[index] = stop_u
+        valid[index] = True
+        index += 1
         assert index == self.num_candidates
+        tracks = self._rollout_many(controls, v0)
+        tracks[~valid] = 0.0
         return {'coarse_controls': controls,
                 'coarse_trajectories': tracks,
                 'mode_valid_mask': valid}

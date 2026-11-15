@@ -379,7 +379,7 @@ def main(argv=None):
     parser.add_argument('--sample-seed',type=int,default=2026)
     parser.add_argument('--figure-seed',type=int,default=2027)
     parser.add_argument('--progress-threshold-m',type=float,default=60.)
-    parser.add_argument('--output-dir',default='outputs/trace_fuel_ablation/open_loop_eval_v3')
+    parser.add_argument('--output-dir',default='outputs/fuel_ablation/open_loop_eval')
     args=parser.parse_args(argv)
     specs=parse_multi_checkpoint_specs(args.checkpoint)
     cfg=load_mode_yaml(args.config)
@@ -392,3 +392,5 @@ def main(argv=None):
         payloads=parse_payloads(args.payloads),payload_tolerance_kg=args.payload_tolerance_kg,
         sample_seed=args.sample_seed,figure_seed=args.figure_seed)
     return 0
+
+

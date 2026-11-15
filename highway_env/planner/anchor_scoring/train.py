@@ -1,8 +1,8 @@
-"""Offline TRACE A2 safety scorer train/eval, independent of diffusion training.
+"""Offline TRACE A2 safety scorer train/eval with reusable V2 data cache.
 
-Example:
- python -m highway_env.planner.anchor_scoring.train --config configs/train/adaptive_anchors.yaml --max-batches 2
- python -m highway_env.planner.anchor_scoring.train --config configs/train/adaptive_anchors.yaml --evaluate-only --checkpoint outputs/anchor_scoring/best.pt
+The scorer architecture, safety teacher, soft-label objective and Top-R metrics
+are unchanged. Candidate controls/trajectories and deterministic teacher labels
+are precomputed once, then memory-mapped during training.
 """
 from __future__ import annotations
 
@@ -10,159 +10,303 @@ import argparse
 import csv
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from torch.utils.data import DataLoader
 
-from data_pipeline.expert_dataset import AllMergeExpertDatasetConfig, AllMergeExpertShardDataset
-from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 from .model import AnchorSafetyScorer, select_anchors
-from .safety import anchor_safety_cost
+from .training_data import build_cached_loader, prepare_split_cache
 
 
-def _loader(root, split, cfg, shuffle):
-    dataset = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=root, split=split, max_samples=cfg.get('max_samples')))
-    workers = int(cfg.get('num_workers', 0))
-    return DataLoader(dataset, batch_size=int(cfg.get('batch_size', 16)),
-                      num_workers=workers, shuffle=shuffle,
-                      persistent_workers=workers > 0, pin_memory=torch.cuda.is_available())
-
-
-def run_epoch(model, loader, candidate_builder, cfg, device, optimizer=None, max_batches=None):
+def run_epoch(model, loader, cfg, device, *, optimizer=None, max_batches=None, epoch=0):
     training = optimizer is not None
     model.train(training)
-    report = {name: 0.0 for name in ('loss', 'safe_ratio', 'oracle_safe_ratio',
-                                     'top_r_safe_recall', 'label_entropy', 'score_gap')}
+    if hasattr(loader.batch_sampler, "set_epoch"):
+        loader.batch_sampler.set_epoch(epoch)
+
+    metric_names = (
+        "loss", "safe_ratio", "oracle_safe_ratio", "top_r_safe_recall",
+        "label_entropy", "score_gap",
+    )
+    metric_sums = torch.zeros(len(metric_names), dtype=torch.float64, device=device)
     count = 0
-    top_r, ka = int(cfg['top_r']), int(cfg['num_selected'])
-    teacher = cfg.get('teacher', {})
-    temperature = float(cfg.get('temperature', 0.3))
-    if temperature <= 0:
-        raise ValueError('temperature must be > 0')
-    for batch_index, (features, _) in enumerate(loader):
+    top_r, ka = int(cfg["top_r"]), int(cfg["num_selected"])
+    epoch_started = time.perf_counter()
+    data_wait_s = 0.0
+    step_s = 0.0
+    wait_started = epoch_started
+
+    for batch_index, (features, cached) in enumerate(loader):
+        batch_started = time.perf_counter()
+        data_wait_s += batch_started - wait_started
         if max_batches is not None and batch_index >= max_batches:
             break
-        pool = candidate_builder.build_batch(features)
-        features = {name: value.to(device) for name, value in features.items()}
-        control = torch.as_tensor(pool['coarse_controls'], device=device)
-        xy = torch.as_tensor(pool['coarse_trajectories'], device=device)
-        valid = torch.as_tensor(pool['mode_valid_mask'], device=device)
-        with torch.no_grad():
-            labels = anchor_safety_cost(features, xy, valid=valid, **teacher)
-            teacher_logits = (-labels['total'] / temperature).masked_fill(~valid, -torch.inf)
-            target = F.softmax(teacher_logits, dim=-1)
+
+        features = {name: value.to(device, non_blocking=True)
+                    for name, value in features.items()}
+        control = cached["coarse_controls"].to(device, non_blocking=True)
+        xy = cached["coarse_trajectories"].to(device, non_blocking=True)
+        valid = cached["mode_valid_mask"].to(device, non_blocking=True)
+        target = cached["teacher_target"].to(device, non_blocking=True)
+        hard_safe = cached["safety_hard_safe"].to(device, non_blocking=True)
+
+        step_started = time.perf_counter()
         with torch.set_grad_enabled(training):
             scores = model(features, control, xy)
             log_prob = F.log_softmax(scores.masked_fill(~valid, -torch.inf), dim=-1)
             loss = -(target * log_prob.masked_fill(~valid, 0.0)).sum(-1).mean()
             if not torch.isfinite(loss):
-                raise FloatingPointError('Nonfinite anchor-scoring loss')
+                raise FloatingPointError("Nonfinite anchor-scoring loss")
             if training:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg.get('grad_clip', 1.0)))
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), float(cfg.get("grad_clip", 1.0))
+                )
                 optimizer.step()
+
         with torch.no_grad():
-            idx = select_anchors(scores.detach(), control, xy, valid,
-                     top_r=top_r, num_selected=ka,
-                     trajectory_weight=float(cfg.get('trajectory_weight', 1.0)),
-                     control_weight=float(cfg.get('control_weight', 1.0)))
-            selected_safe = labels['hard_safe'].gather(1, idx)
-            # Softmax target normalization is over valid candidate pool only.
-            sorted_ids = scores.detach().masked_fill(~valid, -torch.inf).topk(top_r, dim=1).indices
-            total_safe = labels['hard_safe'].sum(1).clamp_min(1)
-            recall = labels['hard_safe'].gather(1, sorted_ids).sum(1) / total_safe
-            optimal_safe = torch.minimum(labels['hard_safe'].sum(1),
-                                         torch.full_like(total_safe, ka)).float() / ka
-            values = {
-                'loss': loss.detach(),
-                'safe_ratio': selected_safe.float().mean(),
-                'oracle_safe_ratio': optimal_safe.mean(),
-                'top_r_safe_recall': recall.mean(),
-                'label_entropy': (-(target * target.clamp_min(1e-12).log()).sum(1)).mean(),
-                'score_gap': scores.detach().masked_fill(~valid, 0).std(dim=1).mean(),
-            }
-            n = int(xy.shape[0]); count += n
-            for key, value in values.items():
-                report[key] += float(value) * n
+            idx = select_anchors(
+                scores.detach(), control, xy, valid,
+                top_r=top_r,
+                num_selected=ka,
+                trajectory_weight=float(cfg.get("trajectory_weight", 1.0)),
+                control_weight=float(cfg.get("control_weight", 1.0)),
+            )
+            selected_safe = hard_safe.gather(1, idx)
+            sorted_ids = scores.detach().masked_fill(~valid, -torch.inf).topk(
+                top_r, dim=1
+            ).indices
+            total_safe = hard_safe.sum(1).clamp_min(1)
+            recall = hard_safe.gather(1, sorted_ids).sum(1) / total_safe
+            optimal_safe = torch.minimum(
+                hard_safe.sum(1), torch.full_like(total_safe, ka)
+            ).float() / ka
+            values = torch.stack((
+                loss.detach(),
+                selected_safe.float().mean(),
+                optimal_safe.mean(),
+                recall.mean(),
+                (-(target * target.clamp_min(1e-12).log()).sum(1)).mean(),
+                scores.detach().masked_fill(~valid, 0).std(dim=1).mean(),
+            )).to(dtype=torch.float64)
+            batch_n = int(xy.shape[0])
+            count += batch_n
+            metric_sums += values * batch_n
+
+        step_s += time.perf_counter() - step_started
+        wait_started = time.perf_counter()
+
     if count == 0:
-        raise RuntimeError('No samples processed')
-    return {name: value / count for name, value in report.items()}
+        raise RuntimeError("No samples processed")
+    # One device-to-host synchronization per epoch, rather than several
+    # scalar synchronizations on every training batch.
+    metric_values = (metric_sums / count).detach().cpu().tolist()
+    elapsed = max(time.perf_counter() - epoch_started, 1e-9)
+    result = dict(zip(metric_names, metric_values))
+    result.update({
+        "samples": count,
+        "elapsed_sec": elapsed,
+        "data_wait_sec": data_wait_s,
+        "model_step_dispatch_sec": step_s,
+        "samples_per_sec": count / elapsed,
+    })
+    return result
+
+
+def _save_history(path: Path, history):
+    if not history:
+        return
+    fields = list(history[0])
+    with path.open("w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(history)
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(description='Train/evaluate TRACE adaptive safety scorer')
-    p.add_argument('--config', default='configs/train/adaptive_anchors.yaml')
-    p.add_argument('--dataset-root', default=None)
-    p.add_argument('--output-dir', default=None)
-    p.add_argument('--max-epochs', type=int, default=None)
-    p.add_argument('--max-batches', type=int, default=None)
-    p.add_argument('--device', default='auto')
-    p.add_argument('--evaluate-only', action='store_true')
-    p.add_argument('--checkpoint', default=None)
-    args = p.parse_args(argv)
-    cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding='utf-8'))
+    parser = argparse.ArgumentParser(description="Train/evaluate TRACE adaptive safety scorer V2")
+    parser.add_argument("--config", default="configs/train/adaptive_anchors.yaml")
+    parser.add_argument("--dataset-root", default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--cache-dir", default=None)
+    parser.add_argument("--max-epochs", type=int, default=None)
+    parser.add_argument("--max-batches", type=int, default=None)
+    parser.add_argument("--max-samples", type=int, default=None)
+    parser.add_argument("--precompute-batch-size", type=int, default=None)
+    parser.add_argument("--precompute-device", default=None)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--evaluate-only", action="store_true")
+    parser.add_argument("--prepare-cache-only", action="store_true")
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--checkpoint", default=None,
+                        help="Warm-start model weights only; optimizer state is reset.")
+    parser.add_argument("--resume", default=None,
+                        help="Resume a V2 checkpoint including optimizer/history state.")
+    args = parser.parse_args(argv)
+
+    cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
-        raise ValueError('Scorer config must be a mapping')
-    seed = int(cfg.get('seed', 0))
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
-    device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
-                          else 'cpu' if args.device == 'auto' else args.device)
-    root = resolve_repo_file(args.dataset_root or cfg['dataset_root'])
-    output_dir = resolve_repo_file(args.output_dir or cfg.get('output_dir', 'outputs/anchor_scoring'))
+        raise ValueError("Scorer config must be a mapping")
+    if args.dataset_root:
+        cfg["dataset_root"] = args.dataset_root
+    if args.max_samples is not None:
+        cfg["max_samples"] = args.max_samples
+    if args.precompute_batch_size is not None:
+        cfg["precompute_batch_size"] = args.precompute_batch_size
+    if args.precompute_device:
+        cfg["precompute_device"] = args.precompute_device
+
+    seed = int(cfg.get("seed", 0))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    device = torch.device(
+        "cuda" if args.device == "auto" and torch.cuda.is_available()
+        else "cpu" if args.device == "auto" else args.device
+    )
+    dataset_root = resolve_repo_file(cfg["dataset_root"])
+    output_dir = resolve_repo_file(
+        args.output_dir or cfg.get("output_dir", "outputs/trace_adaptive_anchors")
+    )
+    cache_root = resolve_repo_file(
+        args.cache_dir or cfg.get("cache_dir", str(output_dir / "candidate_cache_v2"))
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    generator = AdaptiveCandidateBuilder(cfg.get('candidate_generation'))
-    train_loader = None if args.evaluate_only else _loader(root, cfg.get('train_split', 'train'), cfg, True)
-    val_loader = _loader(root, cfg.get('val_split', 'val'), cfg, False)
-    model_cfg = cfg.get('model', {})
+
+    needed_splits = [cfg.get("val_split", "val")]
+    if not args.evaluate_only:
+        needed_splits.insert(0, cfg.get("train_split", "train"))
+    cache_dirs = {}
+    for split in needed_splits:
+        cache_dirs[split], _ = prepare_split_cache(
+            dataset_root, split, cfg, cache_root, rebuild=args.rebuild_cache
+        )
+    if args.prepare_cache_only:
+        print("[A2-cache] preprocessing completed; training was not started.")
+        return
+
+    train_loader = None
+    train_sampler = None
+    if not args.evaluate_only:
+        train_loader, train_sampler = build_cached_loader(
+            dataset_root, cfg.get("train_split", "train"), cfg,
+            cache_dirs[cfg.get("train_split", "train")], shuffle=True,
+        )
+    val_loader, _ = build_cached_loader(
+        dataset_root, cfg.get("val_split", "val"), cfg,
+        cache_dirs[cfg.get("val_split", "val")], shuffle=False,
+    )
+
+    model_cfg = cfg.get("model", {})
     model = AnchorSafetyScorer(model_cfg).to(device)
-    if args.checkpoint:
-        saved = torch.load(resolve_repo_file(args.checkpoint), map_location='cpu', weights_only=True)
-        if saved.get('architecture') != 'TRACE_Adaptive_Anchor_Safety_Scorer_V1':
-            raise ValueError('Incompatible checkpoint')
-        model.load_state_dict(saved['model_state'], strict=True)
+    if args.checkpoint and args.resume:
+        raise ValueError("Use either --checkpoint (warm start) or --resume, not both")
+
+    saved_resume = None
+    if args.resume:
+        saved_resume = torch.load(
+            resolve_repo_file(args.resume), map_location="cpu", weights_only=True
+        )
+        if saved_resume.get("architecture") != "TRACE_Adaptive_Anchor_Safety_Scorer_V1":
+            raise ValueError("Incompatible resume checkpoint")
+        model.load_state_dict(saved_resume["model_state"], strict=True)
+    elif args.checkpoint:
+        saved = torch.load(
+            resolve_repo_file(args.checkpoint), map_location="cpu", weights_only=True
+        )
+        if saved.get("architecture") != "TRACE_Adaptive_Anchor_Safety_Scorer_V1":
+            raise ValueError("Incompatible checkpoint")
+        model.load_state_dict(saved["model_state"], strict=True)
+
     if args.evaluate_only:
-        metrics = run_epoch(model, val_loader, generator, cfg, device,
-                            max_batches=args.max_batches)
-        (output_dir / 'evaluation.json').write_text(json.dumps(metrics, indent=2), encoding='utf-8')
+        metrics = run_epoch(
+            model, val_loader, cfg, device, max_batches=args.max_batches, epoch=0
+        )
+        (output_dir / "evaluation.json").write_text(
+            json.dumps(metrics, indent=2), encoding="utf-8"
+        )
         print(json.dumps(metrics, indent=2))
         return
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.get('lr', 1e-4)),
-                                  weight_decay=float(cfg.get('weight_decay', 1e-4)))
-    best = float('inf')
-    history = []
-    epochs = int(args.max_epochs if args.max_epochs is not None else cfg.get('epochs', 30))
-    for epoch in range(1, epochs + 1):
-        train_metrics = run_epoch(model, train_loader, generator, cfg, device,
-                                  optimizer=optimizer, max_batches=args.max_batches)
-        val_metrics = run_epoch(model, val_loader, generator, cfg, device,
-                                max_batches=args.max_batches)
-        history.append({'epoch': epoch, **{'train_' + k: v for k,v in train_metrics.items()},
-                        **{'val_' + k: v for k,v in val_metrics.items()}})
-        ckpt = {'architecture': 'TRACE_Adaptive_Anchor_Safety_Scorer_V1',
-                'model_config': model_cfg, 'candidate_generation': cfg.get('candidate_generation', {}),
-                'model_state': model.state_dict(), 'epoch': epoch,
-                'temperature': float(cfg.get('temperature', 0.3)),
-                'teacher_config': cfg.get('teacher', {})}
-        torch.save(ckpt, output_dir / 'last.pt')
-        if val_metrics['loss'] < best:
-            best = val_metrics['loss']
-            torch.save(ckpt, output_dir / 'best.pt')
-        print(f'[A2] epoch={epoch}/{epochs} train_CE={train_metrics["loss"]:.5f} '
-              f'val_CE={val_metrics["loss"]:.5f} val_safe={val_metrics["safe_ratio"]:.3f} '
-              f'oracle={val_metrics["oracle_safe_ratio"]:.3f}', flush=True)
-    with (output_dir / 'history.csv').open('w', newline='', encoding='utf-8') as fp:
-        writer = csv.DictWriter(fp, fieldnames=list(history[0]))
-        writer.writeheader(); writer.writerows(history)
-    (output_dir / 'resolved_config.yaml').write_text(
-        yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
-    print(f'[A2] best scorer: {output_dir / "best.pt"}')
 
-if __name__ == '__main__':
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(cfg.get("lr", 1e-4)),
+        weight_decay=float(cfg.get("weight_decay", 1e-4)),
+    )
+    start_epoch = 1
+    best = float("inf")
+    history = []
+    if saved_resume is not None:
+        if "optimizer_state_dict" not in saved_resume:
+            raise ValueError("Resume checkpoint has no optimizer_state_dict; use --checkpoint for warm start")
+        optimizer.load_state_dict(saved_resume["optimizer_state_dict"])
+        start_epoch = int(saved_resume["epoch"]) + 1
+        best = float(saved_resume.get("best_val_loss", float("inf")))
+        history = list(saved_resume.get("history", []))
+
+    epochs = int(args.max_epochs if args.max_epochs is not None else cfg.get("epochs", 30))
+    if start_epoch > epochs:
+        raise ValueError(f"Resume epoch {start_epoch - 1} already reaches requested max_epochs={epochs}")
+
+    for epoch in range(start_epoch, epochs + 1):
+        train_metrics = run_epoch(
+            model, train_loader, cfg, device, optimizer=optimizer,
+            max_batches=args.max_batches, epoch=epoch,
+        )
+        val_metrics = run_epoch(
+            model, val_loader, cfg, device,
+            max_batches=args.max_batches, epoch=epoch,
+        )
+        row = {"epoch": epoch}
+        row.update({"train_" + key: value for key, value in train_metrics.items()})
+        row.update({"val_" + key: value for key, value in val_metrics.items()})
+        history.append(row)
+
+        ckpt = {
+            "architecture": "TRACE_Adaptive_Anchor_Safety_Scorer_V1",
+            "model_config": model_cfg,
+            "candidate_generation": cfg.get("candidate_generation", {}),
+            "model_state": model.state_dict(),
+            "epoch": epoch,
+            "temperature": float(cfg.get("temperature", 0.3)),
+            "teacher_config": cfg.get("teacher", {}),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_val_loss": min(best, float(val_metrics["loss"])),
+            "history": history,
+            "training_pipeline": "TRACE_A2_SCORER_TRAINING_V2",
+        }
+        torch.save(ckpt, output_dir / "last.pt")
+        if val_metrics["loss"] < best:
+            best = float(val_metrics["loss"])
+            ckpt["best_val_loss"] = best
+            torch.save(ckpt, output_dir / "best.pt")
+        _save_history(output_dir / "history.csv", history)
+
+        print(
+            f"[A2] epoch={epoch}/{epochs} "
+            f"train_CE={train_metrics['loss']:.5f} "
+            f"val_CE={val_metrics['loss']:.5f} "
+            f"val_safe={val_metrics['safe_ratio']:.3f} "
+            f"oracle={val_metrics['oracle_safe_ratio']:.3f} "
+            f"train_rate={train_metrics['samples_per_sec']:.1f} samples/s "
+            f"train_time={train_metrics['elapsed_sec']/60:.1f} min",
+            flush=True,
+        )
+
+    (output_dir / "resolved_config.yaml").write_text(
+        yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    print(f"[A2] best scorer: {output_dir / 'best.pt'}")
+
+
+if __name__ == "__main__":
     main()
