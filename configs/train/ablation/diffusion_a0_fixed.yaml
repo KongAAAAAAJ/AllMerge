@@ -1,0 +1,18 @@
+# A0 fixed-anchor experiment. Other settings inherit the common diffusion YAML.
+extends: ../diffusion.yaml
+
+trajectory:
+  training:
+    output_dir: outputs/diffusion_pretrain
+
+control:
+  anchors:
+    strategy: fixed
+    bank_path: outputs/anchor_ablation/a0_fixed_control_anchors.npz
+  training:
+    output_dir: outputs/anchor_ablation/A0_fixed
+
+runtime:
+  checkpoint:
+    trajectory: outputs/diffusion_pretrain/YOUR_TRAJECTORY_CHECKPOINT.pt
+    control: outputs/anchor_ablation/A0_fixed/best.pt

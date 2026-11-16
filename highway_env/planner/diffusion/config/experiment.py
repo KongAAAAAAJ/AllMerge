@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
+from learning.config import load_yaml_config
 
 
 def project_root() -> Path:
@@ -27,9 +27,7 @@ def load_mode_yaml(path: str | Path) -> dict[str, Any]:
     filename = resolve_repo_file(path)
     if not filename.is_file():
         raise FileNotFoundError(filename)
-    data = yaml.safe_load(filename.read_text(encoding='utf-8'))
-    if not isinstance(data, dict):
-        raise ValueError('Diffusion mode YAML must be a mapping')
+    data = load_yaml_config(filename)
     if data.get('output_space') not in ('trajectory', 'control'):
         raise ValueError("output_space must be 'trajectory' or 'control'")
     selected = data[data['output_space']] if data['output_space'] in data else None
