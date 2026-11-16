@@ -73,6 +73,64 @@ def _preflight(ds, *, require_k2=True, strategy='dynamic'):
         raise ValueError('K2 state history must be [5,5]')
 
 
+
+def _anchor_prediction(model, features, context):
+    """Evaluate the exact prepared paired anchor bank through the same K2.
+
+    Baseline selection uses only the current target_point and valid mask.
+    The future expert trajectory is never used to select a deployment mode.
+    """
+    controls = features['coarse_controls']
+    outputs = model._all_predictions(controls, features, context)
+    poses = outputs['poses']
+    mode, logits = model._select_goal_endpoint_mode(poses, features)
+    idx = torch.arange(controls.shape[0], device=controls.device)
+    selected_pose = poses[idx, mode]
+    result = {
+        'control': controls[idx, mode],
+        'control_candidates': controls,
+        'pose': selected_pose,
+        'pose_candidates': poses,
+        'trajectory_dense': selected_pose[:, 1:, :2],
+        'trajectory': selected_pose[:, 5::5, :2],
+        'trajectory_dense_candidates': poses[:, :, 1:, :2],
+        'trajectory_candidates': poses[:, :, 5::5, :2],
+        'trajectory_mode_idx': mode,
+        'trajectory_mode_logits': logits,
+        'trajectory_candidate_valid_mask': features['mode_valid_mask'],
+        'speeds': outputs['speeds'][idx, mode],
+    }
+    if outputs['states'] is not None:
+        result.update(states=outputs['states'][idx, mode],
+                      ltr=outputs['ltr'][idx, mode],
+                      states_candidates=outputs['states'],
+                      ltr_candidates=outputs['ltr'])
+    return result
+
+
+def _representative(pred, anchor_pred, truth, features, context, selected, sample_index, seed):
+    """Collect a small deterministic visual subset (no GT-based case selection)."""
+    j = selected
+    mode = int(pred['trajectory_mode_idx'][j].item())
+    as_np = lambda x: x.detach().cpu().numpy().copy()
+    result = {
+        'sample_index': sample_index, 'seed': seed, 'selected_mode': mode,
+        'gt': as_np(truth[j]),
+        'candidate_xy': as_np(pred['trajectory_dense_candidates'][j]),
+        'candidate_valid': as_np(pred['trajectory_candidate_valid_mask'][j]),
+        'selected_xy': as_np(pred['trajectory_dense'][j]),
+        'anchor_candidate_xy': as_np(anchor_pred['trajectory_dense_candidates'][j]),
+        'anchor_selected_xy': as_np(anchor_pred['trajectory_dense_candidates'][j, mode]),
+        'control': as_np(pred['control'][j]),
+        'anchor_control': as_np(anchor_pred['control_candidates'][j, mode]),
+    }
+    if 'states' in pred:
+        result['states'] = as_np(pred['states'][j])
+        result['ltr'] = as_np(pred['ltr'][j])
+        result['payload'] = float(context['koopman_payload_kg'][j].item())
+        result['mu'] = float(context['koopman_road_mu'][j].item())
+    return result
+
 def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=0,
              batch_size=8, num_workers=0, device='auto', seeds='0,1,2,3,4',
              output_dir='outputs/evaluation/trace_open_loop',
@@ -128,6 +186,12 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
     out.mkdir(parents=True, exist_ok=True)
     steps = _parse_seeds(seeds)
     all_records, by_seed = [], []
+    chosen_indices=set(np.linspace(0,len(ds)-1,min(9,len(ds)),dtype=int).tolist())
+    representative=[]
+    temporal_sum=np.zeros(40,dtype=np.float64)
+    temporal_sum_sq=np.zeros(40,dtype=np.float64)
+    temporal_count=0
+    candidate_rows=[]
     horizon = int(model.ctrl_cfg.horizon_steps)
     if horizon != 40:
         raise ValueError('Expected TRACE 40x0.1s control horizon')
@@ -140,15 +204,30 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
                 feats = {k: v.to(dev, non_blocking=True) for k,v in features_cpu.items()}
                 truth = targets_cpu['trajectory_dense'].to(dev)
                 ctx = {k: targets_cpu[k].to(dev, non_blocking=True) for k in K2_CONTEXT} if fuel is not None else {}
+                # A single anchor selection is shared by the baseline and the
+                # diffusion inference, including adaptive/fixed anchor strategies.
+                prepared = model._prepare_anchors(feats)
+                anchor_pred = _anchor_prediction(model, prepared, ctx)
                 _sync(dev)
                 started = time.perf_counter()
-                pred = model.infer_multimodal(feats, generator=generator, context=ctx)
+                pred = model.infer_multimodal(prepared, generator=generator,
+                                             context=ctx, anchors_prepared=True)
                 _sync(dev)
                 elapsed_ms = (time.perf_counter()-started)*1000.
                 elapsed_times.append(elapsed_ms)
                 metrics = score_open_loop(pred, truth, feats, ctx,
                     dt=model.ctrl_cfg.dt, fuel_parameters=fuel,
-                    stability_config=jtp_cfg, require_k2=fuel is not None)
+                    stability_config=jtp_cfg, require_k2=fuel is not None,
+                    control_limits=model.control_limits)
+                anchor_metrics = score_open_loop(anchor_pred, truth, prepared, ctx,
+                    dt=model.ctrl_cfg.dt, fuel_parameters=fuel,
+                    stability_config=jtp_cfg, require_k2=fuel is not None,
+                    control_limits=model.control_limits)
+                # Error-by-horizon statistics include every evaluated sample/seed.
+                displacement = torch.linalg.vector_norm(pred['trajectory_dense'] - truth,dim=-1)
+                temporal_sum += displacement.sum(dim=0).cpu().numpy()
+                temporal_sum_sq += displacement.square().sum(dim=0).cpu().numpy()
+                temporal_count += int(displacement.shape[0])
                 batch = int(truth.shape[0])
                 for j in range(batch):
                     shard_id, shard_idx = ds._index[global_idx+j]
@@ -171,6 +250,33 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
                         if key != 'selected_mode':
                             value=float(val[j].detach().cpu().item())
                             row[key] = value if np.isfinite(value) else None
+                    for old,new in (('ade_m','anchor_ade_m'),('fde_m','anchor_fde_m'),
+                                    ('minade_k_m','anchor_minade_k_m'),
+                                    ('minfde_k_m','anchor_minfde_k_m'),
+                                    ('k2_stability_violated','anchor_k2_stability_violated'),
+                                    ('fuel_l_4s','anchor_fuel_l_4s'),
+                                    ('distance_m','anchor_distance_m')):
+                        if old in anchor_metrics:
+                            row[new]=float(anchor_metrics[old][j].cpu().item())
+                    for base,metric,name in (
+                        ('anchor_ade_m','ade_m','delta_ade_m'),
+                        ('anchor_fde_m','fde_m','delta_fde_m'),
+                        ('anchor_minade_k_m','minade_k_m','delta_minade_m'),
+                        ('anchor_minfde_k_m','minfde_k_m','delta_minfde_m')):
+                        row[name] = row[base]-row[metric]
+                    valid = pred['trajectory_candidate_valid_mask'][j].bool()
+                    ce=torch.linalg.vector_norm(
+                        pred['trajectory_dense_candidates'][j] - truth[j, None],dim=-1)
+                    for mid in range(int(valid.numel())):
+                        candidate_rows.append(dict(inference_seed=seed,
+                            sample_index=global_idx+j, mode=mid,
+                            valid=bool(valid[mid].item()),
+                            selected=bool(int(metrics['selected_mode'][j].item())==mid),
+                            ade_m=float(ce[mid].mean().cpu().item()),
+                            fde_m=float(ce[mid,-1].cpu().item())))
+                    if seed==steps[0] and global_idx+j in chosen_indices:
+                        representative.append(_representative(
+                            pred, anchor_pred, truth, prepared, ctx, j, global_idx+j,seed))
                     run_rows.append(row)
                 global_idx += batch
         summary = summarize_open_loop_rows(run_rows)
@@ -183,6 +289,29 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
               f'ADE={summary["ade_m"]:.4f}m FDE={summary["fde_m"]:.4f}m '
               f'K2-violation={summary.get("k2_stability_horizon_rate_pct",float("nan")):.2f}%',flush=True)
     _write_csv(out/'samples.csv',all_records)
+    _write_csv(out/'candidate_metrics.csv',candidate_rows)
+    _write_csv(out/'control_metrics.csv',[{k:v for k,v in r.items() if k in (
+        'sample_index','inference_seed','selected_mode','mean_abs_jerk_mps3',
+        'max_abs_jerk_mps3','mean_abs_steer_rate_radps',
+        'max_abs_steer_rate_radps','control_total_variation',
+        'control_bound_violation_fraction','control_saturation_fraction')} for r in all_records])
+    _write_csv(out/'anchor_metrics.csv',[{k:v for k,v in r.items() if k in (
+        'sample_index','inference_seed','anchor_ade_m','anchor_fde_m',
+        'anchor_minade_k_m','anchor_minfde_k_m','delta_ade_m',
+        'delta_fde_m','delta_minade_m','delta_minfde_m',
+        'anchor_k2_stability_violated','anchor_fuel_l_4s',
+        'anchor_distance_m')} for r in all_records])
+    _write_csv(out/'dynamics_metrics.csv',[{k:v for k,v in r.items() if k in (
+        'sample_index','inference_seed','peak_yaw_rate_deg_s',
+        'peak_sideslip_deg','peak_roll_deg','peak_ltr',
+        'k2_stability_violated','k2_stability_step_fraction',
+        'k2_yaw_rate_step_fraction','k2_sideslip_step_fraction',
+        'k2_roll_step_fraction','k2_ltr_step_fraction','fuel_l_per_100km')} for r in all_records])
+    time_grid=np.arange(1,41,dtype=np.float64)*model.ctrl_cfg.dt
+    error_series=[dict(time_s=float(t),mean_error_m=float(s/temporal_count),
+        std_error_m=float(np.sqrt(max(0.,q/temporal_count-(s/temporal_count)**2))),
+        observations=temporal_count) for t,s,q in zip(time_grid,temporal_sum,temporal_sum_sq)]
+    _write_csv(out/'error_by_horizon.csv',error_series)
     _write_csv(out/'metrics_by_seed.csv',by_seed)
     macro = {}
     for key in by_seed[0]:
@@ -212,11 +341,38 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         'stability_threshold_source':str(resolve_repo_file(jtp_config)),
         'stability_definition':'Any violation over 40 future K2 steps for horizon metric; step fraction also reported.',
         'fuel_definition':'VT-CPFM estimated from K2 predicted longitudinal speed. L/100km = 100000*sum(fuel L)/sum(K2 XY distance m). Check calibration before paper use.',
-        'planning_time_note':'Batched model inference only, synchronized CUDA, excluding data loading. Not paper closed-loop planning time.',
+        'planning_time_note':'Batched model inference only, synchronized CUDA, excluding anchor-only rollout and data loading. Not paper closed-loop planning time.',
+        'candidate_definition':'K valid modes, all evaluated at the same 40-step K2 prediction times; oracle minADE and minFDE are independently selected.',
+        'anchor_definition':'Same prepared control bank, same K2, goal-endpoint model selection without using GT; figure shows the diffusion-selected mode paired anchor.',
+        'plot_samples':'Deterministic evenly spaced validation indices from the first inference seed; no best-case selection.',
+        'paper_visualization_sources':'Representative arrays and CSV; paper graphics are generated from actual predictions.',
     }
     report={'manifest':manifest,'mean_sd_over_seeds':macro,'pooled':pooled,'per_seed':by_seed}
     (out/'summary.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
     (out/'manifest.json').write_text(json.dumps(manifest,indent=2,ensure_ascii=False),encoding='utf-8')
+    if representative:
+        from .open_loop_visualization import plot_open_loop_figures
+        plot_open_loop_figures(representative, all_records, error_series,
+                               out/'figures',dt=model.ctrl_cfg.dt,
+                               stability_config=jtp_cfg)
+    from .paper_reporting import write_open_loop_panel
+    write_open_loop_panel(out)
+    report_text=[
+        '# TRACE Open-loop Evaluation (Nominal K2)',
+        '',f'- Checkpoint: `{cp}`',f'- Dataset: `{root}`',
+        f'- Split: `{split}`',f'- Samples per inference seed: {len(ds)}',
+        f'- Inference seeds: {steps}',
+        '- K2 predicts trajectories and chassis responses; no TruckSim is stepped.',
+        '- JTP is disabled. These are not closed-loop success/collision/spacing metrics.',
+        '- Paper minADE_K/minFDE_K use the 40-step **valid** candidate set.',
+        '', '## Pooled metrics', '', '| Metric | Value |', '|---|---:|'
+    ]
+    report_text += [f'| {k} | {v:.6g} |' for k,v in pooled.items() if k!='num_samples']
+    report_text += ['', '## Manuscript figure outputs', '']
+    for name in ('open_loop_trajectory_distribution','open_loop_error_statistics',
+                 'open_loop_control_profiles','open_loop_chassis_responses'):
+        report_text.append(f'- `figures/{name}.pdf`')
+    (out/'report.md').write_text('\n'.join(report_text)+'\n',encoding='utf-8')
     return report
 
 

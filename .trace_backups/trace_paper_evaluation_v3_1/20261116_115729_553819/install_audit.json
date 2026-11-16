@@ -1,0 +1,17 @@
+{
+  "source_archive": "AllMerge-main(20261116-034539).zip",
+  "updated_files": [
+    "evaluation/eval_diffusion_closed_loop.py",
+    "evaluation/trace_planning/metrics.py",
+    "evaluation/trace_planning/open_loop.py",
+    "evaluation/trace_planning/comparison.py",
+    "evaluation/trace_planning/paper_reporting.py",
+    "evaluation/trace_planning/closed_loop.py",
+    "evaluation/trace_planning/open_loop_visualization.py",
+    "evaluation/trace_planning/README.md",
+    "evaluation/trace_planning/run_paper_evaluation.py",
+    "highway_env/planner/diffusion/models/control.py",
+    "tests/test_trace_paper_evaluation_v3.py"
+  ],
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge"
+}

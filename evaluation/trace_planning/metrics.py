@@ -40,7 +40,7 @@ def score_open_loop(pred: dict[str, torch.Tensor], truth: torch.Tensor,
                     features: dict[str, torch.Tensor],
                     context: dict[str, torch.Tensor],
                     *, dt: float, fuel_parameters: Any, stability_config: dict,
-                    require_k2: bool = True) -> dict[str, torch.Tensor]:
+                    require_k2: bool = True, control_limits=None) -> dict[str, torch.Tensor]:
     """One score per expert sample; candidate minima use all 10 selected anchors.
 
     Note: minADE and minFDE are computed independently across candidates.
@@ -57,20 +57,54 @@ def score_open_loop(pred: dict[str, torch.Tensor], truth: torch.Tensor,
     sparse_gt = truth[:, 4::5]
     sparse_err = torch.linalg.vector_norm(pred['trajectory'] - sparse_gt, dim=-1)
     candidates_err = torch.linalg.vector_norm(candidates - sparse_gt[:, None], dim=-1)
+    dense_candidates = pred.get('trajectory_dense_candidates')
+    if dense_candidates is None or dense_candidates.shape != (b, candidates.shape[1], h, 2):
+        raise ValueError('Dense candidate trajectories [B,K,40,2] required for paper minADE_K/minFDE_K')
+    dense_candidates_err = torch.linalg.vector_norm(dense_candidates - truth[:, None], dim=-1)
     valid = pred.get('trajectory_candidate_valid_mask', features['mode_valid_mask']).bool()
     if valid.shape != candidates_err.shape[:2] or not bool(valid.any(dim=1).all()):
         raise ValueError('Invalid candidate mask or no valid modes')
     candidate_ade = candidates_err.mean(dim=-1).masked_fill(~valid, float('inf'))
     candidate_fde = candidates_err[..., -1].masked_fill(~valid, float('inf'))
+    dense_candidate_ade = dense_candidates_err.mean(dim=-1).masked_fill(~valid, float('inf'))
+    dense_candidate_fde = dense_candidates_err[..., -1].masked_fill(~valid, float('inf'))
+    # Mean pairwise full-horizon trajectory distance, excluding invalid modes.
+    pairwise = torch.linalg.vector_norm(dense_candidates[:, :, None] - dense_candidates[:, None, :], dim=-1)
+    pairwise = pairwise.mean(dim=-1)
+    pair_mask = valid[:, :, None] & valid[:, None, :]
+    pair_mask = pair_mask & ~torch.eye(valid.shape[1], dtype=torch.bool, device=valid.device)[None]
+    diversity = (pairwise * pair_mask).sum(dim=(1, 2)) / pair_mask.sum(dim=(1, 2)).clamp_min(1)
+    endpoints = torch.linalg.vector_norm(dense_candidates[:, :, None, -1] - dense_candidates[:, None, :, -1], dim=-1)
+    endpoint_diversity = (endpoints * pair_mask).sum(dim=(1, 2)) / pair_mask.sum(dim=(1, 2)).clamp_min(1)
     res = {
         'ade_m': err.mean(dim=-1), 'fde_m': err[:, -1],
         'sparse_ade_m': sparse_err.mean(dim=-1),
         'sparse_fde_m': sparse_err[:, -1],
         'minade8_m': candidate_ade.min(dim=-1).values,
         'minfde8_m': candidate_fde.min(dim=-1).values,
+        'minade_k_m': dense_candidate_ade.min(dim=-1).values,
+        'minfde_k_m': dense_candidate_fde.min(dim=-1).values,
+        'candidate_diversity_m': diversity,
+        'candidate_endpoint_diversity_m': endpoint_diversity,
+        'valid_candidate_count': valid.sum(dim=-1).float(),
         'goal_error_m': torch.linalg.vector_norm(
             pred['pose'][:, -1, :2] - features['target_point'], dim=-1),
     }
+    if 'control' in pred:
+        u = pred['control']
+        if u.shape != (b, h, 2):
+            raise ValueError('Selected controls must be [B,40,2]')
+        da = torch.diff(u[:, :, 0], dim=-1) / dt
+        dd = torch.diff(u[:, :, 1], dim=-1) / dt
+        res['mean_abs_jerk_mps3'] = da.abs().mean(dim=-1)
+        res['max_abs_jerk_mps3'] = da.abs().amax(dim=-1)
+        res['mean_abs_steer_rate_radps'] = dd.abs().mean(dim=-1)
+        res['max_abs_steer_rate_radps'] = dd.abs().amax(dim=-1)
+        res['control_total_variation'] = torch.diff(u, dim=1).abs().sum(dim=(1, 2))
+        if control_limits is not None:
+            bounds = torch.as_tensor(control_limits, device=u.device, dtype=u.dtype).view(1, 1, 2)
+            res['control_bound_violation_fraction'] = (u.abs() > bounds + 1e-6).float().mean(dim=(1, 2))
+            res['control_saturation_fraction'] = (u.abs() >= bounds * 0.99).float().mean(dim=(1, 2))
     poses = pred['pose']
     distance = torch.linalg.vector_norm(poses[:, 1:, :2] - poses[:, :-1, :2], dim=-1).sum(dim=-1)
     res['distance_m'] = distance
@@ -81,6 +115,11 @@ def score_open_loop(pred: dict[str, torch.Tensor], truth: torch.Tensor,
         p = context['koopman_payload_kg'].reshape(-1)
         mu = context['koopman_road_mu'].reshape(-1)
         flags = stability_flags(pred['states'], pred['ltr'], p, mu, stability_config)
+        beta = torch.atan2(pred['states'][:, 1:, 1], pred['states'][:, 1:, 0])
+        res['peak_yaw_rate_deg_s'] = torch.rad2deg(pred['states'][:, 1:, 2].abs().amax(dim=-1))
+        res['peak_sideslip_deg'] = torch.rad2deg(beta.abs().amax(dim=-1))
+        res['peak_roll_deg'] = torch.rad2deg(pred['states'][:, 1:, 3].abs().amax(dim=-1))
+        res['peak_ltr'] = pred['ltr'][:, 1:].abs().amax(dim=-1)
         res['k2_stability_violated'] = flags['any'].any(dim=-1).float()
         res['k2_stability_step_fraction'] = flags['any'].float().mean(dim=-1)
         for name in ('yaw_rate', 'sideslip', 'roll', 'ltr'):
@@ -119,6 +158,16 @@ def summarize_open_loop_rows(rows: list[dict]) -> dict:
     if not rows:
         raise ValueError('No open-loop evaluation rows')
     metrics = ('ade_m','fde_m','sparse_ade_m','sparse_fde_m','minade8_m','minfde8_m',
+               'minade_k_m','minfde_k_m','candidate_diversity_m',
+               'candidate_endpoint_diversity_m','valid_candidate_count',
+               'anchor_ade_m','anchor_fde_m','anchor_minade_k_m','anchor_minfde_k_m',
+               'anchor_k2_stability_violated','anchor_fuel_l_4s','anchor_distance_m',
+               'delta_ade_m','delta_fde_m','delta_minade_m','delta_minfde_m',
+               'mean_abs_jerk_mps3','max_abs_jerk_mps3',
+               'mean_abs_steer_rate_radps','max_abs_steer_rate_radps',
+               'control_total_variation','control_bound_violation_fraction',
+               'control_saturation_fraction','peak_yaw_rate_deg_s',
+               'peak_sideslip_deg','peak_roll_deg','peak_ltr',
                'goal_error_m','fuel_l_4s','k2_stability_violated',
                'k2_stability_step_fraction','k2_yaw_rate_step_fraction',
                'k2_sideslip_step_fraction','k2_roll_step_fraction',
@@ -131,6 +180,14 @@ def summarize_open_loop_rows(rows: list[dict]) -> dict:
     if 'k2_stability_violated' in out:
         out['k2_stability_horizon_rate_pct'] = 100.0 * out['k2_stability_violated']
         out['k2_stability_step_rate_pct'] = 100.0 * out['k2_stability_step_fraction']
+    anchor_stability = [r for r in rows if 'anchor_k2_stability_violated' in r]
+    if anchor_stability:
+        out['anchor_k2_stability_horizon_rate_pct'] = (100. * np.mean(
+            [float(r['anchor_k2_stability_violated']) for r in anchor_stability]))
+    anchor_fuel = [r for r in rows if ('anchor_fuel_l_4s' in r and
+                    r.get('anchor_distance_m', 0) > 1.0)]
+    if anchor_fuel:
+        out['anchor_fuel_l_per_100km'] = 100000. * sum(float(r['anchor_fuel_l_4s']) for r in anchor_fuel) / sum(float(r['anchor_distance_m']) for r in anchor_fuel)
     valid = [r for r in rows if 'fuel_l_4s' in r and r['distance_m'] > 1.0]
     if valid:
         out['fuel_l_per_100km'] = 100000.0 * sum(float(r['fuel_l_4s']) for r in valid) / sum(float(r['distance_m']) for r in valid)

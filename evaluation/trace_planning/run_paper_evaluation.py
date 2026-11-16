@@ -16,7 +16,7 @@ AVAILABLE_METHODS = ('TRACE', 'Expert Planner')
 
 def main(argv=None):
     p = argparse.ArgumentParser(description='Unified real-TruckSim paper evaluation')
-    p.add_argument('--checkpoint', required=True, help='TRACE ControlDiffusion checkpoint')
+    p.add_argument('--checkpoint', help='TRACE ControlDiffusion checkpoint (omit only with --runs)')
     p.add_argument('--config', default='configs/train/diffusion.yaml')
     p.add_argument('--methods', default='TRACE,Expert Planner',
                    help='Currently implemented: TRACE,Expert Planner')
@@ -33,7 +33,11 @@ def main(argv=None):
     p.add_argument('--copy-dlls', action='store_true')
     p.add_argument('--figure-seed', type=int, default=0)
     p.add_argument('--figure-scenarios', default='straight,merge_in,curved')
-    p.add_argument('--output-dir', default='outputs/evaluation/TRACE_paper_v2')
+    p.add_argument('--output-dir', default='outputs/evaluation/TRACE_paper_v3')
+    p.add_argument('--open-loop-dir',action='append',default=[],
+                   help='Repeat: F0=outputs/evaluation/open_f0; F3=...')
+    p.add_argument('--runs',action='append',default=[],
+                   help='Aggregate existing native TruckSim episode folders, skip simulation')
     p.add_argument('--check-only', action='store_true')
     a = p.parse_args(argv)
     methods = [x.strip() for x in a.methods.split(',') if x.strip()]
@@ -42,13 +46,15 @@ def main(argv=None):
     if bad:
         p.error(f'Planner adapters not implemented in this source snapshot: {bad}. '
                 f'Available genuine adapters: {AVAILABLE_METHODS}.')
-    if 'TRACE' not in methods:
-        p.error('TRACE must be included; --checkpoint is required.')
+    if not a.runs and 'TRACE' not in methods:
+        p.error('TRACE must be included for newly run evaluations.')
+    if not a.runs and not a.checkpoint:
+        p.error('--checkpoint is required when running new TruckSim episodes')
     if a.episodes < 1 or not scenarios:
         p.error('--episodes must be positive and --scenarios non-empty')
     root = Path(a.output_dir)
     run_dirs = []
-    for method in methods:
+    for method in ([] if a.runs else methods):
         tag = method.replace(' ', '_')
         run_dir = root / 'episodes' / tag
         run_dirs.append(run_dir)
@@ -68,13 +74,15 @@ def main(argv=None):
         if not a.check_only:
             subprocess.run(cmd, check=True)
     if a.check_only:
-        print('[PASS] Unified evaluation preflight completed. No TruckSim episode was run.')
+        print('[PREVIEW ONLY] Commands printed; native TruckSim availability was not tested.')
         return 0
     cmp_cmd = [sys.executable, '-m', 'evaluation.trace_planning.comparison']
+    run_dirs = (a.runs if a.runs else run_dirs)
     for d in run_dirs: cmp_cmd += ['--runs', str(d)]
     cmp_cmd += ['--output-dir', str(root / 'paper_results'),
                 '--figure-seed', str(a.figure_seed),
                 '--figure-scenarios', a.figure_scenarios]
+    for spec in a.open_loop_dir: cmp_cmd += ['--open-loop-dir', spec]
     print('[AGGREGATE]', ' '.join(cmp_cmd), flush=True)
     subprocess.run(cmp_cmd, check=True)
     print(f'[DONE] Results: {root / "paper_results"}')

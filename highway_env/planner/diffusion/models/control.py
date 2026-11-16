@@ -324,9 +324,9 @@ class ControlDiffusionPlanner(nn.Module):
         return output
 
     def infer_multimodal(self, features, generator: Optional[torch.Generator] = None,
-                         num_steps: Optional[int] = None, context=None):
+                         num_steps: Optional[int] = None, context=None, *, anchors_prepared=False):
         cfg = self.ctrl_cfg
-        features = self._prepare_anchors(features)
+        features = features if anchors_prepared else self._prepare_anchors(features)
         controls_all = self._sample_controls(features, generator=generator,
                                              num_steps=num_steps)
         pred = self._all_predictions(controls_all, features, context)
@@ -344,6 +344,9 @@ class ControlDiffusionPlanner(nn.Module):
             'trajectory_dense': future_xy,
             'trajectory': future_xy[:, 4::5, :],
             'trajectory_candidates': poses_all[:, :, 5::5, :2],
+            # Full 40-step K2 trajectories are required for paper minADE_K/minFDE_K.
+            'trajectory_dense_candidates': poses_all[:, :, 1:, :2],
+            'pose_candidates': poses_all,
             'trajectory_mode_logits': scores,
             'trajectory_mode_idx': mode,
             # Expose the actual post-anchor-selection validity mask so an
@@ -354,4 +357,6 @@ class ControlDiffusionPlanner(nn.Module):
         if pred['ltr'] is not None:
             result['ltr'] = pred['ltr'][idx, mode]
             result['states'] = pred['states'][idx, mode]
+            result['ltr_candidates'] = pred['ltr']
+            result['states_candidates'] = pred['states']
         return result

@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .metrics import center_spacing_error, summarize_closed_loop_rows
+from .paper_reporting import read_open_loop_runs, build_open_rows, combined_latex
 from .open_loop import _write_csv
 
 PAPER_METHODS=('Expert Planner','Cooperative OCP','TransFuser','TRACE')
@@ -92,79 +93,135 @@ def _validate(rows, complete_paper):
     if complete_paper:
         missing=set(PAPER_METHODS)-set(by_method)
         scenarios={r['scenario'] for r in rows}
-        if missing or len(scenarios)!=5:
-            raise ValueError(f'Paper requires 4 methods and exactly 5 validated scenarios. '
-                             f'Missing methods={sorted(missing)}, found scenarios={sorted(scenarios)}')
+        if missing:
+            raise ValueError(f'Paper requires all 4 genuinely executed methods. '
+                             f'Missing methods={sorted(missing)}')
     return sorted({r['scenario'] for r in rows})
 
 
 def _plot_episodes(rows, scenarios, seed, output_dir):
+    """One manuscript Fig. 5: actual trajectories and actual signed spacing.
+
+    The old report plotted absolute spacing *errors*, which is not the spacing
+    response required by the manuscript. Coordinates and target references
+    come exclusively from native executed episodes.
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    chosen=[s for s in scenarios if any(r['scenario']==s and r['seed']==seed for r in rows)]
+    chosen=[s for s in scenarios if any(r['scenario']==s and int(r['seed'])==seed for r in rows)]
     if not chosen:return None
-    fig,ax=plt.subplots(len(chosen),2,figsize=(12,3.5*len(chosen)),squeeze=False,
+    fig,ax=plt.subplots(len(chosen),2,figsize=(11.5,3.0*len(chosen)),squeeze=False,
                         layout='constrained')
     plotted=False
     palette={'Expert Planner':'#666666','Cooperative OCP':'#C16E38',
              'TransFuser':'#1B84B3','TRACE':'#5A44A4'}
     for n,scenario in enumerate(chosen):
+        local_targets=set()
         for method in PAPER_METHODS:
-            episode=next((r for r in rows if r['scenario']==scenario and r['seed']==seed and r['method']==method),None)
+            episode=next((r for r in rows if r['scenario']==scenario and
+                int(r['seed'])==seed and r['method']==method),None)
             if episode is None: continue
             source=Path(episode['_source']).with_suffix('.npz')
             if not source.exists():
-                continue
+                raise FileNotFoundError(f'Native TruckSim plot data missing: {source}')
             with np.load(source,allow_pickle=False) as data:
-                position=data['position_m']; heading=data['heading_rad'];time_s=data['time_s']
-                gaps=data['spacing_abs_error_m'] if 'spacing_abs_error_m' in data.files else center_spacing_error(position,heading,float(episode.get('spacing_target_m', 15.0)))
+                position=np.asarray(data['position_m']);heading=np.asarray(data['heading_rad']);
+                time_s=np.asarray(data['time_s'])
+            if len(time_s)!=len(position) or heading.shape!=position.shape[:2]:
+                raise ValueError(f'Invalid recorded time grid/poses: {source}')
+            if 'spacing_target_m' not in episode:
+                raise ValueError(f'Explicit spacing_target_m missing in {episode["_source"]}; '
+                                 'rerun with paper-evaluation version; do not assume 15 m')
+            target=float(episode['spacing_target_m']);local_targets.add(target)
+            tangent=np.stack((np.cos(heading[:, :-1]),np.sin(heading[:, :-1])),axis=-1)
+            signed_gaps=((position[:, :-1]-position[:, 1:])*tangent).sum(axis=-1)
+            # Full t=0 ... t=end signed gap is plotted, not the T-step error array.
             for car in range(position.shape[1]):
                 ax[n,0].plot(position[:,car,0],position[:,car,1],color=palette[method],
-                             alpha=1.-car*0.21,linestyle=('-','--',':')[car%3],
+                             alpha=1.-car*.2,linestyle=('-','--',':')[car%3],
                              label=method if car==0 else None)
-            ax[n,1].plot(time_s,np.mean(gaps,axis=1),label=method,
-                         color=palette[method])
+            ax[n,1].plot(time_s,np.mean(signed_gaps,axis=1),label=method,
+                         color=palette[method],lw=1.6)
             plotted=True
+        if len(local_targets)>1:
+            raise ValueError(f'Platoon spacing targets differ among baselines: {scenario}')
+        if local_targets:
+            ax[n,1].axhline(next(iter(local_targets)),color='#333333',ls='--',
+                            lw=1.1,label='Target spacing')
         ax[n,0].set(title=scenario+'  executed trajectories',xlabel='World X (m)',ylabel='World Y (m)')
-        ax[n,1].set(title=scenario+'  spacing response',xlabel='Time (s)',ylabel='Mean |spacing error| (m)')
+        ax[n,1].set(title=scenario+'  signed longitudinal spacing',
+                    xlabel='Time (s)',ylabel='Mean center spacing (m)')
         for a in ax[n]:
             a.grid(alpha=0.25)
-            handles,_ = a.get_legend_handles_labels()
-            if handles: a.legend(fontsize=8)
+            handles,_=a.get_legend_handles_labels()
+            if handles:a.legend(fontsize=8,frameon=False)
     if not plotted:
         plt.close(fig)
         return None
     out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
-    fig.savefig(out/'planning_comparison.pdf')
-    fig.savefig(out/'planning_comparison.png',dpi=300)
+    fig.savefig(out/'planning_comparison.pdf',bbox_inches='tight')
+    fig.savefig(out/'planning_comparison.png',dpi=250,bbox_inches='tight')
     plt.close(fig)
     return str(out/'planning_comparison.pdf')
 
-
 def evaluate(paths, *, output_dir, complete_paper=False, figure_seed=0,
-             figure_scenarios='straight,merge_in,curved'):
+             figure_scenarios='straight,merge_in,curved', open_loop_dirs=None):
     rows=_load_rows(paths)
     scenarios=_validate(rows,complete_paper)
     grouped=defaultdict(list)
     for row in rows:grouped[row['method']].append(row)
     sums={key:summarize_closed_loop_rows(rs) for key,rs in grouped.items()}
     out=Path(output_dir);out.mkdir(parents=True,exist_ok=True)
-    (out/'planning_comparison_table.tex').write_text(_latex_table(sums),encoding='utf-8')
+    open_runs,open_verified=read_open_loop_runs(open_loop_dirs)
+    open_rows=build_open_rows(open_runs)
+    (out/'planning_comparison_table.tex').write_text(
+        combined_latex(open_rows,sums),encoding='utf-8')
+    # Keep a self-contained figures folder matching every manuscript includegraphics.
+    figures=out/'figures';figures.mkdir(parents=True,exist_ok=True)
+    if 'F3' in open_runs:
+        import shutil
+        from .open_loop_visualization import PAPER_OPEN_FIGURES
+        f3_dir=open_runs['F3'][1]/'figures'
+        for name in PAPER_OPEN_FIGURES:
+            for ext in ('pdf','png'):
+                src=f3_dir/(name+'.'+ext)
+                if not src.is_file():
+                    raise FileNotFoundError(f'F3 paper figure missing: {src}')
+                shutil.copy2(src,figures/src.name)
     _write_csv(out/'paper_metrics.csv',[{'method':m,**s} for m,s in sums.items()])
     current_scenarios=[s for s in figure_scenarios.split(',') if s in scenarios]
-    graph=_plot_episodes(rows,current_scenarios,figure_seed,out)
+    graph=_plot_episodes(rows,current_scenarios,figure_seed,figures)
+    ready=(set(PAPER_METHODS)==set(grouped) and set(open_runs)=={'F0','F3'}
+           and graph is not None and len(current_scenarios)>=3)
+    if complete_paper and not ready:
+        raise ValueError('Complete manuscript requires verified F0/F3 open-loop runs, '
+                         'all four genuine native TruckSim methods and three figure scenarios')
     manifest={
         'study':'Real TruckSim executed platoon motion planning',
         'complete_paper_table':bool(complete_paper),
-        'complete_paper_ready':set(PAPER_METHODS)==set(grouped) and len(scenarios)==5,
+        'complete_paper_ready':ready,
         'methods':list(grouped),'scenarios':scenarios,
         'paper_methods':list(PAPER_METHODS),
         'note':'Missing baseline values are --, never invented. Scenes/physical plants/seeds are paired exactly.',
         'figure':'Actual recorded traces for selected representative project scenarios; 3x2 trajectory/spacing layout.',
         'figure_output':graph,
+        'open_loop_verified_runs':open_verified,
+        'open_loop_panel_available':bool(open_rows),
+        'paper_table':str(out/'planning_comparison_table.tex'),
     }
     (out/'comparison_summary.json').write_text(json.dumps(dict(metrics=sums,manifest=manifest),indent=2,ensure_ascii=False),encoding='utf-8')
+    note=['# TRACE Manuscript Evaluation Results', '',
+        '- `planning_comparison_table.tex`: one two-panel table for the manuscript.',
+        '- `figures/planning_comparison.pdf`: native TruckSim trajectories and spacing.',
+        '- `figures/open_loop_*.pdf`: four F3 nominal-K2 open-loop figures when supplied.',
+        '- Unimplemented baselines remain `--` and are not substituted.',
+        '- All TRACE reported episodes must exclude post-warmup Polynomial fallback.',
+        '', '## Verified open-loop runs', '']
+    note += [f'- {v["label"]}: {v["directory"]}' for v in open_verified] or ['- None']
+    note += ['', '## Verified closed-loop methods', '']
+    note += [f'- {method}: {s["episodes"]} episodes' for method,s in sums.items()]
+    (out/'report.md').write_text('\n'.join(note)+'\n',encoding='utf-8')
     print(json.dumps(manifest,indent=2,ensure_ascii=False))
     return sums
 
@@ -177,13 +234,15 @@ def main(argv=None):
     parser.add_argument('--complete-paper',action='store_true',help='Require 4 methods and 5 scenes')
     parser.add_argument('--figure-seed',type=int,default=0)
     parser.add_argument('--figure-scenarios',default='straight,merge_in,curved')
+    parser.add_argument('--open-loop-dir',action='append',default=[],help='F0=PATH or F3=PATH; repeat')
     parser.add_argument('--eval-config',default='configs/evaluation/trace_planning.yaml')
     probe,_=parser.parse_known_args(argv)
     from .eval_config import defaults
     parser.set_defaults(**defaults(probe.eval_config,'comparison'))
     args=parser.parse_args(argv)
     evaluate(args.runs,output_dir=args.output_dir,complete_paper=args.complete_paper,
-             figure_seed=args.figure_seed,figure_scenarios=args.figure_scenarios)
+             figure_seed=args.figure_seed,figure_scenarios=args.figure_scenarios,
+             open_loop_dirs=args.open_loop_dir)
     return 0
 
 if __name__=='__main__':
