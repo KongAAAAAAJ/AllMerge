@@ -1,0 +1,10 @@
+{
+  "version": "3.2",
+  "updated_files": [
+    "evaluation/trace_planning/comparison.py",
+    "evaluation/trace_planning/open_loop.py",
+    "evaluation/trace_planning/open_loop_visualization.py",
+    "tests/test_trace_paper_evaluation_v3_2.py"
+  ],
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge"
+}

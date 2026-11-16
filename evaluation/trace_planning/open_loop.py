@@ -109,7 +109,7 @@ def _anchor_prediction(model, features, context):
 
 
 def _representative(pred, anchor_pred, truth, features, context, selected, sample_index, seed):
-    """Collect a small deterministic visual subset (no GT-based case selection)."""
+    """Collect random figure inputs, including real map lane geometry and all paired anchor modes."""
     j = selected
     mode = int(pred['trajectory_mode_idx'][j].item())
     as_np = lambda x: x.detach().cpu().numpy().copy()
@@ -123,6 +123,15 @@ def _representative(pred, anchor_pred, truth, features, context, selected, sampl
         'anchor_selected_xy': as_np(anchor_pred['trajectory_dense_candidates'][j, mode]),
         'control': as_np(pred['control'][j]),
         'anchor_control': as_np(anchor_pred['control_candidates'][j, mode]),
+        'anchor_controls_bank': as_np(anchor_pred['control_candidates'][j]),
+        'anchor_goal_selected_xy': as_np(anchor_pred['trajectory_dense'][j]),
+        'anchor_goal_selected_mode': int(anchor_pred['trajectory_mode_idx'][j].item()),
+        'anchor_kinematic_xy': as_np(features['coarse_trajectories'][j]),
+        'map_polylines': as_np(features['map_polylines'][j]),
+        'map_valid_mask': as_np(features['map_valid_mask'][j]),
+        'target_point': as_np(features['target_point'][j]),
+        'initial_speed_mps': float(features['ego_state'][j,0].item()),
+        'goal_lateral_m': float(features['target_point'][j,1].item()),
     }
     if 'states' in pred:
         result['states'] = as_np(pred['states'][j])
@@ -134,7 +143,8 @@ def _representative(pred, anchor_pred, truth, features, context, selected, sampl
 def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=0,
              batch_size=8, num_workers=0, device='auto', seeds='0,1,2,3,4',
              output_dir='outputs/evaluation/trace_open_loop',
-             jtp_config='configs/projection/jtp.yaml', allow_kinematic=False):
+             jtp_config='configs/projection/jtp.yaml', allow_kinematic=False,
+             visualization_seed=0, figure_samples=8, chassis_stat_samples=64):
     from data_pipeline.expert_dataset import AllMergeExpertDatasetConfig, AllMergeExpertShardDataset
     from highway_env.planner.diffusion.config.experiment import load_mode_yaml, resolve_repo_file
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
@@ -186,7 +196,12 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
     out.mkdir(parents=True, exist_ok=True)
     steps = _parse_seeds(seeds)
     all_records, by_seed = [], []
-    chosen_indices=set(np.linspace(0,len(ds)-1,min(9,len(ds)),dtype=int).tolist())
+    # Uniform random sampling, independent of predictions/GT errors.
+    # Capture 64 per-sample K2 responses for Fig. 4, reusing the same pool
+    # for 8 trajectory panels and 3 condition-stratified control columns.
+    rng = np.random.default_rng(int(visualization_seed))
+    pool_size = min(len(ds), max(int(figure_samples), int(chassis_stat_samples), 3))
+    chosen_indices = set(map(int, rng.choice(len(ds), size=pool_size, replace=False)))
     representative=[]
     temporal_sum=np.zeros(40,dtype=np.float64)
     temporal_sum_sq=np.zeros(40,dtype=np.float64)
@@ -274,6 +289,24 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
                             selected=bool(int(metrics['selected_mode'][j].item())==mid),
                             ade_m=float(ce[mid].mean().cpu().item()),
                             fde_m=float(ce[mid,-1].cpu().item())))
+                    # The same-mode paired anchor is NOT the independently
+                    # goal-selected anchor used by anchor_ade_m baseline.
+                    same_mode = int(metrics['selected_mode'][j].item())
+                    paired_xy = anchor_pred['trajectory_dense_candidates'][j, same_mode]
+                    paired_err = torch.linalg.vector_norm(paired_xy - truth[j], dim=-1)
+                    row['paired_anchor_ade_m'] = float(paired_err.mean().cpu().item())
+                    row['paired_anchor_fde_m'] = float(paired_err[-1].cpu().item())
+                    row['delta_paired_ade_m'] = row['paired_anchor_ade_m'] - row['ade_m']
+                    row['delta_paired_fde_m'] = row['paired_anchor_fde_m'] - row['fde_m']
+                    anchor_controls = prepared['coarse_controls'][j]
+                    valid_controls = prepared['mode_valid_mask'][j].bool()
+                    if bool(valid_controls.any()):
+                        anchor_accel = anchor_controls[valid_controls, :, 0]
+                        const = (anchor_accel.amax(dim=-1) - anchor_accel.amin(dim=-1) < 1e-5)
+                        row['anchor_constant_accel_mode_fraction'] = float(const.float().mean().cpu().item())
+                        row['anchor_accel_abs_mean_mps2'] = float(anchor_accel.abs().mean().cpu().item())
+                        row['anchor_steering_time_variation_rad'] = float(
+                            torch.diff(anchor_controls[valid_controls,:,1],dim=1).abs().sum(dim=1).mean().cpu().item())
                     if seed==steps[0] and global_idx+j in chosen_indices:
                         representative.append(_representative(
                             pred, anchor_pred, truth, prepared, ctx, j, global_idx+j,seed))
@@ -300,13 +333,22 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         'anchor_minade_k_m','anchor_minfde_k_m','delta_ade_m',
         'delta_fde_m','delta_minade_m','delta_minfde_m',
         'anchor_k2_stability_violated','anchor_fuel_l_4s',
-        'anchor_distance_m')} for r in all_records])
+        'anchor_distance_m','paired_anchor_ade_m','paired_anchor_fde_m',
+        'delta_paired_ade_m','delta_paired_fde_m',
+        'anchor_constant_accel_mode_fraction','anchor_accel_abs_mean_mps2',
+        'anchor_steering_time_variation_rad')} for r in all_records])
     _write_csv(out/'dynamics_metrics.csv',[{k:v for k,v in r.items() if k in (
         'sample_index','inference_seed','peak_yaw_rate_deg_s',
         'peak_sideslip_deg','peak_roll_deg','peak_ltr',
         'k2_stability_violated','k2_stability_step_fraction',
         'k2_yaw_rate_step_fraction','k2_sideslip_step_fraction',
         'k2_roll_step_fraction','k2_ltr_step_fraction','fuel_l_per_100km')} for r in all_records])
+    _write_csv(out/'anchor_control_audit.csv',[{k:v for k,v in r.items() if k in (
+        'sample_index','inference_seed','selected_mode',
+        'anchor_constant_accel_mode_fraction','anchor_accel_abs_mean_mps2',
+        'anchor_steering_time_variation_rad',
+        'paired_anchor_ade_m','anchor_ade_m','ade_m',
+        'delta_paired_ade_m','delta_ade_m')} for r in all_records])
     time_grid=np.arange(1,41,dtype=np.float64)*model.ctrl_cfg.dt
     error_series=[dict(time_s=float(t),mean_error_m=float(s/temporal_count),
         std_error_m=float(np.sqrt(max(0.,q/temporal_count-(s/temporal_count)**2))),
@@ -344,7 +386,9 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         'planning_time_note':'Batched model inference only, synchronized CUDA, excluding anchor-only rollout and data loading. Not paper closed-loop planning time.',
         'candidate_definition':'K valid modes, all evaluated at the same 40-step K2 prediction times; oracle minADE and minFDE are independently selected.',
         'anchor_definition':'Same prepared control bank, same K2, goal-endpoint model selection without using GT; figure shows the diffusion-selected mode paired anchor.',
-        'plot_samples':'Deterministic evenly spaced validation indices from the first inference seed; no best-case selection.',
+        'plot_samples':f'Uniform random sample pool up to {pool_size}, visualization_seed={visualization_seed}; 8 trajectory and 3 varied-condition control profiles; no error ranking.',
+        'anchor_metric_note':'anchor_ade_m = goal-selected independent anchor K2 ADE; paired_anchor_ade_m = same-mode anchor paired with diffusion selected mode. Never conflate these.',
+        'anchor_control_note':'The A1 AllMergeAnchorBuilder longitudinal acceleration is piecewise constant by construction, not caused by plotting.',
         'paper_visualization_sources':'Representative arrays and CSV; paper graphics are generated from actual predictions.',
     }
     report={'manifest':manifest,'mean_sd_over_seeds':macro,'pooled':pooled,'per_seed':by_seed}
@@ -354,7 +398,11 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         from .open_loop_visualization import plot_open_loop_figures
         plot_open_loop_figures(representative, all_records, error_series,
                                out/'figures',dt=model.ctrl_cfg.dt,
-                               stability_config=jtp_cfg)
+                               stability_config=jtp_cfg,
+                               visualization_seed=int(visualization_seed),
+                               trajectory_count=int(figure_samples),
+                               chassis_count=int(chassis_stat_samples),
+                               control_limits=model.control_limits)
     from .paper_reporting import write_open_loop_panel
     write_open_loop_panel(out)
     report_text=[
@@ -370,7 +418,7 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
     report_text += [f'| {k} | {v:.6g} |' for k,v in pooled.items() if k!='num_samples']
     report_text += ['', '## Manuscript figure outputs', '']
     for name in ('open_loop_trajectory_distribution','open_loop_error_statistics',
-                 'open_loop_control_profiles','open_loop_chassis_responses'):
+                 'open_loop_control_profiles','open_loop_chassis_responses','open_loop_anchor_distribution'):
         report_text.append(f'- `figures/{name}.pdf`')
     (out/'report.md').write_text('\n'.join(report_text)+'\n',encoding='utf-8')
     return report
@@ -388,6 +436,12 @@ def main(argv=None):
     parser.add_argument('--device',default='auto')
     parser.add_argument('--seeds',default='0,1,2,3,4')
     parser.add_argument('--output-dir',default='outputs/evaluation/trace_open_loop')
+    parser.add_argument('--visualization-seed',type=int,default=0,
+                        help='Random seed for reproducible figure sample selection')
+    parser.add_argument('--figure-samples',type=int,default=8,
+                        help='Number of random trajectory/anchor panels (paper uses 8)')
+    parser.add_argument('--chassis-stat-samples',type=int,default=64,
+                        help='Number of random K2 samples used in response percentile curves')
     parser.add_argument('--jtp-config',default='configs/projection/jtp.yaml')
     parser.add_argument('--allow-kinematic',action='store_true',help='Smoke test only; no fuel/stability metrics')
     parser.add_argument('--eval-config',default='configs/evaluation/trace_planning.yaml')
@@ -395,7 +449,7 @@ def main(argv=None):
     from .eval_config import defaults
     parser.set_defaults(**defaults(probe.eval_config,'open_loop'))
     args=parser.parse_args(argv)
-    if args.num_samples < 0 or args.batch_size < 1 or args.num_workers < 0:
+    if args.num_samples < 0 or args.batch_size < 1 or args.num_workers < 0 or args.figure_samples < 1 or args.chassis_stat_samples < 1:
         parser.error('num-samples>=0, batch-size>=1 and num-workers>=0 are required')
     options=vars(args).copy()
     options.pop("eval_config")

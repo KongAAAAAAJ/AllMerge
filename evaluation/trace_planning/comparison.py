@@ -181,9 +181,9 @@ def evaluate(paths, *, output_dir, complete_paper=False, figure_seed=0,
     figures=out/'figures';figures.mkdir(parents=True,exist_ok=True)
     if 'F3' in open_runs:
         import shutil
-        from .open_loop_visualization import PAPER_OPEN_FIGURES
+        from .open_loop_visualization import PAPER_OPEN_FIGURES, ANCHOR_FIGURE
         f3_dir=open_runs['F3'][1]/'figures'
-        for name in PAPER_OPEN_FIGURES:
+        for name in (*PAPER_OPEN_FIGURES, ANCHOR_FIGURE):
             for ext in ('pdf','png'):
                 src=f3_dir/(name+'.'+ext)
                 if not src.is_file():
@@ -214,7 +214,7 @@ def evaluate(paths, *, output_dir, complete_paper=False, figure_seed=0,
     note=['# TRACE Manuscript Evaluation Results', '',
         '- `planning_comparison_table.tex`: one two-panel table for the manuscript.',
         '- `figures/planning_comparison.pdf`: native TruckSim trajectories and spacing.',
-        '- `figures/open_loop_*.pdf`: four F3 nominal-K2 open-loop figures when supplied.',
+        '- `figures/open_loop_*.pdf`: four F3 nominal-K2 main figures plus one additional anchor figure when supplied.',
         '- Unimplemented baselines remain `--` and are not substituted.',
         '- All TRACE reported episodes must exclude post-warmup Polynomial fallback.',
         '', '## Verified open-loop runs', '']
