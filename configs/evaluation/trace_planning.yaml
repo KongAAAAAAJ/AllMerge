@@ -19,7 +19,6 @@ closed_loop:
   trucksim_case: L4_MU08   # payload 3500 kg, mu 0.8; adjust for other conditions
   koopman_config: configs/koopman/collect.yaml
   jtp_config: configs/projection/jtp.yaml
-  jtp_runtime_config: configs/projection/jtp_runtime.yaml
   duration: 5.0
   group_action: 3
   output_dir: outputs/evaluation/trace_closed_loop

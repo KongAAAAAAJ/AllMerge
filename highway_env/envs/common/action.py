@@ -641,18 +641,16 @@ class MultiAgentAction(ActionType):
         )
         if jtp_enabled or is_k2_control_runtime:
             from highway_env.planner.diffusion.config.experiment import resolve_repo_file
-            from highway_env.planner.diffusion.inference.jtp_context import (
-                LiveK2ContextBuilder,
-                load_jtp_runtime_config,
-            )
+            from highway_env.planner.diffusion.inference.jtp_context import LiveK2ContextBuilder
+            from highway_env.planner.diffusion.projection.config import load_jtp_config
 
             runtime_context_path = resolve_repo_file(
                 diffusion_config.get(
-                    "jtp_runtime_config", "configs/projection/jtp_runtime.yaml"))
+                    "jtp_config", "configs/projection/jtp.yaml"))
             builder = getattr(self.env, "jtp_live_context_builder", None)
             if (builder is None or
                     getattr(builder, "config_path", None) != str(runtime_context_path)):
-                builder = LiveK2ContextBuilder(load_jtp_runtime_config(runtime_context_path))
+                builder = LiveK2ContextBuilder(load_jtp_config(runtime_context_path))
                 builder.config_path = str(runtime_context_path)
                 self.env.jtp_live_context_builder = builder
 

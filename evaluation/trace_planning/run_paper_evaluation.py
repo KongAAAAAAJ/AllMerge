@@ -29,7 +29,6 @@ def main(argv=None):
     p.add_argument('--group-action', type=int, default=3)
     p.add_argument('--koopman-config', default='configs/koopman/collect.yaml')
     p.add_argument('--jtp-config', default='configs/projection/jtp.yaml')
-    p.add_argument('--jtp-runtime-config', default='configs/projection/jtp_runtime.yaml')
     p.add_argument('--copy-dlls', action='store_true')
     p.add_argument('--figure-seed', type=int, default=0)
     p.add_argument('--figure-scenarios', default='straight,merge_in,curved')
@@ -64,7 +63,6 @@ def main(argv=None):
                '--seed-start', str(a.seed_start), '--trucksim-case', a.trucksim_case,
                '--duration', str(a.duration), '--group-action', str(a.group_action),
                '--koopman-config', a.koopman_config, '--jtp-config', a.jtp_config,
-               '--jtp-runtime-config', a.jtp_runtime_config,
                '--output-dir', str(run_dir)]
         if method == 'TRACE':
             cmd += ['--checkpoint', a.checkpoint]

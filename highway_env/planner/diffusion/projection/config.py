@@ -35,7 +35,7 @@ def load_jtp_config(path: str | Path | None = None, overrides: dict | None = Non
 
 
 def validate_jtp_config(cfg: dict) -> None:
-    required = ("execution", "stability", "geometry", "control", "optimization", "projection")
+    required = ("execution", "stability", "geometry", "control", "optimization", "projection", "runtime")
     missing = [key for key in required if not isinstance(cfg.get(key), dict)]
     if missing:
         raise ValueError(f"JTP configuration missing mapping sections: {missing}")
@@ -44,6 +44,17 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("execution.dt_s and wheelbase_m must be positive")
     if int(execution.get("horizon_steps", 0)) < 1 or int(execution.get("control_steps", 0)) < 1:
         raise ValueError("execution horizon_steps/control_steps must be positive")
+    if int(execution["control_steps"]) != int(execution["horizon_steps"]):
+        raise ValueError("JTP requires identity control interpolation (control_steps=horizon_steps)")
+    context = cfg["runtime"].get("context")
+    if not isinstance(context, dict) or not isinstance(cfg["runtime"].get("road"), dict):
+        raise ValueError("runtime must define context and road mappings")
+    if int(context.get("history_state_steps", 0)) != 5:
+        raise ValueError("Current K2 requires runtime.context.history_state_steps=5")
+    if abs(float(context.get("sample_dt_s", 0)) - float(execution["dt_s"])) > 1e-8:
+        raise ValueError("runtime.context.sample_dt_s must match execution.dt_s")
+    if float(context.get("max_gap_tolerance_s", -1)) < 0:
+        raise ValueError("runtime.context.max_gap_tolerance_s must be nonnegative")
 
     stability = cfg["stability"]
     if not 0 < float(stability.get("ltr_limit", 0)) < 1:

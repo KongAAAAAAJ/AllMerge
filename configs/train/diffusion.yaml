@@ -111,7 +111,6 @@ runtime:
   # JTP is an inference-only post-diffusion projection; no denoiser retraining.
   jtp_enabled: false
   jtp_config: configs/projection/jtp.yaml
-  jtp_runtime_config: configs/projection/jtp_runtime.yaml
   jtp_control_execution_enabled: false
   checkpoint:
     trajectory: outputs/diffusion_pretrain/run_1/checkpoints/best.pt

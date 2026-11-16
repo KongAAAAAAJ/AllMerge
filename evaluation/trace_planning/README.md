@@ -5,6 +5,13 @@ checkpoint without changing model weights or training code. The accepted paper
 layout is **one two-panel Table** (open and closed), **four open-loop grouped
 figures**, and **one native TruckSim closed-loop grouped figure**.
 
+JTP uses one configuration file, `configs/projection/jtp.yaml`:
+`stability`, `geometry`, `control`, `optimization`, and `projection` define
+constraints and solver settings; `runtime.context` and `runtime.road` configure
+online K2 histories and road sampling. All share the `execution` section.
+Use `--jtp-config PATH`; the separate runtime file and
+`--jtp-runtime-config` argument have been removed.
+
 ## 1. Open-loop: Control Diffusion, predicted K2 state
 
 ```bat

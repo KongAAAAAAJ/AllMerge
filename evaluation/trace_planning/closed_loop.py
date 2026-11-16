@@ -60,7 +60,7 @@ def _make_single_reset_class(env_cls, fixed_seed):
 
 def _make_env_config(name, method, *, cfg_path, checkpoint,
                      physical_cfg, physical_case, copy_dlls,
-                     jtp_cfg_path, jtp_runtime_path, duration_s):
+                     jtp_cfg_path, duration_s):
     from data_pipeline.expert_collection.trucksim import scenario_trucksim_config
     from highway_env.planner.diffusion.config.experiment import resolve_repo_file
     scenario_cls = _scenario_class(name)
@@ -76,7 +76,6 @@ def _make_env_config(name, method, *, cfg_path, checkpoint,
             'output_space':'control',
             'jtp_enabled':True,
             'jtp_config':str(resolve_repo_file(jtp_cfg_path)),
-            'jtp_runtime_config':str(resolve_repo_file(jtp_runtime_path)),
             'jtp_control_execution_enabled':True,
             'diffusion_execution_enabled':False,
             'diffusion_spline_enabled':False,
@@ -104,7 +103,7 @@ def _snapshot(env):
 
 
 def worker(*, scenario, method, seed, checkpoint, config, jtp_config,
-           jtp_runtime_config, koopman_config, trucksim_case,
+           koopman_config, trucksim_case,
            duration, group_action, output_dir, copy_dlls):
     from highway_env.planner.diffusion.config.experiment import resolve_repo_file
     from highway_env.planner.diffusion.projection.config import load_jtp_config
@@ -135,7 +134,7 @@ def worker(*, scenario, method, seed, checkpoint, config, jtp_config,
     overrides = _make_env_config(scenario, method, cfg_path=config,
         checkpoint=checkpoint,physical_cfg=physical_cfg,physical_case=physical_case,
         copy_dlls=copy_dlls,jtp_cfg_path=jtp_config,
-        jtp_runtime_path=jtp_runtime_config,duration_s=duration)
+        duration_s=duration)
     env = None
     try:
         env = env_cls(config=overrides,render_mode=None)
@@ -319,7 +318,6 @@ def _runner(args):
             cmd=[sys.executable,'-m','evaluation.trace_planning.closed_loop','--_worker',
                  '--method',args.method,'--scenario',scenario,'--seed',str(seed),
                  '--config',args.config,'--jtp-config',args.jtp_config,
-                 '--jtp-runtime-config',args.jtp_runtime_config,
                  '--koopman-config',args.koopman_config,
                  '--trucksim-case',args.trucksim_case,
                  '--duration',str(args.duration),'--group-action',str(args.group_action),
@@ -383,7 +381,6 @@ def main(argv=None):
     parser.add_argument('--trucksim-case',default='L4_MU08')
     parser.add_argument('--koopman-config',default='configs/koopman/collect.yaml')
     parser.add_argument('--jtp-config',default='configs/projection/jtp.yaml')
-    parser.add_argument('--jtp-runtime-config',default='configs/projection/jtp_runtime.yaml')
     parser.add_argument('--duration',type=float,default=5.)
     parser.add_argument('--group-action',type=int,default=3)
     parser.add_argument('--output-dir',default='outputs/evaluation/trace_closed_loop')
@@ -405,7 +402,6 @@ def main(argv=None):
             parser.error('_worker must set scenario and seed')
         worker(scenario=args.scenario,method=args.method,seed=args.seed,
                checkpoint=args.checkpoint,config=args.config,jtp_config=args.jtp_config,
-               jtp_runtime_config=args.jtp_runtime_config,
                koopman_config=args.koopman_config,trucksim_case=args.trucksim_case,
                duration=args.duration,group_action=args.group_action,
                output_dir=args.output_dir,copy_dlls=args.copy_dlls)

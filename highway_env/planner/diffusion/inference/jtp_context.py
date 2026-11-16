@@ -17,31 +17,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import yaml
 
 from highway_env.planner.diffusion.projection.types import RoadGeometry
-
-
-def load_jtp_runtime_config(path) -> dict:
-    """Load and validate online context settings, separate from JTP constraints."""
-    from pathlib import Path
-
-    filename = Path(path).expanduser()
-    if not filename.is_file():
-        raise FileNotFoundError(f"JTP runtime context configuration not found: {filename}")
-    config = yaml.safe_load(filename.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or not isinstance(config.get("execution"), dict):
-        raise ValueError("JTP runtime YAML must define an execution mapping")
-    execution = config["execution"]
-    if float(execution.get("dt_s", 0.0)) <= 0 or int(execution.get("horizon_steps", 0)) < 1:
-        raise ValueError("Invalid execution dt_s/horizon_steps in JTP runtime YAML")
-    if int(execution.get("control_steps", 0)) < 1:
-        raise ValueError("Invalid execution.control_steps in JTP runtime YAML")
-    if int(execution["control_steps"]) != int(execution["horizon_steps"]):
-        raise ValueError("Current TRACE JTP runtime requires identity control interpolation (K=H)")
-    if not isinstance(config.get("runtime"), dict):
-        raise ValueError("JTP runtime YAML must define a runtime mapping")
-    return config
 
 
 @dataclass
