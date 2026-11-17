@@ -22,6 +22,7 @@ FEATURE_KEYS: Tuple[str, ...] = (
     "target_point",
     "target_lane_polyline",
     "coarse_trajectories",
+    "coarse_controls",
     "mode_valid_mask",
 )
 
@@ -32,6 +33,7 @@ FLOAT_FEATURE_KEYS = {
     "target_point",
     "target_lane_polyline",
     "coarse_trajectories",
+    "coarse_controls",
 }
 
 BOOL_FEATURE_KEYS = {
@@ -63,7 +65,16 @@ DIAGNOSTIC_TARGET_KEYS: Tuple[str, ...] = (
     "contract_ok",
 )
 
-DEFAULT_DATASET_ROOT = Path("outputs/expert_dataset/allmerge_expert")
+# Keep metadata lightweight. Full-resolution road geometry and duplicate A1
+# builder outputs remain in the shard for audit, but are not copied into every
+# DataLoader batch unless a dedicated consumer reads the NPZ directly.
+METADATA_KEYS: Tuple[str, ...] = (
+    "episode_index", "frame_index", "episode_step", "ego_index", "seed",
+    "scenario", "expert_type", "koopman_model_id", "trajectory_time_s",
+    "expert_trajectory_10hz_xy", "expert_trajectory_10hz_time_s",
+)
+
+DEFAULT_DATASET_ROOT = Path("outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k")
 
 
 @dataclass(frozen=True)
@@ -119,8 +130,9 @@ class AllMergeExpertShardDataset(Dataset):
     """
     Sharded AllMerge structured-planner expert dataset.
 
-    Each stored item is one controlled ego sample. Therefore DataLoader batching
-    directly produces the model contract expected by PlannerTensorAdapter:
+    Each stored item is one controlled ego sample from the unified TRACE
+    Polynomial/TruckSim pipeline. Every final shard must contain road-bounded
+    A1 anchors generated offline from the raw road geometry:
 
         ego_state              [B, D_ego]
         agent_states           [B, N_agent, D_agent]
@@ -195,13 +207,22 @@ class AllMergeExpertShardDataset(Dataset):
 
         for shard_idx, shard_path in enumerate(self.shard_paths):
             with np.load(shard_path, allow_pickle=False) as shard:
-                if "expert_trajectory_xy" not in shard.files:
-                    raise KeyError(
-                        f"{shard_path} missing expert_trajectory_xy"
+                required = (*FEATURE_KEYS, "coarse_controls", "expert_trajectory_xy",
+                            "future_trajectory_dense", "dense_dt", "trajectory_horizon_s",
+                            "target_mode", "target_semantic", "koopman_state_hist_si",
+                            "koopman_control_hist_si", "koopman_pose0_si", "koopman_ltr0",
+                            "koopman_payload_kg", "koopman_road_mu", "koopman_vx_init_kmh",
+                            "expert_trajectory_10hz_xy", "expert_trajectory_10hz_time_s",
+                            "trajectory_time_s", "road_lane_geometry", "road_lane_point_mask",
+                            "road_lane_mask", "road_lane_connections", "road_current_lane_slot",
+                            "road_target_lane_slot")
+                missing = [key for key in required if key not in shard.files]
+                if missing:
+                    raise RuntimeError(
+                        f"{shard_path} is not a unified TRACE A1/K2 expert shard; "
+                        f"missing {missing}. Legacy standard expert datasets are unsupported."
                     )
-                shard_len = int(
-                    shard["expert_trajectory_xy"].shape[0]
-                )
+                shard_len = int(shard["expert_trajectory_xy"].shape[0])
 
             for sample_idx in range(shard_len):
                 self._index.append(
@@ -240,11 +261,6 @@ class AllMergeExpertShardDataset(Dataset):
 
             features[key] = tensor
 
-        if "coarse_controls" in shard:
-            features["coarse_controls"] = torch.from_numpy(
-                np.asarray(shard["coarse_controls"][sample_idx]).copy()
-            ).float()
-
         targets = {
             "trajectory": torch.from_numpy(
                 np.asarray(
@@ -261,8 +277,7 @@ class AllMergeExpertShardDataset(Dataset):
             ),
         }
 
-        # TruckSim expert episodes expose the exact K2 context.  Older
-        # kinematic-only shards remain readable by the original D1 trainer.
+        # Every supported TRACE sample carries the synchronized K2 context.
         if "koopman_state_hist_si" in shard:
             for key in (
                 "koopman_state_hist_si", "koopman_control_hist_si",
@@ -332,21 +347,12 @@ class AllMergeExpertShardDataset(Dataset):
             return features, targets
 
         metadata = {}
-        excluded = set(FEATURE_KEYS) | set(TARGET_KEYS) | set(
-            DIAGNOSTIC_TARGET_KEYS
-        )
-
-        for key in shard.keys():
-            if key in excluded:
+        for key in METADATA_KEYS:
+            if key not in shard:
                 continue
-
             value = shard[key][sample_idx]
             if np.isscalar(value) or getattr(value, "shape", ()) == ():
-                metadata[key] = (
-                    value.item()
-                    if hasattr(value, "item")
-                    else value
-                )
+                metadata[key] = value.item() if hasattr(value, "item") else value
             else:
                 metadata[key] = value
 
@@ -451,35 +457,28 @@ def split_shards(
     rng.shuffle(indices)
 
     total_shards = len(indices)
-    train_count = int(
-        np.floor(
-            total_shards * ratios[0]
-        )
-    )
-    val_count = int(
-        np.floor(
-            total_shards * ratios[1]
-        )
-    )
-    test_count = (
-        total_shards
-        - train_count
-        - val_count
-    )
-
-    if (
-        total_shards > 0
-        and train_count == 0
-    ):
-        train_count = 1
-
-        if (
-            val_count > test_count
-            and val_count > 0
-        ):
-            val_count -= 1
-        elif test_count > 0:
-            test_count -= 1
+    active = [i for i, ratio in enumerate(ratios) if ratio > 0.0]
+    counts = [0, 0, 0]
+    if total_shards >= len(active):
+        # Reserve one episode shard for each requested split, then distribute
+        # the remainder proportionally using the largest-remainder method.
+        for idx in active:
+            counts[idx] = 1
+        remaining = total_shards - len(active)
+        if remaining:
+            exact = remaining * ratios
+            extras = np.floor(exact).astype(int)
+            for idx in range(3):
+                counts[idx] += int(extras[idx])
+            leftover = remaining - int(extras.sum())
+            order = sorted(active, key=lambda i: exact[i] - extras[i], reverse=True)
+            for idx in order[:leftover]:
+                counts[idx] += 1
+    elif total_shards > 0:
+        # With too few smoke shards, prioritize train then validation.
+        for idx in active[:total_shards]:
+            counts[idx] = 1
+    train_count, val_count, test_count = counts
 
     train_slice = indices[
         :train_count

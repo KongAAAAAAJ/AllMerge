@@ -1,0 +1,210 @@
+{
+  "patch_id": "TRACE_UNIFIED_EXPERT_COLLECTION_V2_1",
+  "entries": [
+    {
+      "path": "README.md",
+      "had_original": true,
+      "backup_path": "original/README.md"
+    },
+    {
+      "path": "configs/data/expert_collection.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/data/expert_collection.yaml"
+    },
+    {
+      "path": "configs/evaluation/trace_feasibility.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/evaluation/trace_feasibility.yaml"
+    },
+    {
+      "path": "configs/projection/jtp.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/projection/jtp.yaml"
+    },
+    {
+      "path": "configs/train/diffusion.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/train/diffusion.yaml"
+    },
+    {
+      "path": "data_pipeline/expert_collection/config.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/config.py"
+    },
+    {
+      "path": "data_pipeline/expert_collection/runner.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/runner.py"
+    },
+    {
+      "path": "data_pipeline/expert_collection/worker.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "data_pipeline/expert_dataset.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_dataset.py"
+    },
+    {
+      "path": "evaluation/ablation/README.md",
+      "had_original": true,
+      "backup_path": "original/evaluation/ablation/README.md"
+    },
+    {
+      "path": "evaluation/expert_dataset_validation.py",
+      "had_original": true,
+      "backup_path": "original/evaluation/expert_dataset_validation.py"
+    },
+    {
+      "path": "evaluation/legacy_open_loop_cli.py",
+      "had_original": true,
+      "backup_path": "original/evaluation/legacy_open_loop_cli.py"
+    },
+    {
+      "path": "highway_env/envs/common/action.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/common/action.py"
+    },
+    {
+      "path": "highway_env/planner/a1_anchor_builder.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/a1_anchor_builder.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/models/control.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/models/control.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/training/trajectory.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/training/trajectory.py"
+    },
+    {
+      "path": "highway_env/planner/road_geometry_export.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/road_geometry_export.py"
+    },
+    {
+      "path": "learning/contracts.py",
+      "had_original": true,
+      "backup_path": "original/learning/contracts.py"
+    },
+    {
+      "path": "scripts/README.md",
+      "had_original": true,
+      "backup_path": "original/scripts/README.md"
+    },
+    {
+      "path": "scripts/data/collect_expert_dataset.py",
+      "had_original": true,
+      "backup_path": "original/scripts/data/collect_expert_dataset.py"
+    },
+    {
+      "path": "scripts/diagnostics/validate_expert_dataset.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "scripts/run_diffusion_overfit_100.sh",
+      "had_original": true,
+      "backup_path": "original/scripts/run_diffusion_overfit_100.sh"
+    },
+    {
+      "path": "scripts/run_diffusion_pretrain.sh",
+      "had_original": true,
+      "backup_path": "original/scripts/run_diffusion_pretrain.sh"
+    },
+    {
+      "path": "scripts/run_diffusion_smoke_1k.sh",
+      "had_original": true,
+      "backup_path": "original/scripts/run_diffusion_smoke_1k.sh"
+    },
+    {
+      "path": "tests/test_diffusion_runtime_load.py",
+      "had_original": true,
+      "backup_path": "original/tests/test_diffusion_runtime_load.py"
+    },
+    {
+      "path": "tests/test_unified_expert_pipeline.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "configs/data/expert_collection.yaml.bak_raw_expert_config_v1_3_20261117_154105",
+      "had_original": true,
+      "backup_path": "original/configs/data/expert_collection.yaml.bak_raw_expert_config_v1_3_20261117_154105"
+    },
+    {
+      "path": "data_pipeline/expert_collection/collector.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/collector.py"
+    },
+    {
+      "path": "data_pipeline/expert_collection/collector.py.bak_raw_expert_v1_2_20261117_134538",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/collector.py.bak_raw_expert_v1_2_20261117_134538"
+    },
+    {
+      "path": "data_pipeline/expert_collection/core.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/core.py"
+    },
+    {
+      "path": "highway_env/envs/common/action.py.bak_raw_expert_v1_1_20261117_130816",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/common/action.py.bak_raw_expert_v1_1_20261117_130816"
+    },
+    {
+      "path": "highway_env/envs/common/action.py.bak_raw_expert_v1_2_20261117_134538",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/common/action.py.bak_raw_expert_v1_2_20261117_134538"
+    },
+    {
+      "path": "highway_env/envs/my_highway_env.py.bak_raw_expert_v1_2_20261117_134538",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/my_highway_env.py.bak_raw_expert_v1_2_20261117_134538"
+    },
+    {
+      "path": "highway_env/envs/scenarios/base_env.py.bak_raw_expert_v1_2_20261117_134538",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/scenarios/base_env.py.bak_raw_expert_v1_2_20261117_134538"
+    },
+    {
+      "path": "highway_env/planner/feature_builder.py.bak_raw_expert_v1_1_20261117_130816",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/feature_builder.py.bak_raw_expert_v1_1_20261117_130816"
+    },
+    {
+      "path": "scripts/data/build_a1_anchors.py",
+      "had_original": true,
+      "backup_path": "original/scripts/data/build_a1_anchors.py"
+    },
+    {
+      "path": "scripts/data/collect_raw_expert_dataset.py",
+      "had_original": true,
+      "backup_path": "original/scripts/data/collect_raw_expert_dataset.py"
+    },
+    {
+      "path": "scripts/data/collect_raw_expert_dataset.py.bak_raw_expert_config_v1_3_20261117_154105",
+      "had_original": true,
+      "backup_path": "original/scripts/data/collect_raw_expert_dataset.py.bak_raw_expert_config_v1_3_20261117_154105"
+    },
+    {
+      "path": "scripts/diagnostics/analyze_expert_dataset.py",
+      "had_original": true,
+      "backup_path": "original/scripts/diagnostics/analyze_expert_dataset.py"
+    },
+    {
+      "path": "scripts/diagnostics/validate_raw_expert_dataset.py",
+      "had_original": true,
+      "backup_path": "original/scripts/diagnostics/validate_raw_expert_dataset.py"
+    },
+    {
+      "path": "scripts/diagnostics/validate_raw_expert_dataset.py.bak_raw_expert_v1_2_20261117_134538",
+      "had_original": true,
+      "backup_path": "original/scripts/diagnostics/validate_raw_expert_dataset.py.bak_raw_expert_v1_2_20261117_134538"
+    }
+  ]
+}

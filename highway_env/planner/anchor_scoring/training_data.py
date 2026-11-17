@@ -1,4 +1,4 @@
-"""Fast, deterministic A2 scorer data path.
+"""Fast, deterministic A2 scorer data path with candidate-count-aware V3 cache.
 
 The expensive candidate pool and its deterministic safety teacher labels are
 computed once per dataset/configuration and stored as memory-mapped NumPy
@@ -28,18 +28,25 @@ from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from .safety import anchor_safety_cost
 
 
-CACHE_VERSION = "TRACE_A2_SCORER_CACHE_V2"
-CANDIDATE_ALGORITHM_VERSION = "adaptive-candidate-reuse-v2"
-CACHE_ARRAYS = {
-    "coarse_controls": ("coarse_controls.npy", np.float32, (36, 40, 2)),
-    "coarse_trajectories": ("coarse_trajectories.npy", np.float32, (36, 8, 2)),
-    "mode_valid_mask": ("mode_valid_mask.npy", np.bool_, (36,)),
-    "safety_total": ("safety_total.npy", np.float32, (36,)),
-    "safety_collision": ("safety_collision.npy", np.float32, (36,)),
-    "safety_road": ("safety_road.npy", np.float32, (36,)),
-    "safety_hard_safe": ("safety_hard_safe.npy", np.bool_, (36,)),
-    "teacher_target": ("teacher_target.npy", np.float32, (36,)),
-}
+CACHE_VERSION = "TRACE_A2_SCORER_CACHE_V3"
+CANDIDATE_ALGORITHM_VERSION = "shared-control-candidate-pool-v3"
+
+
+def cache_array_specs(candidate_count: int):
+    """Return cache array shapes for the configured candidate pool size."""
+    count = int(candidate_count)
+    if count <= 0:
+        raise ValueError("candidate_count must be positive")
+    return {
+        "coarse_controls": ("coarse_controls.npy", np.float32, (count, 40, 2)),
+        "coarse_trajectories": ("coarse_trajectories.npy", np.float32, (count, 8, 2)),
+        "mode_valid_mask": ("mode_valid_mask.npy", np.bool_, (count,)),
+        "safety_total": ("safety_total.npy", np.float32, (count,)),
+        "safety_collision": ("safety_collision.npy", np.float32, (count,)),
+        "safety_road": ("safety_road.npy", np.float32, (count,)),
+        "safety_hard_safe": ("safety_hard_safe.npy", np.bool_, (count,)),
+        "teacher_target": ("teacher_target.npy", np.float32, (count,)),
+    }
 
 
 def _json_hash(value) -> str:
@@ -104,7 +111,7 @@ def _feature_batch_from_shard(shard, sample_indices):
     return features
 
 
-def _cache_is_valid(cache_dir: Path, fingerprint: str, num_samples: int) -> bool:
+def _cache_is_valid(cache_dir: Path, fingerprint: str, num_samples: int, candidate_count: int) -> bool:
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.is_file():
         return False
@@ -116,7 +123,10 @@ def _cache_is_valid(cache_dir: Path, fingerprint: str, num_samples: int) -> bool
             return False
         if int(manifest.get("num_samples", -1)) != int(num_samples):
             return False
-        for key, (filename, _, tail_shape) in CACHE_ARRAYS.items():
+        array_specs = cache_array_specs(candidate_count)
+        if int(manifest.get("candidate_count", -1)) != int(candidate_count):
+            return False
+        for key, (filename, _, tail_shape) in array_specs.items():
             path = cache_dir / filename
             if not path.is_file():
                 return False
@@ -151,7 +161,9 @@ def prepare_split_cache(
         max_samples=cfg.get("max_samples"),
     ))
     generator = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
-    effective_candidate_config = dict(generator.base.config)
+    effective_candidate_config = generator.resolved_config
+    candidate_count = int(generator.num_candidates)
+    array_specs = cache_array_specs(candidate_count)
     teacher = dict(cfg.get("teacher", {}))
     temperature = float(cfg.get("temperature", 0.3))
     if temperature <= 0:
@@ -169,7 +181,7 @@ def prepare_split_cache(
         precompute_device=str(device),
     )
     final_dir = cache_root / fingerprint / split
-    if not rebuild and _cache_is_valid(final_dir, fingerprint, len(dataset)):
+    if not rebuild and _cache_is_valid(final_dir, fingerprint, len(dataset), candidate_count):
         print(f"[A2-cache] reuse split={split} samples={len(dataset)} path={final_dir}", flush=True)
         return final_dir, json.loads((final_dir / "manifest.json").read_text(encoding="utf-8"))
 
@@ -180,7 +192,7 @@ def prepare_split_cache(
     temp_dir.mkdir(parents=True)
 
     arrays = {}
-    for key, (filename, dtype, tail_shape) in CACHE_ARRAYS.items():
+    for key, (filename, dtype, tail_shape) in array_specs.items():
         arrays[key] = np.lib.format.open_memmap(
             temp_dir / filename, mode="w+", dtype=dtype,
             shape=(len(dataset),) + tuple(tail_shape),
@@ -270,13 +282,13 @@ def prepare_split_cache(
             "fingerprint_payload": fingerprint_payload,
             "split": split,
             "num_samples": len(dataset),
-            "candidate_count": 36,
+            "candidate_count": candidate_count,
             "control_steps": 40,
             "trajectory_steps": 8,
             "arrays": {
                 key: {"file": spec[0], "dtype": str(np.dtype(spec[1])),
                       "shape": [len(dataset), *spec[2]]}
-                for key, spec in CACHE_ARRAYS.items()
+                for key, spec in array_specs.items()
             },
             "shards": shard_records,
             "created_unix": time.time(),
@@ -323,6 +335,8 @@ class CachedAnchorScoringDataset(Dataset):
         self.offset_by_shard = {
             i: int(record["offset"]) for i, record in enumerate(manifest["shards"])
         }
+        self.candidate_count = int(manifest["candidate_count"])
+        self.array_specs = cache_array_specs(self.candidate_count)
         self._arrays = None
 
     def __len__(self):
@@ -332,7 +346,7 @@ class CachedAnchorScoringDataset(Dataset):
         if self._arrays is None:
             self._arrays = {
                 key: np.load(self.cache_dir / filename, mmap_mode="r", allow_pickle=False)
-                for key, (filename, _, _) in CACHE_ARRAYS.items()
+                for key, (filename, _, _) in self.array_specs.items()
             }
         return self._arrays
 

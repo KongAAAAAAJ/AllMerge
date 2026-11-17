@@ -501,7 +501,7 @@ class MultiAgentAction(ActionType):
     ):
         """Build scene features and optional legacy planner anchors.
 
-        Raw expert collection always disables ``features.anchors``. In that
+        The unified expert capture stage always disables ``features.anchors``. In that
         case no Anchor Builder is imported or instantiated; A1 anchors are
         generated later from the saved raw dataset.
         """
@@ -535,7 +535,7 @@ class MultiAgentAction(ActionType):
             self.env.latest_planner_road_geometry = None
 
         # Only instantiate the legacy online Anchor Builder when explicitly
-        # enabled. The raw expert collection path leaves it disabled.
+        # enabled. The unified expert capture stage leaves it disabled.
         anchors_cfg = dict(feature_config.get("anchors", {}) or {})
         if bool(anchors_cfg.get("enabled", True)):
             from highway_env.planner.anchor_builder import AllMergeAnchorBuilder
@@ -805,7 +805,7 @@ class MultiAgentAction(ActionType):
     def _build_expert_trajectory(self, planner_flag):
         """Publish the aligned Polynomial expert path without anchor matching.
 
-        Raw expert collection stores scene observations, live road geometry and
+        The unified expert capture stage stores scene observations, live road geometry and
         expert trajectories. A1 anchors are generated offline from this raw
         dataset, so this runtime path must not depend on coarse_trajectories,
         mode_valid_mask or ExpertTrajectoryAligner.
@@ -819,7 +819,7 @@ class MultiAgentAction(ActionType):
             return None
         if planner_flag.get("type") != "Polynomial":
             raise RuntimeError(
-                "Raw expert trajectory export requires Planner.type='Polynomial'"
+                "Expert trajectory export requires Planner.type='Polynomial'"
             )
 
         diffusion_runtime_config = dict(planner_flag.get("Diffusion", {}) or {})

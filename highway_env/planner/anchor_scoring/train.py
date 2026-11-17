@@ -1,4 +1,4 @@
-"""Offline TRACE A2 safety scorer train/eval with reusable V2 data cache.
+"""Offline TRACE A2 safety scorer train/eval with reusable V3 dynamic candidate cache.
 
 The scorer architecture, safety teacher, soft-label objective and Top-R metrics
 are unchanged. Candidate controls/trajectories and deterministic teacher labels
@@ -19,9 +19,24 @@ import torch.nn.functional as F
 import yaml
 
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
+from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from .model import AnchorSafetyScorer, select_anchors
 from .training_data import build_cached_loader, prepare_split_cache
 
+
+
+def _resolve_num_selected(cfg):
+    """Resolve the A2 Top-R metric K from the canonical control diffusion config."""
+    diffusion_config = resolve_repo_file(
+        cfg.get("diffusion_config", "configs/train/diffusion.yaml")
+    )
+    diffusion_cfg = yaml.safe_load(diffusion_config.read_text(encoding="utf-8"))
+    num_selected = int(
+        (((diffusion_cfg.get("control") or {}).get("model") or {}).get("num_modes", 10))
+    )
+    if num_selected <= 0:
+        raise ValueError(f"control.model.num_modes must be positive, got {num_selected}")
+    return num_selected
 
 def run_epoch(model, loader, cfg, device, *, optimizer=None, max_batches=None, epoch=0):
     training = optimizer is not None
@@ -130,7 +145,7 @@ def _save_history(path: Path, history):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Train/evaluate TRACE adaptive safety scorer V2")
+    parser = argparse.ArgumentParser(description="Train/evaluate TRACE adaptive safety scorer V3 (shared 108-candidate pool)")
     parser.add_argument("--config", default="configs/train/adaptive_anchors.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -147,12 +162,34 @@ def main(argv=None):
     parser.add_argument("--checkpoint", default=None,
                         help="Warm-start model weights only; optimizer state is reset.")
     parser.add_argument("--resume", default=None,
-                        help="Resume a V2 checkpoint including optimizer/history state.")
+                        help="Resume a V3 checkpoint including optimizer/history state.")
     args = parser.parse_args(argv)
 
     cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError("Scorer config must be a mapping")
+    # Resolve K from the same diffusion config used by the planner. The scorer
+    # training metrics also report K-selected safe-anchor performance, so K
+    # must not be duplicated as a stale num_selected value in this YAML.
+    cfg["num_selected"] = _resolve_num_selected(cfg)
+
+    # Resolve the one shared A1/A2 candidate-pool definition before caching
+    # and checkpointing, so runtime selection can verify exact compatibility.
+    candidate_builder = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
+    cfg["candidate_generation"] = candidate_builder.resolved_config
+    if cfg.get("top_r") is None:
+        fraction = float(cfg.get("top_r_fraction", 0.5555556))
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError("top_r_fraction must be in (0,1]")
+        cfg["top_r"] = max(
+            int(cfg["num_selected"]),
+            int(round(candidate_builder.num_candidates * fraction)),
+        )
+    if int(cfg["top_r"]) > candidate_builder.num_candidates:
+        raise ValueError(
+            f"top_r={cfg['top_r']} exceeds candidate pool "
+            f"{candidate_builder.num_candidates}"
+        )
     if args.dataset_root:
         cfg["dataset_root"] = args.dataset_root
     if args.max_samples is not None:
@@ -175,10 +212,10 @@ def main(argv=None):
     )
     dataset_root = resolve_repo_file(cfg["dataset_root"])
     output_dir = resolve_repo_file(
-        args.output_dir or cfg.get("output_dir", "outputs/trace_adaptive_anchors")
+        args.output_dir or cfg.get("output_dir", "outputs/anchor_ablation/ckpt")
     )
     cache_root = resolve_repo_file(
-        args.cache_dir or cfg.get("cache_dir", str(output_dir / "candidate_cache_v2"))
+        args.cache_dir or cfg.get("cache_dir", "outputs/anchor_ablation/cache_v3")
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -282,7 +319,7 @@ def main(argv=None):
             "optimizer_state_dict": optimizer.state_dict(),
             "best_val_loss": min(best, float(val_metrics["loss"])),
             "history": history,
-            "training_pipeline": "TRACE_A2_SCORER_TRAINING_V2",
+            "training_pipeline": "TRACE_A2_SCORER_TRAINING_V3_SHARED_POOL",
         }
         torch.save(ckpt, output_dir / "last.pt")
         if val_metrics["loss"] < best:

@@ -38,7 +38,7 @@ def main(argv=None):
 
     dataset_root = resolve_repo_file(cfg["dataset_root"])
     cache_root = resolve_repo_file(
-        args.cache_dir or cfg.get("cache_dir", "outputs/trace_adaptive_anchors/cache_v2")
+        args.cache_dir or cfg.get("cache_dir", "outputs/anchor_ablation/cache_v3")
     )
     splits = [item.strip() for item in args.splits.split(",") if item.strip()]
     if not splits:

@@ -122,7 +122,7 @@ def main() -> int:
     def pick(cli_value, name, default):
         return cli_value if cli_value is not None else train_cfg.get(name, default)
 
-    dataset_root = Path(pick(args.dataset_root, "dataset_root", "outputs/expert_dataset/allmerge_expert"))
+    dataset_root = Path(pick(args.dataset_root, "dataset_root", "outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k"))
     output_root = Path(pick(args.output_dir, "output_dir", "outputs/diffusion_pretrain"))
     train_split = str(pick(args.train_split, "train_split", "train"))
     val_split = str(pick(args.val_split, "val_split", "val"))

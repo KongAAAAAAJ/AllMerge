@@ -11,3 +11,8 @@ a1:
   road_edge_margin_m: 0.15
   speed_delta_mps: 3.0
   minimum_lane_change_speed_mps: 3.0
+
+  candidate_generation:
+    config_path: configs/anchors/control_candidate_pool.yaml
+  trajectory_weight: 1.0
+  control_weight: 1.0

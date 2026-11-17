@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 PYTHON_BIN="${PYTHON_BIN:-python}"
-DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/allmerge_smoke1k}"
+CONFIG="${CONFIG:-configs/train/diffusion.yaml}"
+DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/diffusion_pretrain_smoke1k}"
-
-"${PYTHON_BIN}" -m scripts.training.train_diffusion_pretrain \
+"${PYTHON_BIN}" scripts/training/run_diffusion.py \
+  --config "${CONFIG}" \
   --dataset-root "${DATASET_ROOT}" \
   --output-dir "${OUTPUT_DIR}" \
-  --train-split train \
-  --val-split test \
-  --limit-train-samples 1000 \
-  --limit-val-samples 256 \
+  --limit-samples 1000 \
+  --max-epochs 1 \
   --max-steps "${MAX_STEPS:-100}" \
   "$@"

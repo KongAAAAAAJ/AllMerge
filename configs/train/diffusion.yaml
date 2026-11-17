@@ -7,7 +7,7 @@ trajectory:
   model:
     reg_head_type: gru
   training:
-    dataset_root: outputs/expert_dataset/expert_trucksim_k2_50k_v1
+    dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
     output_dir: outputs/final_compare/trajectory_v0
     train_split: train
     val_split: val

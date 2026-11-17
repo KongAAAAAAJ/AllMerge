@@ -1,0 +1,100 @@
+{
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "files": [
+    {
+      "path": "configs/train/diffusion.yaml",
+      "existed": true,
+      "backup": "files/configs/train/diffusion.yaml"
+    },
+    {
+      "path": "evaluation/ablation/README.md",
+      "existed": true,
+      "backup": "files/evaluation/ablation/README.md"
+    },
+    {
+      "path": "configs/anchors/a1.yaml",
+      "existed": true,
+      "backup": "files/configs/anchors/a1.yaml"
+    },
+    {
+      "path": "configs/anchors/control_candidate_pool.yaml",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "configs/train/adaptive_anchors.yaml",
+      "existed": true,
+      "backup": "files/configs/train/adaptive_anchors.yaml"
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/runner.py",
+      "existed": true,
+      "backup": "files/evaluation/ablation/anchor_ablation/runner.py"
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/sources.py",
+      "existed": true,
+      "backup": "files/evaluation/ablation/anchor_ablation/sources.py"
+    },
+    {
+      "path": "highway_env/planner/a1_anchor_builder.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/a1_anchor_builder.py"
+    },
+    {
+      "path": "highway_env/planner/adaptive_anchors.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/adaptive_anchors.py"
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/manager.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/anchor_scoring/manager.py"
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/prepare_cache.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/anchor_scoring/prepare_cache.py"
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/train.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/anchor_scoring/train.py"
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/training_data.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/anchor_scoring/training_data.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/models/control.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/diffusion/models/control.py"
+    },
+    {
+      "path": "learning/contracts.py",
+      "existed": true,
+      "backup": "files/learning/contracts.py"
+    },
+    {
+      "path": "README_A2_CandidatePool108.md",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "scripts/data/build_a0_fixed_anchors.py",
+      "existed": true,
+      "backup": "files/scripts/data/build_a0_fixed_anchors.py"
+    },
+    {
+      "path": "scripts/data/build_a1_anchors.py",
+      "existed": true,
+      "backup": "files/scripts/data/build_a1_anchors.py"
+    },
+    {
+      "path": "tests/test_trace_a2_candidate_pool_v3.py",
+      "existed": false,
+      "backup": null
+    }
+  ]
+}

@@ -21,7 +21,7 @@ class RoadGeometryExporter:
         "reaction_margin_s": 0.8,
         "distance_margin_m": 35.0,
         "lateral_range_m": 32.0,
-        "ego_length_m": 12.0,
+        "ego_length_m": 8.0,
         "ego_width_m": 2.6,
     }
 

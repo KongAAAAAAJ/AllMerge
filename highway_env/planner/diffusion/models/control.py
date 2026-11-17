@@ -119,12 +119,21 @@ class ControlDiffusionPlanner(nn.Module):
         if anchor_strategy not in ('dynamic', 'adaptive', 'fixed'):
             raise ValueError('Control anchor strategy must be dynamic, adaptive or fixed')
         self.anchor_manager = None
-        if anchor_strategy in ('adaptive', 'fixed'):
-            if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
-                raise ValueError('num_selected must equal model num_modes')
-        if anchor_strategy == 'adaptive':
+        # One source of truth: control.model.num_modes. Legacy num_selected
+        # entries in older YAML/checkpoints are overwritten so A1/A2 cannot
+        # silently retain a stale value when num_modes changes.
+        self.anchors_config['num_selected'] = int(self.scene_config.num_modes)
+        if anchor_strategy == 'dynamic':
+            # A1 and A2 share the same configurable candidate pool.
+            from highway_env.planner.anchor_scoring.manager import DynamicAnchorManager
+            self.anchor_manager = DynamicAnchorManager(
+                self.anchors_config, num_selected=self.scene_config.num_modes
+            )
+        elif anchor_strategy == 'adaptive':
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
-            self.anchor_manager = AdaptiveAnchorManager(self.anchors_config)
+            self.anchor_manager = AdaptiveAnchorManager(
+                self.anchors_config, num_selected=self.scene_config.num_modes
+            )
         elif anchor_strategy == 'fixed':
             from highway_env.planner.fixed_anchor_manager import FixedAnchorManager
             self.anchor_manager = FixedAnchorManager(
@@ -152,10 +161,11 @@ class ControlDiffusionPlanner(nn.Module):
         return features if self.anchor_manager is None else self.anchor_manager.select(features)
 
     def _sample_controls(self, features, *, generator=None, num_steps=None):
-        """Control-space DDIM initialized from the paired sampled controls.
+        """Control-space DDIM initialized from the paired offline A1 controls.
 
-        The same dynamic anchor bank creates coarse_trajectories for the XY
-        model and coarse_controls for this model. No inverse XY decoding.
+        The unified dataset stores the road-bounded A1 trajectory/control pair
+        and validity mask. No online anchor generation or inverse XY decoding
+        is performed by the control diffusion planner.
         """
         cfg = self.ctrl_cfg
         B, M, H = (features['ego_state'].shape[0], self.scene_config.num_modes,

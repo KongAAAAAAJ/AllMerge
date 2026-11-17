@@ -1,0 +1,119 @@
+{
+  "patch_id": "TRACE_UNIFIED_EXPERT_COLLECTION_V2_1",
+  "installed_utc": "20261117T132404Z",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "written": [
+    "README.md",
+    "configs\\data\\expert_collection.yaml",
+    "configs\\evaluation\\trace_feasibility.yaml",
+    "configs\\projection\\jtp.yaml",
+    "configs\\train\\diffusion.yaml",
+    "data_pipeline\\expert_collection\\config.py",
+    "data_pipeline\\expert_collection\\runner.py",
+    "data_pipeline\\expert_collection\\worker.py",
+    "data_pipeline\\expert_dataset.py",
+    "evaluation\\ablation\\README.md",
+    "evaluation\\expert_dataset_validation.py",
+    "evaluation\\legacy_open_loop_cli.py",
+    "highway_env\\envs\\common\\action.py",
+    "highway_env\\planner\\a1_anchor_builder.py",
+    "highway_env\\planner\\diffusion\\models\\control.py",
+    "highway_env\\planner\\diffusion\\training\\trajectory.py",
+    "highway_env\\planner\\road_geometry_export.py",
+    "learning\\contracts.py",
+    "scripts\\README.md",
+    "scripts\\data\\collect_expert_dataset.py",
+    "scripts\\diagnostics\\validate_expert_dataset.py",
+    "scripts\\run_diffusion_overfit_100.sh",
+    "scripts\\run_diffusion_pretrain.sh",
+    "scripts\\run_diffusion_smoke_1k.sh",
+    "tests\\test_diffusion_runtime_load.py",
+    "tests\\test_unified_expert_pipeline.py"
+  ],
+  "three_way_merged": [
+    "README.md",
+    "configs\\projection\\jtp.yaml",
+    "configs\\train\\diffusion.yaml",
+    "data_pipeline\\expert_collection\\runner.py",
+    "evaluation\\ablation\\README.md",
+    "evaluation\\expert_dataset_validation.py",
+    "evaluation\\legacy_open_loop_cli.py",
+    "highway_env\\envs\\common\\action.py",
+    "highway_env\\planner\\a1_anchor_builder.py",
+    "highway_env\\planner\\diffusion\\models\\control.py",
+    "highway_env\\planner\\diffusion\\training\\trajectory.py",
+    "learning\\contracts.py",
+    "scripts\\data\\collect_expert_dataset.py",
+    "tests\\test_diffusion_runtime_load.py"
+  ],
+  "overlapping_local_hunks_replaced_by_TRACE": {
+    "README.md": [
+      "base lines 1-47"
+    ],
+    "configs\\projection\\jtp.yaml": [
+      "base lines 1-96"
+    ],
+    "configs\\train\\diffusion.yaml": [
+      "base lines 1-113"
+    ],
+    "data_pipeline\\expert_collection\\runner.py": [
+      "base lines 1-216"
+    ],
+    "evaluation\\ablation\\README.md": [
+      "base lines 1-98"
+    ],
+    "evaluation\\expert_dataset_validation.py": [
+      "base lines 1-387"
+    ],
+    "evaluation\\legacy_open_loop_cli.py": [
+      "base lines 1-171"
+    ],
+    "highway_env\\envs\\common\\action.py": [
+      "base lines 1-1064"
+    ],
+    "highway_env\\planner\\a1_anchor_builder.py": [
+      "base lines 1-1"
+    ],
+    "highway_env\\planner\\diffusion\\training\\trajectory.py": [
+      "base lines 1-300"
+    ],
+    "scripts\\data\\collect_expert_dataset.py": [
+      "base lines 1-38"
+    ],
+    "tests\\test_diffusion_runtime_load.py": [
+      "base lines 1-69"
+    ]
+  },
+  "deleted": [
+    "configs\\data\\expert_collection.yaml.bak_raw_expert_config_v1_3_20261117_154105",
+    "data_pipeline\\expert_collection\\collector.py",
+    "data_pipeline\\expert_collection\\collector.py.bak_raw_expert_v1_2_20261117_134538",
+    "data_pipeline\\expert_collection\\core.py",
+    "highway_env\\envs\\common\\action.py.bak_raw_expert_v1_1_20261117_130816",
+    "highway_env\\envs\\common\\action.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\envs\\my_highway_env.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\envs\\scenarios\\base_env.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\planner\\feature_builder.py.bak_raw_expert_v1_1_20261117_130816",
+    "scripts\\data\\build_a1_anchors.py",
+    "scripts\\data\\collect_raw_expert_dataset.py",
+    "scripts\\data\\collect_raw_expert_dataset.py.bak_raw_expert_config_v1_3_20261117_154105",
+    "scripts\\diagnostics\\analyze_expert_dataset.py",
+    "scripts\\diagnostics\\validate_raw_expert_dataset.py",
+    "scripts\\diagnostics\\validate_raw_expert_dataset.py.bak_raw_expert_v1_2_20261117_134538"
+  ],
+  "changed_obsolete_archived_then_deleted": [
+    "data_pipeline\\expert_collection\\collector.py",
+    "data_pipeline\\expert_collection\\collector.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\envs\\common\\action.py.bak_raw_expert_v1_1_20261117_130816",
+    "highway_env\\envs\\common\\action.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\envs\\my_highway_env.py.bak_raw_expert_v1_2_20261117_134538",
+    "highway_env\\envs\\scenarios\\base_env.py.bak_raw_expert_v1_2_20261117_134538",
+    "scripts\\data\\build_a1_anchors.py",
+    "scripts\\diagnostics\\analyze_expert_dataset.py"
+  ],
+  "already_matching": [
+    "configs\\train\\adaptive_anchors.yaml (local already contains TRACE changes)"
+  ],
+  "backup_dir": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\unified_expert_collection_v2_1_1_20261117T132404Z",
+  "validation": "compile + unified-entrypoint help smoke tests + stale-reference scan"
+}

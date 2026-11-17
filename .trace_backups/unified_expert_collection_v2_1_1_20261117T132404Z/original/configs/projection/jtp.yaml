@@ -1,0 +1,96 @@
+# TRACE Joint Trajectory Projection (JTP): constraints, solver, and live context.
+# Provisional values: calibrate only after the projection mechanism is frozen.
+execution:
+  dt_s: 0.1
+  horizon_steps: 40
+  control_steps: 40
+  wheelbase_m: 5.5
+
+stability:
+  gravity_mps2: 9.81
+  minimum_mu_for_limits: 0.05
+  yaw_rate_safety_factor: 0.85
+  minimum_speed_for_yaw_limit_mps: 3.0
+  sideslip:
+    base_limit_deg: 5.0
+    reference_mu: 0.8
+    friction_exponent: 0.5
+    scale_min: 0.65
+    scale_max: 1.15
+  roll:
+    base_limit_deg: 5.0
+    reference_mu: 0.8
+    friction_exponent: 0.5
+    payload_reference_kg: 10000.0
+    payload_sensitivity: 0.20
+    scale_min: 0.55
+    scale_max: 1.10
+  ltr_limit: 0.80
+
+geometry:
+  curvature_limit_per_m: 0.025
+  road_clearance_m: 0.35
+  footprint:
+    circle_offsets_m: [-6.6, -3.3, 0.0, 3.3, 6.6]
+    circle_radius_m: 2.10
+
+control:
+  acceleration_min_mps2: -4.0
+  acceleration_max_mps2: 2.5
+  steering_min_rad: -0.08
+  steering_max_rad: 0.08
+  # Characteristic scales used to normalize control-space updates.
+  trust_scale: [2.5, 0.08]
+
+optimization:
+  lambda_u: 0.10
+  trajectory_weights: [1.0, 1.0, 0.25]
+  control_weights: [0.16, 156.25]
+
+projection:
+  # Active-set weighted joint Jacobian projection.
+  max_iterations: 12
+  max_stalled_iterations: 3
+  max_active_per_group:
+    stability: 24
+    road: 24
+    curvature: 16
+    control: 32
+  active_tolerance: 1.0e-6
+  constraint_tolerance: 1.0e-4
+  residual_scales:
+    stability: [0.5, 0.0872665, 0.0872665, 0.80]
+    road_m: 0.5
+    curvature_per_m2: 0.000625
+  violation_weight_beta: 2.0
+  damping: 1.0e-4
+  damping_retries: 6
+  metric_regularization: 1.0e-5
+  initial_trust_radius: 0.25
+  minimum_trust_radius: 0.01
+  maximum_trust_radius: 0.75
+  max_step_norm: 0.20
+  trust_shrink_factor: 0.5
+  trust_grow_factor: 1.5
+  alpha_initial: 1.0
+  alpha_minimum: 0.0625
+  alpha_shrink_factor: 0.5
+  merit_penalty: 1000.0
+  merit_tolerance: 1.0e-7
+  minimum_violation_improvement: 1.0e-6
+  change_tolerance: 1.0e-6  # normalized control correction used only for projection-applied diagnostics
+
+# Online K2 history and road-context construction (shared execution above).
+runtime:
+  context:
+    sample_dt_s: 0.1
+    max_gap_tolerance_s: 0.02
+    history_state_steps: 5
+    payload_kg: null       # scalar or per-controlled-vehicle list
+    road_mu: null          # scalar or per-controlled-vehicle list, in (0,1]
+  road:
+    sample_points: 64
+    backward_range_m: 20.0
+    forward_range_m: 180.0
+    include_connected_road_segments: true
+    search_lateral_range_m: 40.0

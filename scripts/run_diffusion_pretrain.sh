@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 PYTHON_BIN="${PYTHON_BIN:-python}"
-CONFIG="${CONFIG:-configs/diffusion_pretrain.json}"
-DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/allmerge_expert}"
-OUTPUT_DIR="${OUTPUT_DIR:-outputs/diffusion_pretrain}"
-
-"${PYTHON_BIN}" -m scripts.training.train_diffusion_pretrain \
+CONFIG="${CONFIG:-configs/train/diffusion.yaml}"
+DATASET_ROOT="${DATASET_ROOT:-outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/final_compare/control_v0}"
+"${PYTHON_BIN}" scripts/training/run_diffusion.py \
   --config "${CONFIG}" \
   --dataset-root "${DATASET_ROOT}" \
   --output-dir "${OUTPUT_DIR}" \

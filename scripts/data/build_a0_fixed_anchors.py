@@ -1,7 +1,7 @@
 """Build TRACE A0 fixed control anchors with control-space K-means.
 
-The current AllMerge expert shards store the 10 scene-conditioned A1 control
-candidates in ``coarse_controls [N,10,40,2]``. This builder pools those
+The current AllMerge expert shards store scene-conditioned A1 control
+candidates in ``coarse_controls [N,M,40,2]``; M is the source dataset mode count. This builder pools those
 collected 40-step control sequences over the TRAIN split and clusters them
 DIRECTLY in normalized control space. K-means centroids are used as the fixed
 control anchors; no medoid/sample retrieval or trajectory-to-control matching
@@ -302,8 +302,8 @@ def build_fixed_anchor_bank(
     min_path_length_m: float = 0.5,
     max_accel_mps2: float = 2.5, max_steer_rad: float = 0.08,
 ) -> dict:
-    if num_anchors != 10:
-        raise ValueError("TRACE A0 currently requires exactly 10 anchors to match control.model.num_modes")
+    if num_anchors <= 0:
+        raise ValueError("num_anchors must be positive")
     if max_samples < 0 or min_path_length_m < 0:
         raise ValueError("max_samples and min_path_length_m must be nonnegative")
     if batch_size <= 0 or epochs <= 0 or lloyd_refine < 0:
@@ -421,7 +421,10 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build A0 fixed anchors by direct control-sequence K-means")
     parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k")
     parser.add_argument("--split", default="train", choices=("train",))
-    parser.add_argument("--num-anchors", type=int, default=10)
+    parser.add_argument("--num-anchors", type=int, default=None,
+                        help="Number of fixed anchors; defaults to control.model.num_modes.")
+    parser.add_argument("--diffusion-config", default="configs/train/diffusion.yaml",
+                        help="YAML used to resolve control.model.num_modes when --num-anchors is omitted.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--epochs", type=int, default=10)
@@ -432,11 +435,22 @@ def main(argv=None) -> int:
     parser.add_argument("--min-path-length-m", type=float, default=0.5)
     parser.add_argument("--max-accel-mps2", type=float, default=2.5)
     parser.add_argument("--max-steer-rad", type=float, default=0.08)
-    parser.add_argument("--output", default="outputs/anchor_ablation/a0_fixed_control_anchors.npz")
+    parser.add_argument("--output", default="outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz")
     args = parser.parse_args(argv)
+    num_anchors = args.num_anchors
+    if num_anchors is None:
+        import yaml
+        diffusion_path = Path(args.diffusion_config).expanduser()
+        diffusion_path = diffusion_path.resolve() if diffusion_path.is_absolute() else (ROOT / diffusion_path).resolve()
+        diffusion_cfg = yaml.safe_load(diffusion_path.read_text(encoding="utf-8"))
+        num_anchors = int(
+            (((diffusion_cfg.get("control") or {}).get("model") or {}).get("num_modes", 10))
+        )
+    if num_anchors <= 0:
+        parser.error("Resolved control.model.num_modes must be positive")
     build_fixed_anchor_bank(
         args.dataset_root, args.output, split=args.split,
-        num_anchors=args.num_anchors, seed=args.seed,
+        num_anchors=num_anchors, seed=args.seed,
         batch_size=args.batch_size, epochs=args.epochs,
         lloyd_refine=args.lloyd_refine, max_samples=args.max_samples,
         control_key=args.control_key, trajectory_key=args.trajectory_key,

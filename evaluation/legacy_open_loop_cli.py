@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default="all_merge\\outputs\\expert_dataset\\allmerge_expert_50k",
+        default="outputs\\expert_dataset\\expert_trucksim_k2_anchor_pair_100k",
     )
     parser.add_argument(
         "--split",

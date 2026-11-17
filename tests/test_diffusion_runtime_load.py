@@ -21,7 +21,7 @@ from learning.dataset_adapter import build_w1_dataloader, unpack_w1_batch
 def main() -> int:
     parser = argparse.ArgumentParser(description="Runtime checkpoint load/inference test.")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--dataset-root", default="outputs/expert_dataset/allmerge_expert")
+    parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k")
     parser.add_argument("--split", choices=("all", "train", "val", "test"), default="all")
     parser.add_argument("--device", default="auto")
     args = parser.parse_args()

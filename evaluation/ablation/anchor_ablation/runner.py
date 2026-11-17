@@ -62,6 +62,27 @@ def _meta_int(meta: Mapping, key: str, default=-1) -> int:
     return int(value)
 
 
+def _resolve_num_modes(diffusion_config: str | Path) -> tuple[int, Path]:
+    """Resolve the single anchor-count source: control.model.num_modes."""
+    path = resolve_repo_file(diffusion_config)
+    if not path.is_file():
+        raise FileNotFoundError(f"Diffusion configuration not found: {path}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Diffusion configuration must be a YAML mapping: {path}")
+    control = raw.get("control") or {}
+    model = control.get("model") or {}
+    if not isinstance(model, dict):
+        raise ValueError("control.model must be a YAML mapping")
+    try:
+        num_modes = int(model.get("num_modes", 10))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("control.model.num_modes must be a positive integer") from exc
+    if num_modes <= 0:
+        raise ValueError(f"control.model.num_modes must be positive, got {num_modes}")
+    return num_modes, path
+
+
 def _features_to_device(features: dict, device: torch.device) -> dict:
     return {
         key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
@@ -84,8 +105,9 @@ def _strategy(model) -> str:
     return str((getattr(model, "anchors_config", None) or {}).get("strategy", "dynamic")).lower()
 
 
-def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
-    """Load only requested methods, while checking shared architecture and K2 weights."""
+def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
+                 expected_num_modes: int | None = None):
+    """Load requested methods and validate shared architecture, K, and K2 weights."""
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
     expected = {"A0": "fixed", "A1": "dynamic", "A2": "adaptive"}
@@ -97,6 +119,23 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
         if not path.is_file():
             raise FileNotFoundError(f"{method} diffusion checkpoint not found: {path}")
         model, payload = load_control_checkpoint(path, device="cpu")
+        scene_config = getattr(model, "scene_config", None)
+        checkpoint_num_modes = getattr(scene_config, "num_modes", None)
+        if checkpoint_num_modes is None:
+            model_config = payload.get("model_config") or {}
+            checkpoint_num_modes = model_config.get("num_modes")
+        if expected_num_modes is not None:
+            if checkpoint_num_modes is None:
+                raise ValueError(
+                    f"{method} checkpoint does not expose model_config.num_modes; "
+                    "cannot verify compatibility with control.model.num_modes"
+                )
+            if int(checkpoint_num_modes) != int(expected_num_modes):
+                raise ValueError(
+                    f"{method} checkpoint has num_modes={checkpoint_num_modes}, "
+                    f"but diffusion config requires num_modes={expected_num_modes}. "
+                    "Retrain this planner checkpoint with the configured anchor count."
+                )
         strategy = _strategy(model)
         if strategy != expected[method]:
             raise ValueError(f"{method} checkpoint uses strategy={strategy!r}; expected {expected[method]!r}")
@@ -143,6 +182,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
             "epoch": payload.get("epoch"),
             "k2_state_sha256": k2_hash,
             "anchors_config": payload.get("anchors_config", {}),
+            "num_modes": int(checkpoint_num_modes) if checkpoint_num_modes is not None else None,
         }
     return models, payloads, checkpoint_info
 
@@ -214,7 +254,8 @@ def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
     skipped_keys = sorted(key for key, entries in groups.items() if not all(ok for _, ok in entries))
     if not complete_keys:
         raise RuntimeError(
-            "No synchronized frames contain ten geometrically instantiated A1 anchors for every ego. "
+            f"No synchronized frames contain {expected_anchor_count} geometrically instantiated "
+            "A1 anchors for every ego. "
             "Inspect/refill the paired dynamic-anchor data; unavailable zero-filled slots must not be marked valid."
         )
     if num_frames > 0 and num_frames < len(complete_keys):
@@ -430,6 +471,10 @@ def run(args=None):
         description="TRACE A0/A1/A2 Adaptive Anchor Ablation (anchors / feasibility / all)"
     )
     parser.add_argument("--config", default="configs/evaluation/anchor_ablation.yaml")
+    parser.add_argument(
+        "--diffusion-config", default=None,
+        help="Shared diffusion YAML; control.model.num_modes is the sole anchor-count source.",
+    )
     parser.add_argument("--checkpoint-a0")
     parser.add_argument("--checkpoint-a1")
     parser.add_argument("--checkpoint-a2")
@@ -467,6 +512,21 @@ def run(args=None):
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError("Anchor Ablation config must be a YAML mapping")
+
+    diffusion_config = (
+        parsed.diffusion_config
+        or cfg.get("diffusion_config", "configs/train/diffusion.yaml")
+    )
+    num_modes, diffusion_config_path = _resolve_num_modes(diffusion_config)
+    legacy_num_anchors = cfg.get("num_anchors")
+    if legacy_num_anchors is not None and int(legacy_num_anchors) != num_modes:
+        print(
+            f"[CONFIG] Ignoring stale evaluation num_anchors={legacy_num_anchors}; "
+            f"using control.model.num_modes={num_modes}.",
+            flush=True,
+        )
+    # Keep the existing staged evaluator interface while enforcing one K source.
+    cfg["num_anchors"] = num_modes
 
     stage = parsed.stage or cfg.get("stage", "all")
     if parsed.skip_feasibility:
@@ -532,7 +592,7 @@ def run(args=None):
         )
         subset, a1_manifest = _filter_a1_and_sample_frames(
             subset,
-            expected_anchor_count=int(cfg.get("num_anchors", 10)),
+            expected_anchor_count=num_modes,
             num_frames=num_frames,
             seed=sample_seed,
         )
@@ -568,6 +628,7 @@ def run(args=None):
             bank_path=parsed.a0_bank,
             scorer_path=parsed.a2_scorer,
             scorer_config=parsed.scorer_config,
+            diffusion_config=str(diffusion_config_path),
             device=device,
         )
         for info in source_info.values():
@@ -575,7 +636,9 @@ def run(args=None):
                 info["scorer_sha256"] = _sha256(Path(info["scorer_path"]))
                 scorer_path = info["scorer_path"]
     else:
-        models, _payloads, checkpoint_info = _load_models(checkpoint_paths, device)
+        models, _payloads, checkpoint_info = _load_models(
+            checkpoint_paths, device, expected_num_modes=num_modes
+        )
         if stage == "all" and "A2" in models:
             teacher_cfg, scorer_path = _teacher_config_from_a2(models["A2"])
         elif stage == "all":
@@ -604,7 +667,7 @@ def run(args=None):
             print(f"[ANCHOR ABLATION] anchor quality: {method}", flush=True)
             method_anchor_rows, anchor_figure = _anchor_pass(
                 method, model, loader, device, teacher_cfg,
-                int(cfg.get("num_anchors", 10)), figure_metas,
+                num_modes, figure_metas,
             )
             anchor_rows.extend(method_anchor_rows)
             if set(anchor_figure) != set(figure_metas):
@@ -686,8 +749,8 @@ def run(args=None):
         ],
         "completed_metrics": completed_metrics,
         "definitions": {
-            "anchor_minADE": "Minimum average displacement error over ten geometrically instantiated anchors",
-            "safe_ratio": "Hard-safe anchors divided by ten, using the common A2 safety teacher's constant-velocity collision and drivable-road corridor labels",
+            "anchor_minADE": f"Minimum average displacement error over {num_modes} geometrically instantiated anchors",
+            "safe_ratio": f"Hard-safe anchors divided by {num_modes}, using the common A2 safety teacher's constant-velocity collision and drivable-road corridor labels",
             "trajectory_diversity": "Mean pairwise pointwise XY distance across anchor trajectories, in metres",
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
             "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point execution trajectories",
@@ -698,6 +761,8 @@ def run(args=None):
         "jtp_config": str(jtp_path) if jtp_path else None,
         "dataset": {"root": str(dataset_root), **data_manifest},
         "split": split,
+        "num_modes": num_modes,
+        "diffusion_config": str(diffusion_config_path),
         "inference_seeds": seeds if stage != "anchors" else [],
         "scorer_checkpoint": str(scorer_path) if scorer_path else None,
         "scorer_sha256": _sha256(Path(scorer_path)) if scorer_path else None,

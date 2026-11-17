@@ -1,0 +1,1101 @@
+from __future__ import annotations
+
+# Allow direct execution from any working directory.
+if __package__ in (None, ""):
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+
+
+import argparse
+import json
+import os
+import subprocess
+import time
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List
+
+import numpy as np
+import torch
+from stable_baselines3.common.utils import set_random_seed
+
+from data_pipeline.expert_collection.core import (
+    FEATURE_KEYS,
+    MODE_NAMES,
+    SEMANTIC_NAMES,
+    SOURCE_COMMIT as PILOT_SOURCE_COMMIT,
+    _configure_episode_video,
+    _episode_terminal_summary,
+    _write_episode_video_manifest,
+    build_frame_record,
+    get_vec_attr,
+)
+from data_pipeline.expert_dataset import split_shards
+from highway_env.envs.scenarios.curved_lane_change_env import CurvedLaneChangeEnv
+from highway_env.envs.scenarios.merge_in_env import MergeInEnv
+from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
+from highway_env.envs.scenarios.straight_lane_change_env import StraightLaneChangeEnv
+
+
+SCENARIOS = {
+    "straight": StraightLaneChangeEnv,
+    "curved": CurvedLaneChangeEnv,
+    "merge_in": MergeInEnv,
+    "merge_out": MergeOutEnv,
+}
+
+# SCENARIO-DIRECT EXPERT COLLECTOR V1
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs" / "expert_dataset"
+
+
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Production AllMerge Polynomial-expert dataset collector. "
+            "Reuses expert_collection_core.py for the feature/label contract, "
+            "and adds per-ego flattening, sharding, resume, splits and manifest."
+        )
+    )
+    parser.add_argument("--target-samples", type=int, default=1000)
+    parser.add_argument("--samples-per-shard", type=int, default=2048)
+    parser.add_argument("--start-seed", type=int, default=1)
+    parser.add_argument(
+        "--scenario",
+        choices=["all", *SCENARIOS.keys()],
+        default="all",
+        help="scenario source for expert collection; default: all",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=5.0,
+        help="episode duration in seconds; default: 5.0",
+    )
+    parser.add_argument(
+        "--group-action",
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=3,
+        help="platoon group action sent to scenario env.step(); default: 3",
+    )
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--dataset-name", type=str, default="allmerge_expert")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--allow-contract-mismatch", action="store_true")
+    parser.add_argument("--save-episode-videos", action="store_true")
+    parser.add_argument("--video-dir", type=Path, default=None)
+    parser.add_argument("--train-split-ratio", type=float, default=0.8)
+    parser.add_argument("--val-split-ratio", type=float, default=0.1)
+    parser.add_argument("--test-split-ratio", type=float, default=0.1)
+    parser.add_argument("--split-seed", type=int, default=0)
+    parser.add_argument("--max-consecutive-empty-episodes", type=int, default=20)
+    # The TruckSim expert dataset uses a new output directory, and a fresh
+    # subprocess for EACH episode to isolate native VehicleSim DLLs.
+    parser.add_argument("--trucksim-koopman-config", type=Path, default=None,
+                        help="Enable TruckSim expert collection with this existing Koopman YAML")
+    parser.add_argument("--engine-map-cache", type=Path, default=None,
+                        help="Pre-parsed engine map .npy shared by native workers")
+    parser.add_argument("--copy-trucksim-dll-instances", action="store_true",
+                        help="Create distinct per-ego DLL images beside each source DLL")
+    parser.add_argument("--max-episodes", type=int, default=None,
+                        help="Limit this invocation to one episode for native worker isolation")
+    parser.add_argument("--episode-index", type=int, default=None,
+                        help="Explicit episode index used by the external batch runner")
+    parser.add_argument("--defer-split", action="store_true",
+                        help="Do not recreate train/val/test splits after each worker")
+    args = parser.parse_args(argv)
+
+    if args.target_samples <= 0:
+        parser.error("--target-samples must be positive")
+    if args.samples_per_shard <= 0:
+        parser.error("--samples-per-shard must be positive")
+    if args.duration <= 0:
+        parser.error("--duration must be positive")
+    if args.max_consecutive_empty_episodes <= 0:
+        parser.error("--max-consecutive-empty-episodes must be positive")
+    return args
+
+
+def resolve_git_commit() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _scalar_array(value, dtype) -> np.ndarray:
+    return np.asarray(value, dtype=dtype)
+
+
+def _select_ego_value(
+    value: np.ndarray,
+    ego_index: int,
+    ego_count: int,
+) -> np.ndarray:
+    value = np.asarray(value)
+    if value.ndim >= 1 and value.shape[0] == ego_count:
+        return np.asarray(value[ego_index]).copy()
+    return value.copy()
+
+
+# OPEN_LOOP_DENSE_VIZ_V1: collector
+
+def _extract_polynomial_gt_10hz(
+    env,
+    alignment: Dict,
+    *,
+    dense_dt_s: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract true Polynomial path at 10 Hz in the planner ego frame.
+
+    The Polynomial planner internally produces a 0.1 s path in world
+    coordinates. The standard expert label stores only the aligned 8-point
+    0.5 s samples. For visualization we preserve the original path on a fixed
+    10 Hz grid and transform it with the SAME planning origin used by
+    PlannerTrajectory.from_world_path().
+    """
+    from highway_env.planner.geometry import world_to_ego_point
+
+    sparse_time_s = np.asarray(
+        alignment["trajectory_time_s"],
+        dtype=np.float32,
+    ).reshape(-1)
+    if sparse_time_s.size == 0:
+        raise RuntimeError("Empty expert trajectory_time_s")
+
+    horizon_s = float(sparse_time_s[-1])
+    if horizon_s <= 0.0:
+        raise RuntimeError(f"Invalid expert horizon: {horizon_s}")
+    if dense_dt_s <= 0.0:
+        raise ValueError("dense_dt_s must be positive")
+
+    steps = int(round(horizon_s / float(dense_dt_s)))
+    dense_time_s = (
+        np.arange(steps + 1, dtype=np.float32)
+        * np.float32(dense_dt_s)
+    )
+    # Keep the last timestamp exactly aligned with the sparse planner horizon.
+    if not np.isclose(
+        float(dense_time_s[-1]),
+        horizon_s,
+        atol=1e-5,
+        rtol=0.0,
+    ):
+        raise RuntimeError(
+            "Planner horizon is not compatible with 10 Hz dense GT: "
+            f"horizon={horizon_s:.6f}s"
+        )
+    dense_time_s[-1] = np.float32(horizon_s)
+
+    dense_ego_xy = []
+    for ego_idx, vehicle in enumerate(env.controlled_vehicles):
+        path = getattr(vehicle, "path", None)
+        planner_trajectory = getattr(
+            vehicle,
+            "latest_planner_trajectory",
+            None,
+        )
+        if path is None or planner_trajectory is None:
+            raise RuntimeError(
+                "Polynomial dense GT unavailable for ego "
+                f"{ego_idx}: missing vehicle.path/latest_planner_trajectory"
+            )
+
+        source_time_s = np.asarray(
+            path.get("time_s"),
+            dtype=np.float32,
+        ).reshape(-1)
+        if source_time_s.size < 2:
+            raise RuntimeError(
+                f"Polynomial dense GT path too short for ego {ego_idx}"
+            )
+
+        def _scalar_path(values, name: str) -> np.ndarray:
+            values = list(values)
+            result = np.asarray(
+                [
+                    float(np.asarray(value).reshape(-1)[0])
+                    for value in values
+                ],
+                dtype=np.float32,
+            )
+            if result.shape[0] != source_time_s.shape[0]:
+                raise RuntimeError(
+                    f"Polynomial {name}/time length mismatch for ego "
+                    f"{ego_idx}: {result.shape[0]} vs {source_time_s.shape[0]}"
+                )
+            return result
+
+        world_x = _scalar_path(path["x"], "x")
+        world_y = _scalar_path(path["y"], "y")
+
+        if np.any(np.diff(source_time_s) <= 0.0):
+            raise RuntimeError(
+                f"Polynomial time grid is not strictly increasing for ego {ego_idx}"
+            )
+        if float(source_time_s[0]) > 1e-5:
+            raise RuntimeError(
+                "Polynomial path starts after t=0 for ego "
+                f"{ego_idx}: {float(source_time_s[0]):.6f}s"
+            )
+        if float(source_time_s[-1]) < horizon_s - 1e-5:
+            raise RuntimeError(
+                "Polynomial path does not cover sparse expert horizon for ego "
+                f"{ego_idx}: source_end={float(source_time_s[-1]):.6f}s, "
+                f"horizon={horizon_s:.6f}s"
+            )
+
+        dense_world_xy = np.stack(
+            [
+                np.interp(dense_time_s, source_time_s, world_x),
+                np.interp(dense_time_s, source_time_s, world_y),
+            ],
+            axis=-1,
+        ).astype(np.float32)
+
+        origin = planner_trajectory.get("ego_position_world")
+        heading = planner_trajectory.get("ego_heading_world")
+        if origin is None or heading is None:
+            raise RuntimeError(
+                "PlannerTrajectory is missing planning origin for ego "
+                f"{ego_idx}"
+            )
+
+        local_xy = world_to_ego_point(
+            dense_world_xy,
+            np.asarray(origin, dtype=np.float32),
+            float(heading),
+        ).astype(np.float32)
+        dense_ego_xy.append(local_xy)
+
+    return np.stack(dense_ego_xy, axis=0), dense_time_s
+
+
+def flatten_frame_record(record: Dict) -> List[Dict[str, np.ndarray]]:
+    """
+    Convert the existing pilot frame record to one sample per controlled ego.
+
+    No feature or target is recomputed here. build_frame_record() stays the
+    single authoritative source of expert labels.
+    """
+    target_mode = np.asarray(record["target_mode"])
+    if target_mode.ndim != 1:
+        raise ValueError(
+            "Expected target_mode [num_egos], got "
+            f"{target_mode.shape}"
+        )
+
+    ego_count = int(target_mode.shape[0])
+    # STAGE3_DENSE_EXPERT_V2
+    per_ego_keys = (
+        "expert_trajectory_xy",
+        "future_trajectory_dense",
+        "target_mode",
+        "target_semantic",
+        "target_mode_traffic_valid",
+        "target_mode_geometry_valid",
+        "target_mode_assignment_distance",
+        "selected_anchor_xy",
+        "geometry_semantic_residual_xy",
+        "geometry_semantic_ade",
+        "geometry_semantic_fde",
+        "geometry_semantic_max_abs_dx",
+        "geometry_semantic_max_abs_dy",
+    )
+
+    samples: List[Dict[str, np.ndarray]] = []
+    for ego_index in range(ego_count):
+        sample: Dict[str, np.ndarray] = {}
+
+        for key in FEATURE_KEYS:
+            value = np.asarray(record["features"][key])
+            if value.ndim == 0 or value.shape[0] != ego_count:
+                raise ValueError(
+                    f"Feature {key} shape={value.shape}, "
+                    f"expected leading ego dimension={ego_count}"
+                )
+            sample[key] = np.asarray(value[ego_index]).copy()
+
+        for key in per_ego_keys:
+            sample[key] = _select_ego_value(
+                np.asarray(record[key]),
+                ego_index,
+                ego_count,
+            )
+
+        sample["trajectory_time_s"] = _select_ego_value(
+            np.asarray(record["trajectory_time_s"]),
+            ego_index,
+            ego_count,
+        ).astype(np.float32, copy=False)
+        sample["dense_dt"] = _scalar_array(record["dense_dt"], np.float32)
+        sample["trajectory_horizon_s"] = _scalar_array(
+            record["trajectory_horizon_s"], np.float32
+        )
+
+        sample["frame_index"] = _scalar_array(record["frame_index"], np.int64)
+        sample["episode_index"] = _scalar_array(record["episode_index"], np.int64)
+        sample["episode_step"] = _scalar_array(record["episode_step"], np.int64)
+        sample["seed"] = _scalar_array(record["seed"], np.int64)
+        sample["ego_index"] = _scalar_array(ego_index, np.int64)
+        sample["contract_ok"] = _scalar_array(record["contract_ok"], np.bool_)
+        samples.append(sample)
+
+    return samples
+
+
+class ShardWriter:
+    """
+    Diffusion-metadrive-style buffered NPZ writer, adapted with:
+      - sample schema checking;
+      - atomic shard replacement.
+    """
+
+    def __init__(
+        self,
+        output_dir: Path,
+        samples_per_shard: int,
+        start_shard_index: int = 0,
+    ):
+        self.output_dir = Path(output_dir)
+        self.samples_per_shard = int(samples_per_shard)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.buffers: Dict[str, List[np.ndarray]] = defaultdict(list)
+        self.buffer_size = 0
+        self.shard_index = int(start_shard_index)
+        self.schema = None
+
+    @staticmethod
+    def _sample_schema(sample: Dict[str, np.ndarray]):
+        return {
+            key: (
+                tuple(np.asarray(value).shape),
+                str(np.asarray(value).dtype),
+            )
+            for key, value in sample.items()
+        }
+
+    def _validate_sample(self, sample: Dict[str, np.ndarray]) -> None:
+        schema = self._sample_schema(sample)
+        if self.schema is None:
+            self.schema = schema
+            return
+
+        if schema != self.schema:
+            missing = sorted(set(self.schema) - set(schema))
+            extra = sorted(set(schema) - set(self.schema))
+            changed = {
+                key: (self.schema[key], schema[key])
+                for key in set(self.schema) & set(schema)
+                if self.schema[key] != schema[key]
+            }
+            raise ValueError(
+                "Dataset sample schema drift detected. "
+                f"missing={missing}, extra={extra}, changed={changed}"
+            )
+
+    def add_samples(self, samples: List[Dict[str, np.ndarray]]) -> int:
+        if not samples:
+            return 0
+
+        for sample in samples:
+            self._validate_sample(sample)
+            for key, value in sample.items():
+                self.buffers[key].append(np.asarray(value))
+
+        self.buffer_size += len(samples)
+        written = 0
+        while self.buffer_size >= self.samples_per_shard:
+            self._flush_one(self.samples_per_shard)
+            written += self.samples_per_shard
+        return written
+
+    def close(self) -> int:
+        if self.buffer_size == 0:
+            return 0
+        remaining = int(self.buffer_size)
+        self._flush_one(remaining)
+        return remaining
+
+    def _flush_one(self, count: int) -> None:
+        stacked = {
+            key: np.stack(values[:count], axis=0)
+            for key, values in self.buffers.items()
+        }
+
+        shard_path = self.output_dir / f"shard_{self.shard_index:06d}.npz"
+        tmp_path = self.output_dir / f".shard_{self.shard_index:06d}.npz.tmp"
+
+        with tmp_path.open("wb") as handle:
+            np.savez_compressed(handle, **stacked)
+        os.replace(tmp_path, shard_path)
+
+        for values in self.buffers.values():
+            del values[:count]
+
+        self.buffer_size -= count
+        self.shard_index += 1
+        print(f"[shard] wrote {count} samples -> {shard_path}")
+
+
+def _parse_shard_index(path: Path) -> int:
+    if not path.stem.startswith("shard_"):
+        return -1
+    try:
+        return int(path.stem[len("shard_"):])
+    except ValueError:
+        return -1
+
+
+def detect_existing_state(shard_dir: Path) -> Dict[str, int]:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    total_samples = 0
+    max_episode_index = -1
+    max_frame_index = -1
+    max_sample_index = -1
+
+    for shard_path in shard_paths:
+        with np.load(shard_path, allow_pickle=False) as shard:
+            if "expert_trajectory_xy" not in shard.files:
+                raise KeyError(
+                    f"{shard_path} missing expert_trajectory_xy"
+                )
+
+            shard_len = int(shard["expert_trajectory_xy"].shape[0])
+            total_samples += shard_len
+
+            if "episode_index" in shard.files and shard_len:
+                max_episode_index = max(
+                    max_episode_index,
+                    int(np.max(shard["episode_index"])),
+                )
+            if "frame_index" in shard.files and shard_len:
+                max_frame_index = max(
+                    max_frame_index,
+                    int(np.max(shard["frame_index"])),
+                )
+            if "sample_index" in shard.files and shard_len:
+                max_sample_index = max(
+                    max_sample_index,
+                    int(np.max(shard["sample_index"])),
+                )
+
+    next_shard_index = 0
+    if shard_paths:
+        next_shard_index = max(
+            _parse_shard_index(path)
+            for path in shard_paths
+        ) + 1
+
+    return {
+        "shard_count": len(shard_paths),
+        "next_shard_index": next_shard_index,
+        "total_samples": total_samples,
+        "next_episode_index": max_episode_index + 1,
+        "next_frame_index": max_frame_index + 1,
+        "next_sample_index": (
+            max_sample_index + 1
+            if max_sample_index >= 0
+            else total_samples
+        ),
+    }
+
+
+def summarize_shards(shard_dir: Path) -> Dict:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    mode_counts = {name: 0 for name in MODE_NAMES}
+    semantic_counts = {name: 0 for name in SEMANTIC_NAMES}
+    sample_count = 0
+    contract_failures = 0
+    traffic_valid_count = 0
+    geometry_valid_count = 0
+
+    for shard_path in shard_paths:
+        with np.load(shard_path, allow_pickle=False) as shard:
+            n = int(shard["expert_trajectory_xy"].shape[0])
+            sample_count += n
+            modes = np.asarray(shard["target_mode"], dtype=np.int64).reshape(-1)
+            semantics = np.asarray(
+                shard["target_semantic"],
+                dtype=np.int64,
+            ).reshape(-1)
+
+            for idx, name in enumerate(MODE_NAMES):
+                mode_counts[name] += int((modes == idx).sum())
+            for idx, name in enumerate(SEMANTIC_NAMES):
+                semantic_counts[name] += int((semantics == idx).sum())
+
+            if "contract_ok" in shard.files:
+                contract = np.asarray(
+                    shard["contract_ok"],
+                    dtype=bool,
+                ).reshape(-1)
+                contract_failures += int((~contract).sum())
+
+            if "target_mode_traffic_valid" in shard.files:
+                traffic_valid_count += int(
+                    np.asarray(
+                        shard["target_mode_traffic_valid"],
+                        dtype=bool,
+                    ).sum()
+                )
+
+            if "target_mode_geometry_valid" in shard.files:
+                geometry_valid_count += int(
+                    np.asarray(
+                        shard["target_mode_geometry_valid"],
+                        dtype=bool,
+                    ).sum()
+                )
+
+    denom = max(sample_count, 1)
+    return {
+        "sample_count": sample_count,
+        "shard_count": len(shard_paths),
+        "target_mode_distribution": {
+            name: {
+                "count": int(count),
+                "ratio": float(count / denom),
+            }
+            for name, count in mode_counts.items()
+        },
+        "semantic_distribution": {
+            name: {
+                "count": int(count),
+                "ratio": float(count / denom),
+            }
+            for name, count in semantic_counts.items()
+        },
+        "contract_failures": int(contract_failures),
+        "target_mode_traffic_valid_ratio": float(
+            traffic_valid_count / denom
+        ),
+        "target_mode_geometry_valid_ratio": float(
+            geometry_valid_count / denom
+        ),
+    }
+
+
+def infer_schema(shard_dir: Path) -> Dict:
+    shard_paths = sorted(shard_dir.glob("shard_*.npz"))
+    if not shard_paths:
+        return {}
+
+    with np.load(shard_paths[0], allow_pickle=False) as shard:
+        return {
+            key: {
+                "sample_shape": list(shard[key].shape[1:]),
+                "dtype": str(shard[key].dtype),
+            }
+            for key in shard.files
+        }
+
+
+def write_manifest(
+    *,
+    args: argparse.Namespace,
+    dataset_root: Path,
+    split_summary: Dict,
+    collection_wall_time_sec: float,
+    resumed_from_samples: int,
+) -> Path:
+    shard_dir = dataset_root / "shards"
+    report_dir = dataset_root / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = summarize_shards(shard_dir)
+    manifest_path = report_dir / "manifest.json"
+
+    existing_manifest = {}
+    if args.resume and manifest_path.exists():
+        try:
+            existing_manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+        except Exception:
+            existing_manifest = {}
+
+    manifest = {
+        "dataset_name": args.dataset_name,
+        "repo_commit": resolve_git_commit(),
+        "pilot_source_commit_constant": PILOT_SOURCE_COMMIT,
+        "collector_contract_source": (
+            "data_pipeline.expert_collection.core.build_frame_record + "
+            "latest_planner_features/latest_expert_alignment"
+        ),
+        "expert_type": "Polynomial",
+        "sample_unit": "one controlled ego at one valid 10-Hz planning frame",
+        "target_samples": int(args.target_samples),
+        "collected_samples": int(summary["sample_count"]),
+        "feature_keys": list(FEATURE_KEYS),
+        "mode_names": list(MODE_NAMES),
+        "semantic_names": list(SEMANTIC_NAMES),
+        "trajectory_horizon": {
+            "steps": 8,
+            "dt_sec": 0.5,
+            "horizon_sec": 4.0,
+        },
+        "schema": infer_schema(shard_dir),
+        "dataset_schema_version": (
+            "allmerge_expert_trucksim_k2_context_v1"
+            if args.trucksim_koopman_config is not None
+            else "allmerge_expert_dense10hz_v2"
+        ),
+        "dense_trajectory_contract": {
+            "field": "future_trajectory_dense",
+            "shape": [40, 2],
+            "dense_dt": 0.1,
+            "trajectory_horizon_s": 4.0,
+            "source": "Polynomial native 10Hz path before sparse downsampling",
+            "sparse_indices": [4, 9, 14, 19, 24, 29, 34, 39],
+        },
+        "summary": summary,
+        "splits": {
+            name: len(names)
+            for name, names in split_summary.items()
+        },
+        "collection_wall_time_sec": float(collection_wall_time_sec),
+        "config": {
+            "scenario": args.scenario,
+            "duration": float(args.duration),
+            "group_action": int(args.group_action),
+            "start_seed": int(args.start_seed),
+            "samples_per_shard": int(args.samples_per_shard),
+            "allow_contract_mismatch": bool(args.allow_contract_mismatch),
+            "save_episode_videos": bool(args.save_episode_videos),
+            "split_seed": int(args.split_seed),
+            "trucksim_koopman_config": (
+                str(args.trucksim_koopman_config)
+                if args.trucksim_koopman_config is not None else None
+            ),
+            "native_episode_isolation": bool(args.trucksim_koopman_config is not None),
+            "split_ratios": [
+                float(args.train_split_ratio),
+                float(args.val_split_ratio),
+                float(args.test_split_ratio),
+            ],
+        },
+        "resume_history": existing_manifest.get("resume_history", [])
+        + (
+            [
+                {
+                    "timestamp": time.strftime("%Y%m%d_%H%M%S"),
+                    "resumed_from_samples": int(resumed_from_samples),
+                    "final_samples": int(summary["sample_count"]),
+                }
+            ]
+            if args.resume
+            else []
+        ),
+    }
+
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def main(args=None) -> None:
+    # Historical simulation paths are rooted at the workspace; never change cwd on import.
+    os.chdir(REPO_ROOT.parent)
+    args = args if args is not None else parse_args()
+
+    if args.save_episode_videos:
+        raise ValueError(
+            "--save-episode-videos is temporarily disabled for the direct "
+            "scenario collector. Validate dataset collection first; video "
+            "recording should be added as a scenario-env wrapper, not through "
+            "the legacy VecEnv path."
+        )
+
+    set_random_seed(
+        args.start_seed,
+        using_cuda=torch.cuda.is_available(),
+    )
+
+    trucksim_cfg = None
+    if args.trucksim_koopman_config is not None:
+        from data_pipeline.expert_collection.trucksim import load_collection_config
+        trucksim_cfg = load_collection_config(args.trucksim_koopman_config)
+        if args.max_episodes != 1:
+            raise ValueError(
+                "Native TruckSim collection requires --max-episodes 1, "
+                "with a fresh child process per episode. Use "
+                "scripts/data/collect_expert_dataset.py --config configs/data/expert_collection.yaml for batches.")
+
+    selected_scenarios = (
+        [(name, SCENARIOS[name]) for name in args.scenarios]
+        if hasattr(args, 'scenarios') else
+        list(SCENARIOS.items()) if args.scenario == 'all'
+        else [(args.scenario, SCENARIOS[args.scenario])]
+    )
+
+    dataset_root = (
+        Path(args.output_root).resolve()
+        / args.dataset_name
+    )
+    shard_dir = dataset_root / "shards"
+    report_dir = dataset_root / "reports"
+
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.resume:
+        state = detect_existing_state(shard_dir)
+    else:
+        existing_shards = list(shard_dir.glob("shard_*.npz"))
+        if existing_shards:
+            raise FileExistsError(
+                f"{shard_dir} already contains shards. "
+                "Use --resume or choose another --dataset-name."
+            )
+        state = {
+            "shard_count": 0,
+            "next_shard_index": 0,
+            "total_samples": 0,
+            "next_episode_index": 0,
+            "next_frame_index": 0,
+            "next_sample_index": 0,
+        }
+
+    resumed_from_samples = int(state["total_samples"])
+    if trucksim_cfg is not None and resumed_from_samples:
+        first_shard = next(iter(sorted(shard_dir.glob('shard_*.npz'))), None)
+        if first_shard is not None:
+            with np.load(first_shard, allow_pickle=False) as prior:
+                if 'koopman_state_hist_si' not in prior.files:
+                    raise RuntimeError(
+                        'Cannot resume TruckSim experts into an old kinematic dataset. '
+                        'Select a new --dataset-name.')
+
+    if resumed_from_samples >= args.target_samples:
+        print(
+            "[resume] target already satisfied: "
+            f"{resumed_from_samples} >= {args.target_samples}"
+        )
+        split_summary = split_shards(
+            dataset_root=dataset_root,
+            train_ratio=args.train_split_ratio,
+            val_ratio=args.val_split_ratio,
+            test_ratio=args.test_split_ratio,
+            seed=args.split_seed,
+        )
+        manifest_path = write_manifest(
+            args=args,
+            dataset_root=dataset_root,
+            split_summary=split_summary,
+            collection_wall_time_sec=0.0,
+            resumed_from_samples=resumed_from_samples,
+        )
+        print(f"manifest: {manifest_path}")
+        return
+
+    writer = ShardWriter(
+        shard_dir,
+        args.samples_per_shard,
+        start_shard_index=state["next_shard_index"],
+    )
+
+    total_samples = int(state["total_samples"])
+    episode_index = (int(args.episode_index) if args.episode_index is not None
+                     else int(state["next_episode_index"]))
+    episodes_run = 0
+    frame_index = int(state["next_frame_index"])
+    next_sample_index = int(state["next_sample_index"])
+
+    skipped_done_steps = 0
+    consecutive_empty_episodes = 0
+    start_time = time.time()
+
+    print("=" * 108)
+    print("ALLMERGE EXPERT DATASET COLLECTION")
+    print("=" * 108)
+    print("repo commit:", resolve_git_commit())
+    print("collector core commit constant:", PILOT_SOURCE_COMMIT)
+    print("scenarios:", [name for name, _ in selected_scenarios])
+    print("duration:", args.duration)
+    print("group action:", args.group_action)
+    print("target samples:", args.target_samples)
+    print("existing samples:", total_samples)
+    print("samples per shard:", args.samples_per_shard)
+    print("dataset root:", dataset_root)
+    print("=" * 108)
+
+    while total_samples < args.target_samples and (
+        args.max_episodes is None or episodes_run < args.max_episodes
+    ):
+        scenario_name, env_cls = selected_scenarios[
+            episode_index % len(selected_scenarios)
+        ]
+        episode_seed = args.start_seed + episode_index
+        env = None
+        episode_step = 0
+        episode_added = 0
+        episode_done = False
+        episode_terminal = {
+            "reason": "collection_target_reached",
+            "terminated": False,
+            "truncated": False,
+        }
+
+        case = None
+        if trucksim_cfg is not None:
+            from data_pipeline.expert_collection.trucksim import (
+                select_case, scenario_trucksim_config, HistoricalContexts,
+                check_context,
+            )
+            case = select_case(trucksim_cfg, episode_index)
+        history = None
+        try:
+            env_config = {
+                "duration": float(args.duration),
+                "offscreen_rendering": False,
+            }
+            if case is not None:
+                # Preload pure Python Koopman data conversions before the DLL.
+                # Previous SDK builds showed heap-corruption during late imports.
+                from highway_env.vehicle.koopman.data import processing as _processing
+                # The three controlled trucks use the same physical operating
+                # condition but three independently loaded native DLL images.
+                env_config.update(scenario_trucksim_config(
+                    trucksim_cfg, case, num_egos=3,
+                    copy_instances=args.copy_trucksim_dll_instances))
+                if args.engine_map_cache is not None:
+                    env_config['TruckSim']['engine_map_cache_npy'] = str(
+                        args.engine_map_cache.resolve())
+            env = env_cls(config=env_config, render_mode=None)
+            _obs, _reset_info = env.reset(seed=int(episode_seed))
+            if case is not None:
+                history = HistoricalContexts(
+                    env.controlled_vehicles,
+                    compression_sign=trucksim_cfg['units'].get('wheel_compression_sign', 1.0))
+                print(f"[TRUCKSIM CASE] episode={episode_index} "
+                      f"scenario={scenario_name} model={case['model_id']} "
+                      f"payload={case['payload_kg']} kg mu={case['road_mu']}", flush=True)
+
+            planner_cfg = env.config.get("Planner", {})
+            if not planner_cfg.get("state", False):
+                raise RuntimeError(
+                    f"scenario={scenario_name}: Planner.state must be True"
+                )
+            if planner_cfg.get("type") != "Polynomial":
+                raise RuntimeError(
+                    f"scenario={scenario_name}: expert collector requires "
+                    f"Planner.type='Polynomial', got {planner_cfg.get('type')!r}"
+                )
+            if planner_cfg.get("Polynomial", {}).get("mode") != "aligned":
+                raise RuntimeError(
+                    f"scenario={scenario_name}: expert collector requires "
+                    "Planner.Polynomial.mode='aligned'"
+                )
+            if not planner_cfg.get("ExpertAlignment", {}).get("enabled", False):
+                raise RuntimeError(
+                    f"scenario={scenario_name}: "
+                    "Planner.ExpertAlignment.enabled must be True"
+                )
+
+            policy_frequency = float(env.config["policy_frequency"])
+            max_steps = int(np.ceil(float(args.duration) * policy_frequency))
+
+            for _ in range(max_steps):
+                # The polynomial planner publishes its features/labels during
+                # Road.act() BEFORE Road.step().  The previous history window
+                # is the one aligned with those labels.
+                pre_step_contexts = None
+                if history is not None and history.ready():
+                    pre_step_contexts = [
+                        history.at_planning_time(i, case)
+                        for i in range(len(env.controlled_vehicles))
+                    ]
+                _obs, _reward, terminated, truncated, info = env.step(
+                    int(args.group_action)
+                )
+                episode_step += 1
+                if history is not None:
+                    history.append_executed_transition(env.controlled_vehicles)
+
+                if bool(terminated) or bool(truncated):
+                    skipped_done_steps += 1
+                    episode_done = True
+                    episode_terminal = _episode_terminal_summary(info or {})
+                    break
+
+                features = getattr(env, "latest_planner_features", None)
+                alignment = getattr(env, "latest_expert_alignment", None)
+
+                if features is None:
+                    raise RuntimeError(
+                        f"scenario={scenario_name} seed={episode_seed}: "
+                        "latest_planner_features missing after env.step(). "
+                        "The direct scenario MultiAgentAction -> Rule -> "
+                        "Polynomial path did not publish the planner batch."
+                    )
+                if alignment is None:
+                    raise RuntimeError(
+                        f"scenario={scenario_name} seed={episode_seed}: "
+                        "latest_expert_alignment missing after env.step(). "
+                        "Check Planner.ExpertAlignment.enabled and aligned "
+                        "Polynomial output."
+                    )
+
+                if history is not None and pre_step_contexts is None:
+                    # Do not pad missing histories with fictitious zero states.
+                    continue
+
+                frame_record = build_frame_record(
+                    frame_index=frame_index,
+                    episode_index=episode_index,
+                    episode_step=episode_step,
+                    seed=episode_seed,
+                    features=features,
+                    alignment=alignment,
+                    allow_contract_mismatch=args.allow_contract_mismatch,
+                )
+
+                dense_gt_xy, dense_gt_time_s = _extract_polynomial_gt_10hz(
+                    env,
+                    alignment,
+                )
+
+                samples = flatten_frame_record(frame_record)
+                if len(samples) != int(dense_gt_xy.shape[0]):
+                    raise RuntimeError(
+                        "Dense GT ego count does not match flattened samples: "
+                        f"dense={dense_gt_xy.shape[0]} samples={len(samples)}"
+                    )
+
+                for ego_idx, sample in enumerate(samples):
+                    sample["expert_trajectory_10hz_xy"] = (
+                        dense_gt_xy[ego_idx].astype(np.float32, copy=True)
+                    )
+                    sample["expert_trajectory_10hz_time_s"] = (
+                        dense_gt_time_s.astype(np.float32, copy=True)
+                    )
+                    if pre_step_contexts is not None:
+                        sample.update(pre_step_contexts[ego_idx])
+                        check_context(sample)
+
+                remaining = args.target_samples - total_samples
+                samples = samples[:remaining]
+
+                for sample in samples:
+                    sample["sample_index"] = _scalar_array(
+                        next_sample_index,
+                        np.int64,
+                    )
+                    next_sample_index += 1
+
+                writer.add_samples(samples)
+                total_samples += len(samples)
+                episode_added += len(samples)
+                frame_index += 1
+
+                if (
+                    total_samples % 100 == 0
+                    or total_samples == args.target_samples
+                ):
+                    print(
+                        "[collect] "
+                        f"{total_samples}/{args.target_samples} samples | "
+                        f"scenario={scenario_name} | "
+                        f"episode={episode_index} | "
+                        f"step={episode_step} | "
+                        f"buffer={writer.buffer_size}"
+                    )
+
+                if total_samples >= args.target_samples:
+                    break
+
+            if (
+                not episode_done
+                and episode_step >= max_steps
+                and total_samples < args.target_samples
+            ):
+                episode_terminal = {
+                    "reason": "duration_limit",
+                    "terminated": False,
+                    "truncated": True,
+                }
+
+        finally:
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
+        if episode_added == 0:
+            consecutive_empty_episodes += 1
+        else:
+            consecutive_empty_episodes = 0
+
+        if (
+            consecutive_empty_episodes
+            >= args.max_consecutive_empty_episodes
+        ):
+            raise RuntimeError(
+                "Too many consecutive episodes produced no valid samples: "
+                f"{consecutive_empty_episodes}"
+            )
+
+        episode_index += 1
+        episodes_run += 1
+
+    writer.close()
+    if args.defer_split:
+        # Parent batch runner owns the final split/manifest.  Do not scan every
+        # shard O(n^2) when one short native process collects one episode.
+        print(f"[EPISODE SAVED] index={episode_index-1} samples={episode_added} "
+              f"dataset={dataset_root}", flush=True)
+        return
+
+    split_summary = ({"train": [], "val": [], "test": []} if args.defer_split
+                     else split_shards(
+                         dataset_root=dataset_root,
+                         train_ratio=args.train_split_ratio,
+                         val_ratio=args.val_split_ratio,
+                         test_ratio=args.test_split_ratio,
+                         seed=args.split_seed,
+                     ))
+
+    wall_time = time.time() - start_time
+    manifest_path = write_manifest(
+        args=args,
+        dataset_root=dataset_root,
+        split_summary=split_summary,
+        collection_wall_time_sec=wall_time,
+        resumed_from_samples=resumed_from_samples,
+    )
+    final_summary = summarize_shards(shard_dir)
+
+    print("\n" + "=" * 108)
+    print("EXPERT DATASET COMPLETE")
+    print("=" * 108)
+    print("samples:", final_summary["sample_count"])
+    print("shards:", final_summary["shard_count"])
+    print("contract failures:", final_summary["contract_failures"])
+    print(
+        "target-mode traffic-valid ratio:",
+        f"{final_summary['target_mode_traffic_valid_ratio']:.2%}",
+    )
+    print(
+        "target-mode geometry-valid ratio:",
+        f"{final_summary['target_mode_geometry_valid_ratio']:.2%}",
+    )
+    print("manifest:", manifest_path)
+    print("done transitions skipped:", skipped_done_steps)
+    print("=" * 108)
+
+
+if __name__ == "__main__":
+    main()

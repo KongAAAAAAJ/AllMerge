@@ -1,17 +1,17 @@
 # TRACE A2 safety-scoring-only training (no expert trajectory labels).
 # Uses the newly collected expert shards for scene inputs only.
 dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
-output_dir: outputs/trace_adaptive_anchors_v2
+output_dir: outputs/anchor_ablation/ckpt
 train_split: train
 val_split: val
-# V2 data path: shard-local batches avoid repeated NPZ decompression.
+# Cached V3 data path: candidate/teacher arrays are precomputed once and memory-mapped.
 batch_size: 16
 num_workers: 2
 prefetch_factor: 2
 drop_last: false
 
 # Candidate pools and deterministic safety labels are generated once and reused.
-cache_dir: outputs/trace_adaptive_anchors_v2/cache_v2
+cache_dir: outputs/anchor_ablation/cache_v3
 precompute_batch_size: 16
 precompute_device: auto
 max_samples: null
@@ -20,18 +20,19 @@ lr: 0.0001
 weight_decay: 0.0001
 grad_clip: 1.0
 seed: 0
+diffusion_config: configs/train/diffusion.yaml
 model: {}
-candidate_generation: {}
-num_selected: 10
-top_r: 20
+candidate_generation:
+  config_path: configs/anchors/control_candidate_pool.yaml
+top_r_fraction: 0.5555556
 trajectory_weight: 1.0
 control_weight: 1.0
 temperature: 0.3
 teacher:
   collision_weight: 1.0
   road_weight: 1.0
-  ego_length_m: 5.0
-  ego_width_m: 2.0
+  ego_length_m: 8.0
+  ego_width_m: 2.6
   longitudinal_margin_m: 1.0
   lateral_margin_m: 0.3
   dt: 0.5

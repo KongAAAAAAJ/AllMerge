@@ -12,8 +12,8 @@ from learning.dataset_adapter import unpack_w1_batch
 def validate_model_schema(model_config) -> None:
     if int(model_config.horizon_steps) != 8:
         raise RuntimeError(f"Expected 8-step horizon, got {model_config.horizon_steps}")
-    if int(model_config.num_modes) != 10:
-        raise RuntimeError(f"Expected 10 modes, got {model_config.num_modes}")
+    if int(model_config.num_modes) <= 0:
+        raise RuntimeError(f"num_modes must be positive, got {model_config.num_modes}")
     if abs(float(model_config.trajectory_dt) - 0.5) > 1e-9:
         raise RuntimeError(f"Expected trajectory_dt=0.5, got {model_config.trajectory_dt}")
 
@@ -53,6 +53,7 @@ def validate_training_batch(batch, model_config) -> int:
             int(model_config.horizon_steps),
             2,
         ),
+        "coarse_controls": (batch_size, int(model_config.num_modes), 40, 2),
         "mode_valid_mask": (batch_size, int(model_config.num_modes)),
     }
     for key, expected in expected_shapes.items():
@@ -62,6 +63,8 @@ def validate_training_batch(batch, model_config) -> int:
         expected_dtype = torch.bool if key in BOOL_FEATURE_KEYS else torch.float32
         if value.dtype != expected_dtype:
             raise TypeError(f"features.{key}: dtype={value.dtype}, expected={expected_dtype}")
+        if key in ("coarse_controls", "coarse_trajectories") and not torch.isfinite(value).all():
+            raise ValueError(f"features.{key} contains non-finite values")
 
     target = normalized["expert_trajectory"]
     expected_target = (batch_size, int(model_config.horizon_steps), 2)

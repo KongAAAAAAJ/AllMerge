@@ -6,7 +6,7 @@
 
 ### 1. Anchor Quality
 
-不需要扩散模型 checkpoint。A0 从固定 anchor bank 读取，A1 从专家数据中的 paired dynamic anchors 读取，A2 使用训练好的 Safety Scoring Network。
+不需要扩散模型 checkpoint。A0 从固定 anchor bank 读取，A1 从统一采集流程离线生成的 road-bounded paired anchors 读取，A2 使用训练好的 Safety Scoring Network。
 
 ```bash
 # Evaluate A0/A1/A2
@@ -96,3 +96,6 @@ evaluation_summary.json
 ```bash
 python evaluation/ablation/run_fuel_aware.py --config configs/train/diffusion.yaml --checkpoint F0=outputs\fuel_ablation\F0\best.pt --checkpoint F3=outputs\fuel_ablation\F3\best.pt --split test
 ```
+
+
+A1 paired anchors are generated inside `scripts/data/collect_expert_dataset.py` after raw Polynomial/TruckSim episodes are captured. Do not run a separate A1 data-building or raw-collection entry point. The final training dataset is the single A1/K2 shard dataset under `outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k`.

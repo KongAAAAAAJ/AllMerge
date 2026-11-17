@@ -1,0 +1,28 @@
+# Shared candidate-generation resolution for both A1 and A2.
+# pool_scale=3 gives 108 candidates; set it to 1/2/4 to obtain 36/72/144.
+# A1 and A2 load this same file. Final selected anchors remain K_a=10.
+candidate_generation:
+  pool_scale: 3
+  base_current_lane_speed_samples: 5
+  base_adjacent_lane_speed_samples: 3
+  base_brake_candidate_count: 3
+  brake_fraction_range: [0.15, 0.85]
+  steering_residuals_rad: [-0.006, 0.0, 0.006]
+  include_emergency_stop: true
+  base:
+    horizon_steps: 8
+    trajectory_dt: 0.5
+    control_steps: 40
+    control_dt: 0.1
+    wheelbase_m: 5.5
+    max_accel_mps2: 2.5
+    max_decel_mps2: 4.0
+    max_steer_rad: 0.08
+    speed_delta_mps: 6.0
+    acceleration_preview_s: 1.0
+    minimum_lane_change_speed_mps: 3.0
+    lookahead_s: 0.65
+    min_lookahead_m: 7.0
+    ego_length_m: 8.0
+    ego_width_m: 2.6
+    collision_check_enabled: false
