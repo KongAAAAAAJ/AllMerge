@@ -559,30 +559,33 @@ class MultiAgentAction(ActionType):
                 anchor_builder
             )
 
-        features = (
-            feature_builder.build_batch(
-                target_lane_indices=(
-                    vehicle_actions[
-                        "lane index"
-                    ]
-                ),
-            )
+        target_lane_indices = vehicle_actions["lane index"]
+        features = feature_builder.build_batch(
+            target_lane_indices=target_lane_indices,
         )
 
-        features.update(
-            anchor_builder.build_batch(
-                features=features,
-                target_accelerations=(
-                    vehicle_actions[
-                        "acceleration"
-                    ]
-                ),
+        # Raw expert collection stores road geometry independently from A1/A2
+        # anchors.  The exporter samples the live lane objects directly and
+        # retains both lane-edge curves; compact model map features remain
+        # unchanged for backward compatibility.
+        road_cfg = dict(feature_config.get("road_geometry", {}) or {})
+        if bool(road_cfg.get("enabled", False)):
+            self.env.latest_planner_road_geometry = (
+                feature_builder.build_road_geometry_batch(target_lane_indices)
             )
-        )
+        else:
+            self.env.latest_planner_road_geometry = None
 
-        self.env.latest_planner_features = (
-            features
-        )
+        anchors_cfg = dict(feature_config.get("anchors", {}) or {})
+        if bool(anchors_cfg.get("enabled", True)):
+            features.update(
+                anchor_builder.build_batch(
+                    features=features,
+                    target_accelerations=vehicle_actions["acceleration"],
+                )
+            )
+
+        self.env.latest_planner_features = features
 
         return features
 

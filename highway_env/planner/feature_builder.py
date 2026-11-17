@@ -174,6 +174,16 @@ class AllMergeFeatureBuilder:
             "target_lane_polyline": target_lane_polyline,
         }
 
+    def build_road_geometry_batch(self, target_lane_indices=None):
+        """Export full-resolution lane boundaries separately from model features."""
+        from highway_env.planner.road_geometry_export import RoadGeometryExporter
+        cfg = dict(self.config.get("road_geometry", {}) or {})
+        exporter = getattr(self, "_road_geometry_exporter", None)
+        if exporter is None or exporter.cfg != {**RoadGeometryExporter.DEFAULTS, **cfg}:
+            exporter = RoadGeometryExporter(self.env, cfg)
+            self._road_geometry_exporter = exporter
+        return exporter.build_batch(target_lane_indices)
+
     # ------------------------------------------------------------------
     # Ego state
     # ------------------------------------------------------------------
