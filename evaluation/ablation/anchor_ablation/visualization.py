@@ -92,6 +92,59 @@ def _finish_figure(fig, axes, path: Path, sample_label: str, title: str):
     plt.close(fig)
 
 
+def _finish_anchor_grid(fig, grid, path, sample_label):
+    """Size the canvas around equal-scale road panels, using physical inch gaps."""
+    rows, cols = grid.shape
+    panel_width = 4.05
+    column_gap = 0.22
+    row_gap = 0.78
+    left, right, top, bottom = 0.58, 0.12, 0.78, 0.62
+    fig.canvas.draw()  # Resolve shared limits before measuring each row's aspect.
+    heights = []
+    for axes in grid:
+        xlim, ylim = axes[0].get_xlim(), axes[0].get_ylim()
+        ratio = abs((ylim[1] - ylim[0]) / (xlim[1] - xlim[0]))
+        heights.append(panel_width * ratio)
+    width = left + cols * panel_width + (cols - 1) * column_gap + right
+    height = top + sum(heights) + (rows - 1) * row_gap + bottom
+    fig.set_size_inches(width, height, forward=True)
+    y_top = height - top
+    for row, axes in enumerate(grid):
+        y_bottom = y_top - heights[row]
+        for col, ax in enumerate(axes):
+            ax.set_position([(left + col * (panel_width + column_gap)) / width,
+                             y_bottom / height, panel_width / width,
+                             heights[row] / height])
+            ax.tick_params(labelsize=8, pad=2)
+            ax.xaxis.label.set_size(9)
+            ax.yaxis.label.set_size(9)
+            if ax.get_ylabel():
+                ax.set_ylabel('Lateral (m)', fontsize=9)
+        y_top = y_bottom - row_gap
+    unique = {}
+    for ax in grid.ravel():
+        handles, labels = ax.get_legend_handles_labels()
+        for handle, label in zip(handles, labels):
+            unique.setdefault(label, handle)
+    fig.legend(unique.values(), unique.keys(), loc='lower center',
+               bbox_to_anchor=(0.5, 0.025 / height), ncol=min(6, len(unique)),
+               frameon=False, fontsize=8, borderaxespad=0,
+               columnspacing=1.3, handletextpad=0.5)
+    title = 'Anchor distributions across sampled highway scenes'
+    if sample_label:
+        title += f' ({sample_label})'
+    fig.suptitle(title, y=1 - 0.06 / height, fontsize=11, va='top')
+    from matplotlib.text import Text
+    import matplotlib
+    for text in fig.findobj(Text):
+        text.set_fontfamily('Times New Roman')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with matplotlib.rc_context({'pdf.fonttype': 42, 'ps.fonttype': 42}):
+        fig.savefig(path, bbox_inches='tight', pad_inches=0.05)
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+
+
 def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
                          scene_labels=None):
     """Rows compare independently sampled scenes; columns compare methods."""
@@ -123,12 +176,12 @@ def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
                         linewidth=1.0, alpha=0.68,
                         label="Anchor trajectories" if index == 0 else None)
             label = scene_labels[row] if scene_labels is not None else f'Scene {row + 1}'
-            ax.set_title(f'{title}\n{label if col == 0 else " "}', fontsize=10)
+            ax.set_title(f'{title}\n{label if col == 0 else " "}' if row == 0
+                         else (label if col == 0 else ''), fontsize=10)
             ax.tick_params(labelbottom=True)
             if col == 0:
                 ax.set_ylabel('Lateral position (m)')
-    _finish_figure(fig, grid.ravel(), path, sample_label,
-                   'Anchor distributions across sampled highway scenes')
+    _finish_anchor_grid(fig, grid, path, sample_label)
 
 
 

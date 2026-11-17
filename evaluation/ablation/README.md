@@ -10,7 +10,7 @@
 
 ```bash
 # Evaluate A0/A1/A2
-python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2
+python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2 --figure-scenes 3 --figure-seed 2027
 
 # Evaluate one method, e.g. A2
 python evaluation/ablation/run_anchor.py --stage anchors --methods A2 ^
