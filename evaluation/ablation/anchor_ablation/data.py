@@ -118,3 +118,24 @@ def make_loader(subset, *, batch_size: int, num_workers: int = 0):
     return DataLoader(subset, batch_size=int(batch_size), shuffle=False,
                       num_workers=int(num_workers), pin_memory=torch.cuda.is_available(),
                       collate_fn=collate_anchor_batch, persistent_workers=False)
+
+
+def select_figure_samples(metadata, *, count=3, seed=2027):
+    """Select distinct frames without model results; prefer distinct episodes."""
+    if count < 1:
+        raise ValueError('figure scene count must be positive')
+    frames = defaultdict(set)
+    for meta in metadata:
+        key = (int(meta['episode_index']), int(meta['frame_index']))
+        frames[key].add(int(meta['ego_index']))
+    if not frames:
+        raise ValueError('No samples available for anchor figures')
+    episodes = defaultdict(list)
+    for key in sorted(frames):
+        episodes[key[0]].append(key)
+    rng = random.Random(int(seed))
+    picked = [rng.choice(episodes[episode]) for episode in
+              rng.sample(sorted(episodes), min(count, len(episodes)))]
+    remaining = sorted(set(frames) - set(picked))
+    picked.extend(rng.sample(remaining, min(count - len(picked), len(remaining))))
+    return [(*key, rng.choice(sorted(frames[key]))) for key in picked]

@@ -72,11 +72,12 @@ def _method_items(payload: Mapping[str, dict]):
 
 def _finish_figure(fig, axes, path: Path, sample_label: str, title: str):
     axes[0].set_ylabel("Lateral position (m)")
-    handles, labels = axes[-1].get_legend_handles_labels()
     unique = {}
-    for handle, label in zip(handles, labels):
-        if label and label not in unique:
-            unique[label] = handle
+    for ax in axes:
+        handles, labels = ax.get_legend_handles_labels()
+        for handle, label in zip(handles, labels):
+            if label and label not in unique:
+                unique[label] = handle
     if unique:
         fig.legend(unique.values(), unique.keys(), loc="lower center",
                    ncol=min(6, len(unique)), frameon=False, fontsize=8)
@@ -91,32 +92,44 @@ def _finish_figure(fig, axes, path: Path, sample_label: str, title: str):
     plt.close(fig)
 
 
-def draw_anchor_ablation(path: Path, figure_payload: Mapping[str, dict], *,
-                         sample_label: str = ""):
+def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
+                         scene_labels=None):
+    """Rows compare independently sampled scenes; columns compare methods."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    methods = _method_items(figure_payload)
+    scenes = [figure_payload] if isinstance(figure_payload, Mapping) else list(figure_payload)
+    if not scenes:
+        raise ValueError('No anchor scenes supplied')
+    methods = _method_items(scenes[0])
+    if any(_method_items(scene) != methods for scene in scenes):
+        raise ValueError('All scenes must contain the same methods')
+    if scene_labels is not None and len(scene_labels) != len(scenes):
+        raise ValueError('Each scene must have one label')
     fig, grid = plt.subplots(
-        1, len(methods), figsize=(5.2 * len(methods), 4.8),
-        sharex=True, sharey=True, squeeze=False,
+        len(scenes), len(methods), figsize=(5.2 * len(methods), 3.0 * len(scenes) + 0.8),
+        sharex='row', sharey='row', squeeze=False,
     )
-    axes = grid[0]
-    for ax, (method, title) in zip(axes, methods):
-        item = figure_payload[method]
-        _draw_scene(ax, item)
-        xy = np.asarray(item["anchors_xy"])
-        valid = np.asarray(item.get("valid", np.ones(len(xy), dtype=bool)), dtype=bool)
-        for idx in np.flatnonzero(valid):
-            ax.plot(np.r_[0.0, xy[idx, :, 0]], np.r_[0.0, xy[idx, :, 1]],
-                    linewidth=1.0, alpha=0.68,
-                    label="Anchor trajectories" if idx == np.flatnonzero(valid)[0] else None)
-        ax.set_title(title)
-    _finish_figure(
-        fig, axes, path, sample_label,
-        "Anchor distributions in the same highway scene",
-    )
+    for row, scene in enumerate(scenes):
+        for col, (method, title) in enumerate(methods):
+            ax = grid[row, col]
+            item = scene[method]
+            _draw_scene(ax, item)
+            xy = np.asarray(item["anchors_xy"])
+            valid = np.asarray(item.get("valid", np.ones(len(xy), dtype=bool)), dtype=bool)
+            for index, trajectory in enumerate(xy[valid]):
+                ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
+                        linewidth=1.0, alpha=0.68,
+                        label="Anchor trajectories" if index == 0 else None)
+            label = scene_labels[row] if scene_labels is not None else f'Scene {row + 1}'
+            ax.set_title(f'{title}\n{label if col == 0 else " "}', fontsize=10)
+            ax.tick_params(labelbottom=True)
+            if col == 0:
+                ax.set_ylabel('Lateral position (m)')
+    _finish_figure(fig, grid.ravel(), path, sample_label,
+                   'Anchor distributions across sampled highway scenes')
+
 
 
 def draw_anchor_distribution(path: Path, payload: Mapping[str, dict], sample_label=""):

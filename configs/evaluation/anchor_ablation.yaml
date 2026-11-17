@@ -19,4 +19,6 @@ num_workers: 0
 device: auto
 seeds: "0,1,2"
 sample_seed: 2026
+figure_scenes: 3        # Distinct frames; rows in the anchor comparison figure
+figure_seed: 2027       # Independent of evaluation scores and inference seeds
 output_dir: outputs/anchor_ablation/evaluation

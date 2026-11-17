@@ -18,7 +18,7 @@ from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 from highway_env.planner.diffusion.projection import JointTrajectoryProjector
 
-from .data import build_complete_frame_subset, make_loader
+from .data import build_complete_frame_subset, make_loader, select_figure_samples
 from .paper_feasibility import (
     external_collision_free,
     intertruck_group_collision_free,
@@ -240,8 +240,9 @@ def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
     }
 
 
-def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, figure_meta):
-    rows, figure_payload = [], None
+def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, figure_metas):
+    rows, figure_payload = [], {}
+    figure_keys = set(figure_metas)
     if hasattr(model, "eval"):
         model.eval()
     with torch.no_grad():
@@ -280,8 +281,8 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
                     "trajectory_diversity_m": float(metrics["trajectory_diversity_m"][index].cpu()),
                     "control_diversity_normalized": float(metrics["control_diversity_normalized"][index].cpu()),
                 })
-                if key == figure_meta:
-                    figure_payload = {
+                if key in figure_keys:
+                    figure_payload[key] = {
                         "features": _extract_features_numpy(prepared, index),
                         "expert_xy": expert_xy[index].detach().cpu().numpy(),
                         "anchors_xy": xy[index].detach().cpu().numpy(),
@@ -445,6 +446,8 @@ def run(args=None):
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seeds", default=None, help="Comma-separated diffusion inference seeds")
     parser.add_argument("--sample-seed", type=int, default=None)
+    parser.add_argument("--figure-scenes", type=int, default=None, help="Number of distinct frames in the anchor figure (default: 3)")
+    parser.add_argument("--figure-seed", type=int, default=None, help="Result-independent figure sampling seed")
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--jtp-config", default=None,
@@ -494,6 +497,10 @@ def run(args=None):
     workers = int(parsed.num_workers if parsed.num_workers is not None else cfg.get("num_workers", 0))
     seeds = _parse_seeds(parsed.seeds if parsed.seeds is not None else cfg.get("seeds", "0,1,2"))
     sample_seed = int(parsed.sample_seed if parsed.sample_seed is not None else cfg.get("sample_seed", 2026))
+    figure_count = int(parsed.figure_scenes if parsed.figure_scenes is not None else cfg.get('figure_scenes', 3))
+    figure_seed = int(parsed.figure_seed if parsed.figure_seed is not None else cfg.get('figure_seed', 2027))
+    if figure_count < 1:
+        parser.error('--figure-scenes must be positive')
     device_name = parsed.device or cfg.get("device", "auto")
     device = torch.device(
         "cuda" if device_name == "auto" and torch.cuda.is_available()
@@ -544,6 +551,14 @@ def run(args=None):
         _meta_int(first_meta, "ego_index"),
     )
 
+    figure_metas = []
+    if stage != 'feasibility':
+        figure_metas = select_figure_samples(
+            [meta for _, _, batch_metadata in loader for meta in batch_metadata],
+            count=figure_count, seed=figure_seed)
+        if len(figure_metas) < figure_count:
+            print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
+
     checkpoint_info, source_info = {}, {}
     scorer_path = None
     if stage == "anchors":
@@ -589,11 +604,11 @@ def run(args=None):
             print(f"[ANCHOR ABLATION] anchor quality: {method}", flush=True)
             method_anchor_rows, anchor_figure = _anchor_pass(
                 method, model, loader, device, teacher_cfg,
-                int(cfg.get("num_anchors", 10)), figure_meta,
+                int(cfg.get("num_anchors", 10)), figure_metas,
             )
             anchor_rows.extend(method_anchor_rows)
-            if anchor_figure is None:
-                raise RuntimeError(f"{method} did not produce the common representative anchor scene")
+            if set(anchor_figure) != set(figure_metas):
+                raise RuntimeError(f"{method} did not produce all common representative anchor scenes")
             anchor_figures[method] = anchor_figure
 
         if stage != "anchors":
@@ -627,8 +642,9 @@ def run(args=None):
         write_csv(output_dir / "anchor_quality_per_sample.csv", anchor_rows)
         draw_anchor_ablation(
             output_dir / "anchor_ablation.pdf",
-            anchor_figures,
-            sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}",
+            [{method: anchor_figures[method][key] for method in methods} for key in figure_metas],
+            scene_labels=[f"Scene {i+1}: episode {key[0]}, frame {key[1]}, ego {key[2]}"
+                          for i, key in enumerate(figure_metas)],
         )
     if stage != "anchors":
         write_csv(output_dir / "planning_per_sample.csv", planning_rows)
@@ -693,6 +709,10 @@ def run(args=None):
             "frame_index": figure_meta[1],
             "ego_index": figure_meta[2],
         },
+        "anchor_figure_samples": [dict(episode_index=key[0], frame_index=key[1], ego_index=key[2])
+                                  for key in figure_metas],
+        "anchor_figure_seed": figure_seed,
+        "anchor_figure_selection": "Random distinct frames, prioritizing distinct episodes; independent of method scores",
         "projection_failures_reported_separately": True,
         "summary": summary,
         "device": str(device),
