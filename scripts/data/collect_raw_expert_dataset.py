@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -31,26 +32,74 @@ SCENARIOS = {
 }
 
 
-def parse_args():
+DEFAULT_CONFIG = ROOT / "configs/data/expert_collection.yaml"
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--scenario", choices=tuple(SCENARIOS), default="straight")
-    p.add_argument("--episode-index", type=int, default=0)
-    p.add_argument("--seed", type=int, default=2026)
-    p.add_argument("--duration", type=float, default=5.0)
-    p.add_argument("--group-action", type=int, default=3)
-    p.add_argument("--output-dir", type=Path, default=ROOT / "outputs/expert_dataset/trace_raw_expert_smoke")
+    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
+                   help="Collection YAML; relative paths resolve from the all_merge root")
+    # CLI arguments are optional overrides. Collection defaults live in YAML.
+    p.add_argument("--scenario", choices=tuple(SCENARIOS), default=None)
+    p.add_argument("--episode-index", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--duration", type=float, default=None)
+    p.add_argument("--group-action", type=int, default=None)
+    p.add_argument("--output-dir", type=Path, default=None)
     p.add_argument("--trucksim-koopman-config", type=Path, default=None)
-    p.add_argument("--trucksim-model-id", type=str, default=None,
-                   help="Optional exact physical case such as L4_MU08")
-    p.add_argument("--copy-trucksim-dll-instances", action="store_true")
+    p.add_argument("--trucksim-model-id", type=str, default=None)
+    p.add_argument("--copy-trucksim-dll-instances", action="store_true", default=None)
     p.add_argument("--check-only", action="store_true")
     p.add_argument("--engine-map-cache", type=Path, default=None)
-    p.add_argument("--road-forward-min-m", type=float, default=120.0)
-    p.add_argument("--road-forward-max-m", type=float, default=300.0)
-    p.add_argument("--road-point-spacing-m", type=float, default=1.5)
-    p.add_argument("--road-max-lanes", type=int, default=16)
-    p.add_argument("--road-max-points", type=int, default=192)
-    return p.parse_args()
+    p.add_argument("--road-forward-min-m", type=float, default=None)
+    p.add_argument("--road-forward-max-m", type=float, default=None)
+    p.add_argument("--road-point-spacing-m", type=float, default=None)
+    p.add_argument("--road-max-lanes", type=int, default=None)
+    p.add_argument("--road-max-points", type=int, default=None)
+    args = p.parse_args(argv)
+
+    config_path = _resolve_project_path(args.config)
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Raw expert collection config not found: {config_path}")
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = cfg.get("raw_expert_collection")
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{config_path} must define a 'raw_expert_collection' mapping"
+        )
+    defaults = dict(raw.get("defaults", {}) or {})
+    road = dict(raw.get("road_geometry", {}) or {})
+    dimensions = dict(raw.get("vehicle_dimensions", {}) or {})
+
+    def override(name, config_value, cli_value):
+        return cli_value if cli_value is not None else config_value
+
+    args.scenario = override("scenario", defaults.get("scenario", "straight"), args.scenario)
+    args.episode_index = int(override("episode_index", defaults.get("episode_index", 0), args.episode_index))
+    args.seed = int(override("seed", defaults.get("seed", 2026), args.seed))
+    args.duration = float(override("duration", defaults.get("duration_s", 12.0), args.duration))
+    args.group_action = int(override("group_action", defaults.get("group_action", 3), args.group_action))
+    args.output_dir = Path(override("output_dir", defaults.get("output_dir", "outputs/expert_dataset/trace_a1_dev_v1"), args.output_dir))
+    args.trucksim_koopman_config = Path(override(
+        "trucksim_koopman_config",
+        defaults.get("trucksim_koopman_config", cfg.get("koopman_collection_config", "configs/koopman/collect.yaml")),
+        args.trucksim_koopman_config,
+    ))
+    args.trucksim_model_id = override("trucksim_model_id", defaults.get("trucksim_model_id", "L4_MU08"), args.trucksim_model_id)
+    args.copy_trucksim_dll_instances = bool(
+        defaults.get("copy_trucksim_dll_instances", True)
+        if args.copy_trucksim_dll_instances is None else args.copy_trucksim_dll_instances
+    )
+    args.road_forward_min_m = float(override("road_forward_min_m", road.get("forward_min_m", 120.0), args.road_forward_min_m))
+    args.road_forward_max_m = float(override("road_forward_max_m", road.get("forward_max_m", 300.0), args.road_forward_max_m))
+    args.road_point_spacing_m = float(override("road_point_spacing_m", road.get("point_spacing_m", 1.5), args.road_point_spacing_m))
+    args.road_max_lanes = int(override("road_max_lanes", road.get("max_lanes", 16), args.road_max_lanes))
+    args.road_max_points = int(override("road_max_points", road.get("max_points_per_lane", 256), args.road_max_points))
+    args.ego_length_m = float(dimensions.get("length_m", 8.0))
+    args.ego_width_m = float(dimensions.get("width_m", 2.6))
+    args.engine_map_cache = Path(args.engine_map_cache) if args.engine_map_cache is not None else None
+    args.config_path = config_path
+    return args
 
 
 def _extract_one(value, i, n):
@@ -138,6 +187,8 @@ def main():
         "distance_margin_m": 35.0,
         "backward_range_m": 30.0,
         "lateral_range_m": 32.0,
+        "ego_length_m": float(args.ego_length_m),
+        "ego_width_m": float(args.ego_width_m),
     }
     env_config["Planner"] = planner_cfg
     if args.check_only:
@@ -145,6 +196,11 @@ def main():
         return 0
     env = SCENARIOS[args.scenario](config=env_config, render_mode=None)
     env.reset(seed=int(args.seed))
+    # The platoon vehicles use one consistent heavy-truck footprint throughout
+    # feature export, road-boundary checks and collision geometry.
+    for controlled in env.controlled_vehicles:
+        controlled.LENGTH = float(args.ego_length_m)
+        controlled.WIDTH = float(args.ego_width_m)
 
     if case is not None:
         from data_pipeline.expert_collection.trucksim import HistoricalContexts, check_context
@@ -217,8 +273,7 @@ def main():
                     dtype=np.float32,
                 )
                 sample["ego_dimensions"] = np.asarray(
-                    [float(getattr(vehicle, "LENGTH", 0.0)), float(getattr(vehicle, "WIDTH", 0.0))],
-                    dtype=np.float32,
+                    [args.ego_length_m, args.ego_width_m], dtype=np.float32
                 )
                 if case is not None:
                     ctx = pre_context[ego_i] if pre_context is not None else None
@@ -263,6 +318,10 @@ def main():
         "seed": int(args.seed),
         "sample_count": len(samples),
         "fields": {k: {"shape": list(np.asarray(samples[0][k]).shape), "dtype": str(np.asarray(samples[0][k]).dtype)} for k in keys},
+        "vehicle_dimensions": {
+            "length_m": float(args.ego_length_m),
+            "width_m": float(args.ego_width_m),
+        },
         "road_geometry": {
             "source": "live road.network lane geometry; center/left-edge/right-edge sampled directly",
             "point_spacing_m": float(args.road_point_spacing_m),

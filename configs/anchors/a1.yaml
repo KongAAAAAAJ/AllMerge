@@ -1,0 +1,13 @@
+a1:
+  control_steps: 40
+  dt: 0.1
+  wheelbase_m: 5.5
+  ego_length_m: 8.0
+  ego_width_m: 2.6
+  max_accel_mps2: 2.5
+  max_decel_mps2: 4.0
+  max_steer_rad: 0.08
+  lane_change_distance_m: 65.0
+  road_edge_margin_m: 0.15
+  speed_delta_mps: 3.0
+  minimum_lane_change_speed_mps: 3.0
