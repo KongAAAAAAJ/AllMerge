@@ -151,7 +151,7 @@ def _select_ego_value(
 
 def _extract_polynomial_gt_10hz(
     env,
-    alignment: Dict,
+    expert_trajectory: Dict,
     *,
     dense_dt_s: float = 0.1,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -166,7 +166,7 @@ def _extract_polynomial_gt_10hz(
     from highway_env.planner.geometry import world_to_ego_point
 
     sparse_time_s = np.asarray(
-        alignment["trajectory_time_s"],
+        expert_trajectory["trajectory_time_s"],
         dtype=np.float32,
     ).reshape(-1)
     if sparse_time_s.size == 0:

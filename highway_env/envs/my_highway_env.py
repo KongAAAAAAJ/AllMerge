@@ -65,7 +65,7 @@ class MyHighwayEnv(AbstractEnv):
                     },
 
                     # One-frame expert / Dynamic-Anchor alignment.
-                    "ExpertAlignment": {
+                    "ExpertTrajectory": {
                         "enabled": True,
                         "require_aligned_polynomial": True,
                     },

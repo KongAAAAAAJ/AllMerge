@@ -13,7 +13,6 @@ import yaml
 
 from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
-from highway_env.planner.diffusion.training.control import load_control_checkpoint
 from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
 
 from .data import build_complete_frame_subset, make_loader
@@ -73,12 +72,14 @@ def _strategy(model) -> str:
 
 
 def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
+    from highway_env.planner.diffusion.training.control import load_control_checkpoint
+
     expected = {"A0": "fixed", "A1": "dynamic", "A2": "adaptive"}
     models, payloads, checkpoint_info = {}, {}, {}
     reference_signature = None
     reference_k2_hash = None
-    for method in ("A0", "A1", "A2"):
-        path = checkpoints[method].expanduser().resolve()
+    for method in checkpoints:
+        path = resolve_repo_file(checkpoints[method])
         if not path.is_file():
             raise FileNotFoundError(f"{method} diffusion checkpoint not found: {path}")
         model, payload = load_control_checkpoint(path, device="cpu")
@@ -246,9 +247,16 @@ def _parse_seeds(text: str):
 def run(args=None):
     parser = argparse.ArgumentParser(description="TRACE A0/A1/A2 Adaptive Anchor Ablation Evaluator")
     parser.add_argument("--config", default="configs/evaluation/anchor_ablation.yaml")
-    parser.add_argument("--checkpoint-a0", required=True)
-    parser.add_argument("--checkpoint-a1", required=True)
-    parser.add_argument("--checkpoint-a2", required=True)
+    parser.add_argument("--checkpoint-a0")
+    parser.add_argument("--checkpoint-a1")
+    parser.add_argument("--checkpoint-a2")
+    parser.add_argument("--stage", choices=("anchors", "feasibility", "all"), default=None,
+                        help="anchors needs no diffusion checkpoints; feasibility checks trained planners")
+    parser.add_argument("--methods", nargs='+', choices=("A0", "A1", "A2"), default=None)
+    parser.add_argument("--a0-bank", default=None)
+    parser.add_argument("--a2-scorer", default=None)
+    parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml",
+                        help="Common safety-teacher config, and A2 selection settings for anchors stage")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("train", "val", "test"), default=None)
     parser.add_argument("--num-frames", type=int, default=None, help="0 evaluates all complete synchronized frames")
@@ -267,6 +275,23 @@ def run(args=None):
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError("Anchor ablation config must be a YAML mapping")
+    stage = parsed.stage or cfg.get('stage', 'all')
+    if parsed.skip_feasibility:
+        if parsed.stage not in (None, 'anchors'):
+            parser.error('--skip-feasibility conflicts with --stage; use --stage anchors')
+        stage = 'anchors'
+    methods = parsed.methods or cfg.get('methods', ['A0', 'A1', 'A2'])
+    if not methods or len(set(methods)) != len(methods) or any(m not in ('A0', 'A1', 'A2') for m in methods):
+        parser.error('methods must be a nonempty list of unique A0/A1/A2 names')
+    if stage not in ('anchors', 'feasibility', 'all'):
+        parser.error('stage must be anchors, feasibility, or all')
+    checkpoint_paths = {}
+    if stage != 'anchors':
+        for method in methods:
+            value = getattr(parsed, f'checkpoint_{method.lower()}')
+            if not value:
+                parser.error(f'--checkpoint-{method.lower()} is required for {stage}')
+            checkpoint_paths[method] = Path(value)
     dataset_root = resolve_repo_file(parsed.dataset_root or cfg["dataset_root"])
     split = parsed.split or cfg.get("split", "test")
     num_frames = int(parsed.num_frames if parsed.num_frames is not None else cfg.get("num_frames", 0))
@@ -275,12 +300,14 @@ def run(args=None):
     seeds = _parse_seeds(parsed.seeds if parsed.seeds is not None else cfg.get("seeds", "0,1,2"))
     sample_seed = int(parsed.sample_seed if parsed.sample_seed is not None else cfg.get("sample_seed", 2026))
     output_dir = resolve_repo_file(parsed.output_dir or cfg.get("output_dir", "outputs/anchor_ablation/evaluation"))
+    if parsed.output_dir is None:
+        output_dir = output_dir / stage / '_'.join(methods)
     device_name = parsed.device or cfg.get("device", "auto")
     device = torch.device("cuda" if device_name == "auto" and torch.cuda.is_available()
                           else "cpu" if device_name == "auto" else device_name)
 
     feasibility_cfg = None
-    if not parsed.skip_feasibility:
+    if stage != 'anchors':
         feasibility_path = resolve_repo_file(parsed.feasibility_config)
         feasibility_cfg = yaml.safe_load(feasibility_path.read_text(encoding="utf-8"))
         validate_feasibility_config(feasibility_cfg)
@@ -290,73 +317,87 @@ def run(args=None):
         max_samples=cfg.get("max_samples"),
     )
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
-    checkpoint_paths = {
-        "A0": Path(parsed.checkpoint_a0),
-        "A1": Path(parsed.checkpoint_a1),
-        "A2": Path(parsed.checkpoint_a2),
-    }
-    models, payloads, checkpoint_info = _load_models(checkpoint_paths, device)
+    checkpoint_info = {}
+    source_info = {}
+    teacher_cfg = None
+    if stage == 'anchors':
+        from .sources import build_sources
+        models, teacher_cfg, source_info = build_sources(
+            methods, cfg, bank_path=parsed.a0_bank, scorer_path=parsed.a2_scorer,
+            scorer_config=parsed.scorer_config, device=device)
+        for info in source_info.values():
+            if info.get('scorer_path'):
+                info['scorer_sha256'] = _sha256(Path(info['scorer_path']))
+    else:
+        models, _, checkpoint_info = _load_models(checkpoint_paths, device)
+        if stage == 'all':
+            if 'A2' in models:
+                teacher_cfg = _teacher_config_from_a2(models['A2'])
+            else:
+                teacher_cfg = yaml.safe_load(resolve_repo_file(parsed.scorer_config).read_text(encoding='utf-8'))['teacher']
     if feasibility_cfg is not None:
         control_cfg = feasibility_cfg.setdefault("control", {})
         if control_cfg.get("acceleration_min_mps2") is None:
-            control_cfg["acceleration_min_mps2"] = -float(models["A0"].ctrl_cfg.max_accel_mps2)
+            control_cfg["acceleration_min_mps2"] = -float(models[methods[0]].ctrl_cfg.max_accel_mps2)
         if control_cfg.get("acceleration_max_mps2") is None:
-            control_cfg["acceleration_max_mps2"] = float(models["A0"].ctrl_cfg.max_accel_mps2)
+            control_cfg["acceleration_max_mps2"] = float(models[methods[0]].ctrl_cfg.max_accel_mps2)
         if control_cfg.get("steering_min_rad") is None:
-            control_cfg["steering_min_rad"] = -float(models["A0"].ctrl_cfg.max_steer_rad)
+            control_cfg["steering_min_rad"] = -float(models[methods[0]].ctrl_cfg.max_steer_rad)
         if control_cfg.get("steering_max_rad") is None:
-            control_cfg["steering_max_rad"] = float(models["A0"].ctrl_cfg.max_steer_rad)
-    teacher_cfg = _teacher_config_from_a2(models["A2"])
+            control_cfg["steering_max_rad"] = float(models[methods[0]].ctrl_cfg.max_steer_rad)
     anchor_rows = []
     feasibility_rows = []
     figure_payload = {}
     figure_meta = None
-    dt = float(models["A0"].ctrl_cfg.dt)
+    dt = float(models[methods[0]].ctrl_cfg.dt) if stage != 'anchors' else None
 
     # Same selected scenes, batch order, and random seeds are used for all methods.
-    for method in ("A0", "A1", "A2"):
+    for method in methods:
         model = models[method]
-        model.eval()
-        seen_anchor = 0
-        for features_cpu, targets_cpu, metadata in loader:
-            features = _features_to_device(features_cpu, device)
-            expert_xy = targets_cpu["trajectory"].to(device)
-            prepared, valid, metrics = _anchor_batch_metrics(
-                method, model, features, targets_cpu, expert_xy, teacher_cfg)
-            B = expert_xy.shape[0]
-            controls = prepared["coarse_controls"]
-            xy = prepared["coarse_trajectories"]
-            for i, meta in enumerate(metadata):
-                episode = _meta_int(meta, "episode_index")
-                frame = _meta_int(meta, "frame_index")
-                ego_index = _meta_int(meta, "ego_index")
-                row = {
-                    "method": method,
-                    "episode_index": episode,
-                    "frame_index": frame,
-                    "ego_index": ego_index,
-                    "dataset_seed": _meta_int(meta, "seed", -1),
-                    "minade_m": float(metrics["minade_m"][i].detach().cpu()),
-                    "safe_anchor_count": int(metrics["safe_count"][i].detach().cpu()),
-                    "valid_anchor_count": int(metrics["valid_anchor_count"][i].detach().cpu()),
-                    "safe_ratio": float(metrics["safe_ratio"][i].detach().cpu()),
-                    "diversity_m": float(metrics["diversity_m"][i].detach().cpu()),
-                    "control_diversity_normalized": float(metrics["control_diversity_normalized"][i].detach().cpu()),
-                    "joint_diversity_normalized": float(metrics["joint_diversity_normalized"][i].detach().cpu()),
-                }
-                anchor_rows.append(row)
-                if figure_meta is None:
-                    figure_meta = (episode, frame, ego_index)
-                if (episode, frame, ego_index) == figure_meta:
-                    figure_payload[method] = {
-                        "features": _extract_features_numpy(prepared, i),
-                        "expert_xy": expert_xy[i].detach().cpu().numpy(),
-                        "anchors_xy": xy[i].detach().cpu().numpy(),
-                        "valid": valid[i].detach().cpu().numpy(),
-                    }
-                seen_anchor += 1
-        if seen_anchor != len(subset):
-            raise RuntimeError(f"{method} anchor pass processed {seen_anchor} samples, expected {len(subset)}")
+        if stage != 'anchors':
+            model.eval()
+        if stage != 'feasibility':
+            with torch.no_grad():
+                seen_anchor = 0
+                for features_cpu, targets_cpu, metadata in loader:
+                    features = _features_to_device(features_cpu, device)
+                    expert_xy = targets_cpu["trajectory"].to(device)
+                    prepared, valid, metrics = _anchor_batch_metrics(
+                        method, model, features, targets_cpu, expert_xy, teacher_cfg)
+                    B = expert_xy.shape[0]
+                    controls = prepared["coarse_controls"]
+                    xy = prepared["coarse_trajectories"]
+                    for i, meta in enumerate(metadata):
+                        episode = _meta_int(meta, "episode_index")
+                        frame = _meta_int(meta, "frame_index")
+                        ego_index = _meta_int(meta, "ego_index")
+                        row = {
+                            "method": method,
+                            "episode_index": episode,
+                            "frame_index": frame,
+                            "ego_index": ego_index,
+                            "dataset_seed": _meta_int(meta, "seed", -1),
+                            "minade_m": float(metrics["minade_m"][i].detach().cpu()),
+                            "safe_anchor_count": int(metrics["safe_count"][i].detach().cpu()),
+                            "valid_anchor_count": int(metrics["valid_anchor_count"][i].detach().cpu()),
+                            "safe_ratio": float(metrics["safe_ratio"][i].detach().cpu()),
+                            "diversity_m": float(metrics["diversity_m"][i].detach().cpu()),
+                            "control_diversity_normalized": float(metrics["control_diversity_normalized"][i].detach().cpu()),
+                            "joint_diversity_normalized": float(metrics["joint_diversity_normalized"][i].detach().cpu()),
+                        }
+                        anchor_rows.append(row)
+                        if figure_meta is None:
+                            figure_meta = (episode, frame, ego_index)
+                        if (episode, frame, ego_index) == figure_meta:
+                            figure_payload[method] = {
+                                "features": _extract_features_numpy(prepared, i),
+                                "expert_xy": expert_xy[i].detach().cpu().numpy(),
+                                "anchors_xy": xy[i].detach().cpu().numpy(),
+                                "valid": valid[i].detach().cpu().numpy(),
+                            }
+                        seen_anchor += 1
+                if seen_anchor != len(subset):
+                    raise RuntimeError(f"{method} anchor pass processed {seen_anchor} samples, expected {len(subset)}")
 
         if feasibility_cfg is not None:
             for seed in seeds:
@@ -366,31 +407,34 @@ def run(args=None):
 
     summary = summarize_anchor_rows(anchor_rows, feasibility_rows)
     output_dir.mkdir(parents=True, exist_ok=True)
-    write_csv(output_dir / "anchor_metrics_per_sample.csv", anchor_rows)
-    write_csv(output_dir / "feasibility_per_sample.csv", feasibility_rows)
-    write_csv(output_dir / "anchor_ablation_summary.csv", summary)
-    write_latex_table(output_dir / "anchor_ablation_table.tex", summary)
-    if len(figure_payload) == 3:
+    if stage != 'feasibility':
+        write_csv(output_dir / "anchor_metrics_per_sample.csv", anchor_rows)
+        if len(figure_payload) != len(methods):
+            raise RuntimeError('Could not collect the same representative scene for selected methods')
         draw_anchor_ablation(output_dir / "anchor_ablation.pdf", figure_payload,
                              sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}")
-    else:
-        raise RuntimeError("Could not collect the same representative scene for all A0/A1/A2 methods")
+    if feasibility_cfg is not None:
+        write_csv(output_dir / "feasibility_per_sample.csv", feasibility_rows)
+    write_csv(output_dir / "anchor_ablation_summary.csv", summary)
+    write_latex_table(output_dir / "anchor_ablation_table.tex", summary)
 
     manifest = {
         "study": "TRACE Adaptive Anchor Ablation",
+        "stage": stage, "selected_methods": methods, "anchor_sources": source_info,
         "methods": {"A0": "Fixed control-space K-means centroids",
                     "A1": "Dynamic control sampling and kinematic propagation",
                     "A2": "Safety scoring, Top-R prescreening and joint control/trajectory diversity selection"},
-        "paper_metrics": ["minADE_m", "safe_anchor_ratio_pct", "diversity_m", "feasibility_pct"],
+        "paper_metrics": ((["minADE_m", "safe_anchor_ratio_pct", "diversity_m"] if stage != 'feasibility' else [])
+                          + (["feasibility_pct"] if feasibility_cfg is not None else [])),
         "safe_anchor_definition": "Common A2 scorer teacher hard-safe label: constant-velocity collision plus drivable-lane corridor compliance; geometry-valid anchors form the denominator.",
         "diversity_definition": "Mean pairwise trajectory ADE in metres for the paper table; normalized control/trajectory joint distance is retained as an auxiliary diagnostic.",
         "feasibility_definition": "Selected diffusion execution trajectory, before MATP projection; full-horizon K2 yaw/sideslip/roll/LTR, road, curvature, external/inter-truck collision, and control/rate constraints.",
         "feasibility_enabled": feasibility_cfg is not None,
         "feasibility_config": str(resolve_repo_file(parsed.feasibility_config)) if feasibility_cfg is not None else None,
-        "feasibility_note": "If --skip-feasibility is used, the table reports -- for feasibility; do not use that run as the complete paper result.",
+        "feasibility_note": "Missing-stage metrics are reported as --; separate stages do not fabricate or merge results.",
         "dataset": {"root": str(dataset_root), **data_manifest},
         "seeds": seeds if feasibility_cfg is not None else [],
-        "figure_sample": {"episode_index": figure_meta[0], "frame_index": figure_meta[1], "ego_index": figure_meta[2]},
+        "figure_sample": ({"episode_index": figure_meta[0], "frame_index": figure_meta[1], "ego_index": figure_meta[2]} if figure_meta else None),
         "checkpoints": checkpoint_info,
         "a2_safety_teacher_config": teacher_cfg,
         "device": str(device),
@@ -402,11 +446,7 @@ def run(args=None):
     write_json(output_dir / "evaluation_summary.json", {"summary": summary, "manifest": manifest})
     print("[ANCHOR ABLATION DONE]", output_dir, flush=True)
     for row in summary:
-        feas_text = "--" if row["feasibility_pct"] is None else f"{row['feasibility_pct']:.2f}%"
-        print(f"[{row['method']}] minADE={row['minADE_m']:.3f} m "
-              f"safe={row['safe_anchor_ratio_pct']:.2f}% "
-              f"diversity={row['diversity_m']:.3f} m "
-              f"feasibility={feas_text}", flush=True)
+        print(f"[{row['method']}] {row}", flush=True)
     return {"summary": summary, "output_dir": str(output_dir), "manifest": manifest}
 
 

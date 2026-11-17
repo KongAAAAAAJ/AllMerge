@@ -499,75 +499,33 @@ class MultiAgentAction(ActionType):
         vehicle_actions,
         planner_flag,
     ):
-        """
-        Build the single shared AllMerge planner-input contract.
+        """Build scene features and optional legacy planner anchors.
 
-        This is executed for Polynomial too, so expert-data collection and
-        future Diffusion inference always use identical preprocessing.
+        Raw expert collection always disables ``features.anchors``. In that
+        case no Anchor Builder is imported or instantiated; A1 anchors are
+        generated later from the saved raw dataset.
         """
-        if not planner_flag.get(
-            "state",
-            False,
-        ):
+        if not planner_flag.get("state", False):
             return None
 
-        from highway_env.planner.feature_builder import (
-            AllMergeFeatureBuilder,
-        )
-        from highway_env.planner.anchor_builder import (
-            AllMergeAnchorBuilder,
-        )
+        from highway_env.planner.feature_builder import AllMergeFeatureBuilder
 
-        feature_config = planner_flag.get(
-            "features",
-            {},
-        )
-
+        feature_config = planner_flag.get("features", {})
         feature_builder = getattr(
-            self.env,
-            "planner_feature_builder",
-            None,
+            self.env, "planner_feature_builder", None
         )
-
         if feature_builder is None:
-            feature_builder = (
-                AllMergeFeatureBuilder(
-                    env=self.env,
-                    config=feature_config,
-                )
+            feature_builder = AllMergeFeatureBuilder(
+                env=self.env, config=feature_config
             )
-            self.env.planner_feature_builder = (
-                feature_builder
-            )
-
-        anchor_builder = getattr(
-            self.env,
-            "planner_anchor_builder",
-            None,
-        )
-
-        if anchor_builder is None:
-            anchor_builder = (
-                AllMergeAnchorBuilder(
-                    config=feature_config.get(
-                        "anchors",
-                        {},
-                    )
-                )
-            )
-            self.env.planner_anchor_builder = (
-                anchor_builder
-            )
+            self.env.planner_feature_builder = feature_builder
 
         target_lane_indices = vehicle_actions["lane index"]
         features = feature_builder.build_batch(
             target_lane_indices=target_lane_indices,
         )
 
-        # Raw expert collection stores road geometry independently from A1/A2
-        # anchors.  The exporter samples the live lane objects directly and
-        # retains both lane-edge curves; compact model map features remain
-        # unchanged for backward compatibility.
+        # Full live road geometry is exported independently from A1/A2.
         road_cfg = dict(feature_config.get("road_geometry", {}) or {})
         if bool(road_cfg.get("enabled", False)):
             self.env.latest_planner_road_geometry = (
@@ -576,8 +534,18 @@ class MultiAgentAction(ActionType):
         else:
             self.env.latest_planner_road_geometry = None
 
+        # Only instantiate the legacy online Anchor Builder when explicitly
+        # enabled. The raw expert collection path leaves it disabled.
         anchors_cfg = dict(feature_config.get("anchors", {}) or {})
         if bool(anchors_cfg.get("enabled", True)):
+            from highway_env.planner.anchor_builder import AllMergeAnchorBuilder
+
+            anchor_builder = getattr(
+                self.env, "planner_anchor_builder", None
+            )
+            if anchor_builder is None:
+                anchor_builder = AllMergeAnchorBuilder(config=anchors_cfg)
+                self.env.planner_anchor_builder = anchor_builder
             features.update(
                 anchor_builder.build_batch(
                     features=features,
@@ -586,7 +554,6 @@ class MultiAgentAction(ActionType):
             )
 
         self.env.latest_planner_features = features
-
         return features
 
     def _run_diffusion_shadow(
@@ -835,204 +802,148 @@ class MultiAgentAction(ActionType):
                     diagnostics[key] = float(array[0])
         self.env.latest_diffusion_spline_diagnostics = diagnostics
 
-    def _build_expert_alignment(
-        self,
-        features,
-        vehicle_actions,
-        planner_flag,
-    ):
-        alignment_config = planner_flag.get(
-            "ExpertAlignment",
-            {},
-        )
+    def _build_expert_trajectory(self, planner_flag):
+        """Publish the aligned Polynomial expert path without anchor matching.
 
-        if not alignment_config.get("enabled", False):
+        Raw expert collection stores scene observations, live road geometry and
+        expert trajectories. A1 anchors are generated offline from this raw
+        dataset, so this runtime path must not depend on coarse_trajectories,
+        mode_valid_mask or ExpertTrajectoryAligner.
+        """
+        self.env.latest_expert_trajectory = None
+
+        trajectory_config = planner_flag.get("ExpertTrajectory", {})
+        if not trajectory_config.get("enabled", False):
             return None
-
-        if features is None:
+        if not planner_flag.get("state", False):
             return None
+        if planner_flag.get("type") != "Polynomial":
+            raise RuntimeError(
+                "Raw expert trajectory export requires Planner.type='Polynomial'"
+            )
 
-        # STAGE_A_SPLINE_RUNTIME_V1
-        # Never label an executing Diffusion path as Polynomial expert data.
         diffusion_runtime_config = dict(planner_flag.get("Diffusion", {}) or {})
         config_yaml = diffusion_runtime_config.get("config_yaml")
         if config_yaml is not None:
-            from highway_env.planner.diffusion.config.experiment import load_mode_yaml, runtime_settings
-            effective = runtime_settings(load_mode_yaml(config_yaml))
-            effective.update({key: value for key, value in diffusion_runtime_config.items()
-                              if key != "config_yaml"})
-            diffusion_runtime_config = effective
-        if (diffusion_runtime_config.get("diffusion_execution_enabled", False)
-                or diffusion_runtime_config.get("jtp_control_execution_enabled", False)):
-            return None
-
-        if planner_flag.get("type") != "Polynomial":
-            return None
-
-        polynomial_config = planner_flag.get(
-            "Polynomial",
-            {},
-        )
-
-        if (
-            alignment_config.get(
-                "require_aligned_polynomial",
-                True,
+            from highway_env.planner.diffusion.config.experiment import (
+                load_mode_yaml,
+                runtime_settings,
             )
-            and polynomial_config.get("mode", "legacy")
-            != "aligned"
+            effective = runtime_settings(load_mode_yaml(config_yaml))
+            effective.update({
+                key: value
+                for key, value in diffusion_runtime_config.items()
+                if key != "config_yaml"
+            })
+            diffusion_runtime_config = effective
+        if (
+            diffusion_runtime_config.get("diffusion_execution_enabled", False)
+            or diffusion_runtime_config.get("jtp_control_execution_enabled", False)
         ):
             raise RuntimeError(
-                "ExpertAlignment requires "
-                "Planner.Polynomial.mode='aligned'"
+                "ExpertTrajectory export cannot run while Diffusion/JTP controls execute"
+            )
+
+        polynomial_config = planner_flag.get("Polynomial", {})
+        if (
+            trajectory_config.get("require_aligned_polynomial", True)
+            and polynomial_config.get("mode", "legacy") != "aligned"
+        ):
+            raise RuntimeError(
+                "ExpertTrajectory requires Planner.Polynomial.mode='aligned'"
             )
 
         trajectories = []
-
-        for ego_idx, vehicle in enumerate(
-            self.env.controlled_vehicles
-        ):
-            trajectory = getattr(
-                vehicle,
-                "latest_planner_trajectory",
-                None,
-            )
-
+        for ego_idx, vehicle in enumerate(self.env.controlled_vehicles):
+            trajectory = getattr(vehicle, "latest_planner_trajectory", None)
             if trajectory is None:
                 raise RuntimeError(
-                    "Missing latest_planner_trajectory "
-                    f"for ego {ego_idx}"
+                    f"Missing latest_planner_trajectory for ego {ego_idx}"
                 )
-
             trajectories.append(trajectory)
 
         reference_time_s = np.asarray(
-            trajectories[0]["time_s"],
-            dtype=np.float32,
-        )
+            trajectories[0]["time_s"], dtype=np.float32
+        ).reshape(-1)
+        reference_dense_time_s = np.asarray(
+            trajectories[0]["dense_time_s"], dtype=np.float32
+        ).reshape(-1)
+        dense_dt = float(trajectories[0]["dense_dt"])
+        trajectory_horizon_s = float(trajectories[0]["trajectory_horizon_s"])
 
         expert_xy = []
-
-        for ego_idx, trajectory in enumerate(
-            trajectories
-        ):
-            time_s = np.asarray(
-                trajectory["time_s"],
-                dtype=np.float32,
-            )
-
-            if not np.allclose(
-                time_s,
-                reference_time_s,
-                atol=1e-6,
-                rtol=0.0,
-            ):
-                raise RuntimeError(
-                    f"Planner time-grid mismatch for ego {ego_idx}"
-                )
-
-            expert_xy.append(
-                np.asarray(
-                    trajectory["xy"],
-                    dtype=np.float32,
-                )
-            )
-
-        expert_xy = np.stack(expert_xy, axis=0)
-
-        # STAGE3_DENSE_EXPERT_V2
-        reference_dense_time_s = np.asarray(
-            trajectories[0]["dense_time_s"],
-            dtype=np.float32,
-        )
-        dense_dt = float(trajectories[0]["dense_dt"])
-        trajectory_horizon_s = float(
-            trajectories[0]["trajectory_horizon_s"]
-        )
         future_trajectory_dense = []
+        sparse_indices = np.rint(reference_time_s / dense_dt).astype(np.int64) - 1
+        if (
+            reference_time_s.shape != (8,)
+            or reference_dense_time_s.shape != (40,)
+            or not np.isfinite(reference_time_s).all()
+            or not np.isfinite(reference_dense_time_s).all()
+            or dense_dt <= 0.0
+            or trajectory_horizon_s <= 0.0
+            or np.any(sparse_indices < 0)
+            or np.any(sparse_indices >= 40)
+        ):
+            raise RuntimeError("Invalid Polynomial expert trajectory time contract")
 
         for ego_idx, trajectory in enumerate(trajectories):
+            time_s = np.asarray(trajectory["time_s"], dtype=np.float32).reshape(-1)
             dense_time_s = np.asarray(
-                trajectory.get("dense_time_s"),
-                dtype=np.float32,
-            )
+                trajectory.get("dense_time_s"), dtype=np.float32
+            ).reshape(-1)
+            sparse_xy = np.asarray(trajectory["xy"], dtype=np.float32)
             dense_xy = np.asarray(
-                trajectory.get("future_trajectory_dense"),
-                dtype=np.float32,
+                trajectory.get("future_trajectory_dense"), dtype=np.float32
             )
-            if dense_xy.shape != (40, 2):
+            if time_s.shape != (8,) or sparse_xy.shape != (8, 2):
+                raise RuntimeError(
+                    f"Sparse expert shape mismatch for ego {ego_idx}: "
+                    f"time={time_s.shape}, xy={sparse_xy.shape}"
+                )
+            if dense_time_s.shape != (40,) or dense_xy.shape != (40, 2):
                 raise RuntimeError(
                     f"Dense expert shape mismatch for ego {ego_idx}: "
-                    f"{dense_xy.shape}, expected (40, 2)"
+                    f"time={dense_time_s.shape}, xy={dense_xy.shape}"
                 )
+            if not np.allclose(time_s, reference_time_s, atol=1e-6, rtol=0.0):
+                raise RuntimeError(f"Planner sparse time-grid mismatch for ego {ego_idx}")
             if not np.allclose(
                 dense_time_s, reference_dense_time_s, atol=1e-6, rtol=0.0
             ):
-                raise RuntimeError(
-                    f"Dense expert time-grid mismatch for ego {ego_idx}"
-                )
+                raise RuntimeError(f"Planner dense time-grid mismatch for ego {ego_idx}")
             if not np.isclose(float(trajectory["dense_dt"]), dense_dt):
                 raise RuntimeError("Dense expert dt mismatch across egos")
             if not np.isclose(
-                float(trajectory["trajectory_horizon_s"]),
-                trajectory_horizon_s,
+                float(trajectory["trajectory_horizon_s"]), trajectory_horizon_s
             ):
                 raise RuntimeError("Dense expert horizon mismatch across egos")
+            if not np.isfinite(sparse_xy).all() or not np.isfinite(dense_xy).all():
+                raise RuntimeError(f"Non-finite Polynomial expert path for ego {ego_idx}")
 
-            expected_sparse = dense_xy[[4, 9, 14, 19, 24, 29, 34, 39]]
-            sparse_xy = np.asarray(trajectory["xy"], dtype=np.float32)
-            if not np.allclose(
-                sparse_xy, expected_sparse, atol=1e-5, rtol=0.0
-            ):
+            expected_sparse = dense_xy[sparse_indices]
+            if not np.allclose(sparse_xy, expected_sparse, atol=1e-5, rtol=0.0):
                 max_error = float(np.max(np.abs(sparse_xy - expected_sparse)))
                 raise RuntimeError(
                     "Sparse/dense expert target inconsistency for ego "
                     f"{ego_idx}: max_abs_error={max_error:.6g}"
                 )
+            expert_xy.append(sparse_xy)
             future_trajectory_dense.append(dense_xy)
 
-        future_trajectory_dense = np.stack(
-            future_trajectory_dense, axis=0
-        ).astype(np.float32, copy=False)
-
-        from highway_env.planner.expert_alignment import (
-            ExpertTrajectoryAligner,
-        )
-
-        aligner = getattr(
-            self.env,
-            "expert_trajectory_aligner",
-            None,
-        )
-
-        if aligner is None:
-            aligner = ExpertTrajectoryAligner()
-            self.env.expert_trajectory_aligner = aligner
-
-        current_lane_indices = [
-            vehicle.lane_index
-            for vehicle
-            in self.env.controlled_vehicles
-        ]
-
-        result = aligner.align_batch(
-            features=features,
-            expert_xy=expert_xy,
-            trajectory_time_s=reference_time_s,
-            current_lane_indices=current_lane_indices,
-            target_lane_indices=vehicle_actions["lane index"],
-        )
-
-        result["polynomial_mode"] = polynomial_config.get(
-            "mode",
-            "legacy",
-        )
-        result["future_trajectory_dense"] = future_trajectory_dense.copy()
-        result["dense_dt"] = np.float32(dense_dt)
-        result["trajectory_horizon_s"] = np.float32(trajectory_horizon_s)
-
-        self.env.latest_expert_alignment = result
-
+        result = {
+            "expert_trajectory_xy": np.stack(expert_xy, axis=0).astype(
+                np.float32, copy=False
+            ),
+            "trajectory_time_s": reference_time_s.copy(),
+            "future_trajectory_dense": np.stack(
+                future_trajectory_dense, axis=0
+            ).astype(np.float32, copy=False),
+            "dense_time_s": reference_dense_time_s.copy(),
+            "dense_dt": np.float32(dense_dt),
+            "trajectory_horizon_s": np.float32(trajectory_horizon_s),
+            "polynomial_mode": str(polynomial_config.get("mode", "legacy")),
+        }
+        self.env.latest_expert_trajectory = result
         return result
 
     def act(
@@ -1126,11 +1037,7 @@ class MultiAgentAction(ActionType):
 
         # All three Polynomial trajectories exist here, but road.step()
         # has not yet advanced the simulation.
-        self._build_expert_alignment(
-            features,
-            vehicle_actions,
-            planner_flag,
-        )
+        self._build_expert_trajectory(planner_flag)
     def get_available_actions(self):
         return itertools.product(
             *[

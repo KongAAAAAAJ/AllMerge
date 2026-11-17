@@ -16,9 +16,16 @@ REQUIRED = {
 FORBIDDEN = {"coarse_controls", "coarse_trajectories", "mode_valid_mask", "target_mode", "target_semantic"}
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 def main():
     p=argparse.ArgumentParser(); p.add_argument("dataset_dir", type=Path); a=p.parse_args()
-    paths=sorted(a.dataset_dir.glob("episode_*.npz"))
+    dataset_dir = a.dataset_dir.expanduser()
+    if not dataset_dir.is_absolute():
+        dataset_dir = ROOT / dataset_dir
+    dataset_dir = dataset_dir.resolve()
+    paths=sorted(dataset_dir.glob("episode_*.npz"))
     if not paths: raise FileNotFoundError(f"No episode_*.npz under {a.dataset_dir}")
     rows=[]; errors=[]
     for path in paths:
@@ -40,7 +47,7 @@ def main():
                              "preview_min_m":float(z["road_forward_preview_m"].min()),
                              "preview_max_m":float(z["road_forward_preview_m"].max())})
     report={"schema":"trace_raw_expert_road_geometry_v1","valid":not errors,"episodes":rows,"errors":errors}
-    (a.dataset_dir/"raw_dataset_validation.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
+    (dataset_dir/"raw_dataset_validation.json").write_text(json.dumps(report,indent=2),encoding="utf-8")
     print(json.dumps(report,indent=2))
     return 0 if not errors else 2
 

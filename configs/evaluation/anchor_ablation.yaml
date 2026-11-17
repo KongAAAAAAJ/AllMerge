@@ -1,4 +1,15 @@
 # TRACE paper-aligned A0/A1/A2 Anchor Ablation evaluation.
+stage: all              # anchors | feasibility | all
+methods: [A0, A1, A2]   # Select one or several methods
+
+anchor_sources:
+  a0_bank: outputs/anchor_ablation/a0_fixed_control_anchors.npz
+  a0_rollout:
+    dt: 0.1
+    wheelbase_m: 5.5
+    max_accel_mps2: 2.5
+    max_steer_rad: 0.08
+  # a2_scorer defaults to output_dir/best.pt from --scorer-config.
 dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
 split: test
 num_frames: 200          # 0 evaluates all complete synchronized frames

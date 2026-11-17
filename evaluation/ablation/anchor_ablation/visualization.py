@@ -11,8 +11,9 @@ def draw_anchor_ablation(path: Path, figure_payload: Mapping[str, dict], *, samp
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    methods = (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", "Ours"))
-    fig, axes = plt.subplots(1, 3, figsize=(15.5, 4.8), sharex=True, sharey=True)
+    methods = [(m, title) for m, title in (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", "Ours")) if m in figure_payload]
+    fig, grid = plt.subplots(1, len(methods), figsize=(5.2 * len(methods), 4.8), sharex=True, sharey=True, squeeze=False)
+    axes = grid[0]
     for ax, (method, title) in zip(axes, methods):
         item = figure_payload[method]
         features = item["features"]

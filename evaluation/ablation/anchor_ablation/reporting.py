@@ -39,26 +39,26 @@ def summarize_anchor_rows(rows: List[dict], feasibility_rows: List[dict]):
     summary = []
     for method in ("A0", "A1", "A2"):
         values = [r for r in rows if r["method"] == method]
-        if not values:
+        method_feas = [r for r in feasibility_rows if r["method"] == method]
+        if not values and not method_feas:
             continue
         safe_num = sum(int(r["safe_anchor_count"]) for r in values)
         valid_num = sum(int(r["valid_anchor_count"]) for r in values)
         diversity = [float(r["diversity_m"]) for r in values if np.isfinite(float(r["diversity_m"]))]
         joint_diversity = [float(r["joint_diversity_normalized"]) for r in values
                            if np.isfinite(float(r["joint_diversity_normalized"]))]
-        method_feas = [r for r in feasibility_rows if r["method"] == method]
         feas_rate = (float(np.mean([bool(r["feasible"]) for r in method_feas]))
                      if method_feas else None)
         summary.append({
             "method": method,
-            "minADE_m": float(np.mean([r["minade_m"] for r in values])),
-            "safe_anchor_ratio_pct": 100.0 * safe_num / max(valid_num, 1),
-            "diversity_m": float(np.mean(diversity)) if diversity else float("nan"),
+            "minADE_m": float(np.mean([r["minade_m"] for r in values])) if values else None,
+            "safe_anchor_ratio_pct": 100.0 * safe_num / max(valid_num, 1) if values else None,
+            "diversity_m": float(np.mean(diversity)) if diversity else None,
             "feasibility_pct": None if feas_rate is None else 100.0 * feas_rate,
-            "num_scenes": len(values),
-            "valid_anchor_count": valid_num,
-            "safe_anchor_count": safe_num,
-            "joint_diversity_normalized": float(np.mean(joint_diversity)) if joint_diversity else float("nan"),
+            "num_scenes": len(values) if values else len({(r["episode_index"], r["frame_index"], r["ego_index"]) for r in method_feas}),
+            "valid_anchor_count": valid_num if values else None,
+            "safe_anchor_count": safe_num if values else None,
+            "joint_diversity_normalized": float(np.mean(joint_diversity)) if joint_diversity else None,
         })
     return summary
 
@@ -81,11 +81,10 @@ def write_latex_table(path: Path, summary: List[dict]):
     for method, label in (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", r"\textbf{Ours}")):
         row = lookup.get(method)
         if row is None:
-            vals = ("--", "--", "--", "--")
-        else:
-            feas = "--" if row["feasibility_pct"] is None else f'{row["feasibility_pct"]:.2f}'
-            vals = (f'{row["minADE_m"]:.3f}', f'{row["safe_anchor_ratio_pct"]:.2f}',
-                    f'{row["diversity_m"]:.3f}', feas)
+            continue
+        vals = tuple('--' if row[key] is None else f'{row[key]:.{digits}f}'
+                     for key, digits in (('minADE_m', 3), ('safe_anchor_ratio_pct', 2),
+                                         ('diversity_m', 3), ('feasibility_pct', 2)))
         lines.append(f"{label} & {vals[0]} & {vals[1]} & {vals[2]} & {vals[3]} " + r" \\")
     lines += [r"\hline", r"\end{tabular}", r"\end{table}"]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

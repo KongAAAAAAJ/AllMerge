@@ -14,7 +14,6 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -59,11 +58,26 @@ def _extract_one(value, i, n):
     return np.asarray(a[i] if a.ndim and a.shape[0] == n else a).copy()
 
 
+def _resolve_project_path(value):
+    """Resolve CLI/config/output paths relative to the AllMerge root."""
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
+
+
 def main():
     args = parse_args()
     if args.duration <= 0 or args.group_action not in (0, 1, 2, 3):
         raise ValueError("duration must be positive and group-action must be 0..3")
-    os.chdir(WORKSPACE)
+
+    # All relative CLI paths are anchored at the all_merge repository root.
+    args.output_dir = _resolve_project_path(args.output_dir)
+    args.trucksim_koopman_config = _resolve_project_path(
+        args.trucksim_koopman_config
+    )
+    args.engine_map_cache = _resolve_project_path(args.engine_map_cache)
+    os.chdir(ROOT)
 
     trucksim_cfg = case = history = None
     env_config = {"duration": float(args.duration), "offscreen_rendering": False}
@@ -73,6 +87,12 @@ def main():
             HistoricalContexts, check_context,
         )
         trucksim_cfg = load_collection_config(args.trucksim_koopman_config)
+        reference_controller = trucksim_cfg.get("reference_controller", {})
+        engine_map_path = reference_controller.get("engine_map_path")
+        if engine_map_path:
+            reference_controller["engine_map_path"] = str(
+                _resolve_project_path(engine_map_path)
+            )
         if args.trucksim_model_id:
             from data_pipeline.expert_collection.trucksim import physical_cases
             matches = [x for x in physical_cases(trucksim_cfg) if x["model_id"] == args.trucksim_model_id]
@@ -81,6 +101,9 @@ def main():
             case = matches[0]
         else:
             case = select_case(trucksim_cfg, args.episode_index)
+        # TruckSim model paths in YAML are also interpreted relative to all_merge.
+        for path_key in ("simfile", "dll"):
+            case[path_key] = str(_resolve_project_path(case[path_key]))
         if args.check_only:
             for name in ("simfile", "dll"):
                 if not Path(case[name]).is_file():
@@ -92,13 +115,15 @@ def main():
             copy_instances=args.copy_trucksim_dll_instances,
         ))
         if args.engine_map_cache is not None:
-            env_config["TruckSim"]["engine_map_cache_npy"] = str(args.engine_map_cache.resolve())
+            env_config["TruckSim"]["engine_map_cache_npy"] = str(args.engine_map_cache)
 
     # Supply a complete Planner config before environment construction because
     # AbstractEnv performs an initial reset in __init__ and configures TruckSim
     # native objects during scene creation.
     from copy import deepcopy
     planner_cfg = deepcopy(SCENARIOS[args.scenario].default_config().get("Planner", {}))
+    planner_cfg.setdefault("ExpertTrajectory", {})["enabled"] = True
+    planner_cfg.pop("ExpertAlignment", None)
     features_cfg = planner_cfg.setdefault("features", {})
     features_cfg.setdefault("anchors", {})["enabled"] = False
     features_cfg["road_geometry"] = {
@@ -144,14 +169,21 @@ def main():
 
             features = getattr(env, "latest_planner_features", None)
             road = getattr(env, "latest_planner_road_geometry", None)
-            alignment = getattr(env, "latest_expert_alignment", None)
-            if features is None or road is None or alignment is None:
-                raise RuntimeError("raw collection requires planner features, full road geometry and expert alignment")
+            expert_trajectory = getattr(env, "latest_expert_trajectory", None)
+            if features is None or road is None or expert_trajectory is None:
+                raise RuntimeError(
+                    "raw collection requires planner features, full road geometry "
+                    "and the aligned Polynomial expert trajectory"
+                )
             if any(k in features for k in ("coarse_controls", "coarse_trajectories", "mode_valid_mask")):
                 raise RuntimeError("anchor generation was not disabled in raw expert collection")
 
-            dense_xy, dense_t = _extract_polynomial_gt_10hz(env, alignment)
-            expert_xy = np.asarray(alignment["expert_trajectory_xy"], np.float32)
+            dense_xy, dense_t = _extract_polynomial_gt_10hz(
+                env, expert_trajectory
+            )
+            expert_xy = np.asarray(
+                expert_trajectory["expert_trajectory_xy"], np.float32
+            )
             n_ego = len(env.controlled_vehicles)
             if expert_xy.shape != (n_ego, 8, 2) or dense_xy.shape != (n_ego, 41, 2):
                 raise RuntimeError(f"unexpected expert target shapes: sparse={expert_xy.shape}, dense={dense_xy.shape}")
@@ -163,10 +195,12 @@ def main():
                     sample[k] = _extract_one(v, ego_i, n_ego)
                 sample["expert_trajectory_xy"] = expert_xy[ego_i].copy()
                 sample["future_trajectory_dense"] = np.asarray(
-                    alignment["future_trajectory_dense"][ego_i], np.float32
+                    expert_trajectory["future_trajectory_dense"][ego_i], np.float32
                 ).copy()  # 40 future points at 0.1 s, t=0.1..4.0
                 sample["expert_trajectory_10hz_xy"] = dense_xy[ego_i].copy()  # includes t=0
-                sample["trajectory_time_s"] = np.asarray(alignment["trajectory_time_s"], np.float32).copy()
+                sample["trajectory_time_s"] = np.asarray(
+                    expert_trajectory["trajectory_time_s"], np.float32
+                ).copy()
                 sample["expert_trajectory_10hz_time_s"] = dense_t.copy()
                 sample["dense_dt"] = np.asarray(0.1, np.float32)
                 sample["trajectory_horizon_s"] = np.asarray(4.0, np.float32)
@@ -190,11 +224,13 @@ def main():
                     ctx = pre_context[ego_i] if pre_context is not None else None
                     if ctx is None:
                         continue
-                    check_context(ctx)
                     sample.update(ctx)
                     sample["koopman_payload_kg"] = np.asarray(case["payload_kg"], np.float32)
                     sample["koopman_road_mu"] = np.asarray(case["road_mu"], np.float32)
                     sample["koopman_model_id"] = np.asarray(case["model_id"], dtype="U32")
+                    # Validate the complete sample: check_context also verifies
+                    # future_trajectory_dense, which is added above.
+                    check_context(sample)
                 samples.append(sample)
             if step % 10 == 0:
                 print(f"[RAW-COLLECT] step={step+1}/{frame_count} samples={len(samples)}", flush=True)

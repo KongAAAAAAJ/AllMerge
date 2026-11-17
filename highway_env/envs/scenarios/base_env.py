@@ -115,7 +115,7 @@ class BaseScenarioEnv(AbstractEnv, ABC):
                         "mode": "aligned",
                         "aligned_horizon_s": 4.0,
                     },
-                    "ExpertAlignment": {
+                    "ExpertTrajectory": {
                         "enabled": True,
                         "require_aligned_polynomial": True,
                     },
