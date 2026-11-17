@@ -23,6 +23,8 @@ def anchor_safety_cost(features, xy, valid=None, *, collision_weight=1.0,
     if xy.ndim != 4 or xy.shape[-1] != 2:
         raise ValueError('xy must be [B,M,T,2]')
     B, M, T, _ = xy.shape
+    if valid is not None and tuple(valid.shape) != (B, M):
+        raise ValueError(f'Anchor validity mask must be [B,M]={(B, M)}, got {tuple(valid.shape)}')
     dtype, device = xy.dtype, xy.device
     agent = features['agent_states'].to(xy)
     agent_mask = features['agent_valid_mask'].bool()

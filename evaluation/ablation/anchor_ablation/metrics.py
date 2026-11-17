@@ -8,16 +8,17 @@ import torch
 def geometry_valid_mask(strategy: str, features: dict, targets: Optional[dict], xy: torch.Tensor) -> torch.Tensor:
     """Return geometry availability, never reusing A1's traffic-filtered mask.
 
-    A1 stores target_mode_geometry_valid separately in expert-shard diagnostics.
-    If that diagnostic is absent, zero-padded coarse trajectories are used as a
-    conservative geometry-availability fallback. A0/A2 manager masks already
+    Existing A1 shards store target_mode_geometry_valid for the selected expert
+    mode only ([B]), not all anchors. Use a diagnostic only if it is [B,M];
+    otherwise nonzero paired trajectories/controls provide the conservative
+    geometry-availability fallback. A0/A2 manager masks already
     represent candidate availability rather than collision safety.
     """
     strategy = str(strategy).lower()
     if strategy == "dynamic":
         diagnostics = (targets or {}).get("diagnostics", {})
         geometry = diagnostics.get("target_mode_geometry_valid") if isinstance(diagnostics, dict) else None
-        if geometry is not None:
+        if geometry is not None and tuple(geometry.shape) == tuple(xy.shape[:2]):
             return geometry.to(device=xy.device, dtype=torch.bool)
         # A1's mode_valid_mask mixes geometry and traffic validity. Do not use it.
         nonzero_xy = torch.linalg.vector_norm(xy, dim=-1).sum(dim=-1) > 1.0e-5

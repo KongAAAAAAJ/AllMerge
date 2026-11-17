@@ -3,7 +3,7 @@ stage: all              # anchors | feasibility | all
 methods: [A0, A1, A2]   # Select one or several methods
 
 anchor_sources:
-  a0_bank: outputs/anchor_ablation/a0_fixed_control_anchors.npz
+  a0_bank: outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz
   a0_rollout:
     dt: 0.1
     wheelbase_m: 5.5
