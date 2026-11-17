@@ -54,23 +54,6 @@ def load_config(filename=DEFAULT_CONFIG):
 
     koopman = cfg.get("koopman_collection_config", "configs/koopman/collect.yaml")
     cfg["koopman_collection_config"] = str(resolve_path(koopman))
-    a1_path = resolve_path(cfg.get("a1_anchor_config", "configs/anchors/a1.yaml"))
-    if not a1_path.is_file():
-        raise FileNotFoundError(f"A1 anchor config not found: {a1_path}")
-    a1_doc = yaml.safe_load(a1_path.read_text(encoding="utf-8")) or {}
-    a1_cfg = a1_doc.get("a1")
-    if not isinstance(a1_cfg, dict):
-        raise ValueError("A1 anchor config must contain an 'a1' mapping")
-    cfg["a1_anchor_config"] = str(a1_path)
-    cfg["a1_anchors"] = dict(a1_cfg)
-    a1_required = ("control_steps", "dt", "wheelbase_m", "max_accel_mps2",
-                   "max_decel_mps2", "max_steer_rad", "lane_change_distance_m",
-                   "road_edge_margin_m", "speed_delta_mps", "minimum_lane_change_speed_mps")
-    missing_a1 = [key for key in a1_required if key not in cfg["a1_anchors"]]
-    if missing_a1:
-        raise ValueError(f"A1 anchor config missing {missing_a1}")
-    if int(cfg["a1_anchors"]["control_steps"]) != 40 or not math.isclose(float(cfg["a1_anchors"]["dt"]), 0.1, abs_tol=1e-8):
-        raise ValueError("The unified TRACE control-diffusion dataset requires A1 control_steps=40 and dt=0.1")
     conditions = cfg.setdefault("conditions", {})
     if not isinstance(conditions, dict):
         raise ValueError("conditions must be a mapping")
@@ -84,9 +67,10 @@ def load_config(filename=DEFAULT_CONFIG):
     if not isinstance(collection, dict):
         raise ValueError("collection must be a mapping")
     defaults = {
-        "dataset_name": "expert_trucksim_k2_anchor_pair_100k",
+        "dataset_name": "expert_trucksim_k2_raw_100k",
         "output_root": "outputs/expert_dataset",
         "target_samples": 100000,
+        "min_episodes": 0,
         "episode_duration_s": 12.0,
         "max_episodes": 10000,
         "timeout_s": 300.0,
@@ -105,7 +89,7 @@ def load_config(filename=DEFAULT_CONFIG):
         collection.setdefault(key, value)
     for key in ("target_samples", "max_episodes", "worker_retries", "max_consecutive_empty_episodes"):
         collection[key] = _positive_int(collection[key], f"collection.{key}")
-    for key in ("start_seed", "start_episode_index", "group_action", "split_seed"):
+    for key in ("start_seed", "start_episode_index", "group_action", "split_seed", "min_episodes"):
         collection[key] = _positive_int(collection[key], f"collection.{key}", allow_zero=True)
     if collection["group_action"] not in (0, 1, 2, 3):
         raise ValueError("collection.group_action must be in [0,3]")
@@ -129,10 +113,6 @@ def load_config(filename=DEFAULT_CONFIG):
     for key, value in road_defaults.items(): road.setdefault(key, value)
     for key in ("length_m", "width_m"):
         dims[key] = _positive_number(dims[key], f"vehicle_dimensions.{key}")
-    for key, source in (("ego_length_m", "length_m"), ("ego_width_m", "width_m")):
-        if key in cfg["a1_anchors"] and not math.isclose(float(cfg["a1_anchors"][key]), dims[source], abs_tol=1e-6):
-            raise ValueError(f"A1 {key} must match vehicle_dimensions.{source}")
-        cfg["a1_anchors"][key] = dims[source]
     for key in ("forward_min_m", "forward_max_m", "point_spacing_m"):
         road[key] = _positive_number(road[key], f"road_geometry.{key}")
     if road["forward_max_m"] < road["forward_min_m"]:
@@ -156,8 +136,6 @@ def collection_args(cfg, *, config_path=DEFAULT_CONFIG, check_only=False, overri
         vehicle_model="trucksim",
         scenarios=list(cfg["scenarios"]),
         koopman_config=Path(cfg["koopman_collection_config"]),
-        a1_config_path=Path(cfg["a1_anchor_config"]),
-        a1_anchors=dict(cfg["a1_anchors"]),
         copy_trucksim_dll_instances=bool(cfg["conditions"]["copy_instances_beside_source_dll"]),
         ego_length_m=float(cfg["vehicle_dimensions"]["length_m"]),
         ego_width_m=float(cfg["vehicle_dimensions"]["width_m"]),
@@ -165,6 +143,8 @@ def collection_args(cfg, *, config_path=DEFAULT_CONFIG, check_only=False, overri
         dataset_name=c["dataset_name"],
         output_root=Path(c["output_root"]),
         target_samples=int(c["target_samples"]),
+        min_episodes=int(c["min_episodes"]),
+        trucksim_model_id=c.get("trucksim_model_id"),
         duration=float(c["episode_duration_s"]),
         max_episodes=int(c["max_episodes"]),
         timeout_s=float(c["timeout_s"]),
@@ -186,6 +166,8 @@ def parse_args(argv=None):
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--check-only", action="store_true")
     p.add_argument("--target-samples", type=int)
+    p.add_argument("--min-episodes", type=int)
+    p.add_argument("--trucksim-model-id", default=None)
     p.add_argument("--dataset-name")
     p.add_argument("--output-root")
     p.add_argument("--duration", type=float)
@@ -200,11 +182,14 @@ def parse_args(argv=None):
     overrides = {"target_samples": a.target_samples, "dataset_name": a.dataset_name,
                  "output_root": resolve_path(a.output_root) if a.output_root else None,
                  "episode_duration_s": a.duration, "max_episodes": a.max_episodes,
+                 "min_episodes": a.min_episodes, "trucksim_model_id": a.trucksim_model_id,
                  "timeout_s": a.timeout, "worker_retries": a.retries, "resume": a.resume}
     overrides = {k: v for k, v in overrides.items() if v is not None}
     for key in ("target_samples", "max_episodes", "worker_retries"):
         if key in overrides and int(overrides[key]) <= 0:
             p.error(f"--{key.replace('_', '-')} must be positive")
+    if a.min_episodes is not None and a.min_episodes < 0:
+        p.error("--min-episodes must be nonnegative")
     for key in ("episode_duration_s", "timeout_s"):
         if key in overrides and float(overrides[key]) <= 0:
             p.error(f"invalid positive value for {key}")

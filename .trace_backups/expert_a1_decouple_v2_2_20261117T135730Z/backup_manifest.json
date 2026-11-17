@@ -1,0 +1,55 @@
+{
+  "patch_id": "TRACE_EXPERT_A1_DECOUPLE_V2_2",
+  "entries": [
+    {
+      "path": "README.md",
+      "had_original": true,
+      "backup_path": "original/README.md"
+    },
+    {
+      "path": "configs/data/expert_collection.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/data/expert_collection.yaml"
+    },
+    {
+      "path": "data_pipeline/expert_collection/a1_dataset.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "data_pipeline/expert_collection/config.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/config.py"
+    },
+    {
+      "path": "data_pipeline/expert_collection/runner.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/runner.py"
+    },
+    {
+      "path": "data_pipeline/expert_collection/worker.py",
+      "had_original": true,
+      "backup_path": "original/data_pipeline/expert_collection/worker.py"
+    },
+    {
+      "path": "scripts/README.md",
+      "had_original": true,
+      "backup_path": "original/scripts/README.md"
+    },
+    {
+      "path": "scripts/data/build_a1_anchors.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "tests/test_expert_a1_decouple.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "tests/test_unified_expert_pipeline.py",
+      "had_original": true,
+      "backup_path": "original/tests/test_unified_expert_pipeline.py"
+    }
+  ]
+}

@@ -15,19 +15,22 @@ python scripts/data/collect_expert_dataset.py
 ```
 
 Configuration is centralized in `configs/data/expert_collection.yaml`.
-The collector performs the following stages as one managed workflow:
+The collection command writes only persistent anchor-independent raw episodes to
+`outputs/expert_dataset/expert_trucksim_k2_raw_100k/episodes/`, together with
+resume state and reports. Build final training shards separately:
 
-1. Batch collection of anchor-independent Polynomial expert samples, full live
-   road geometry, vehicle dimensions, and synchronized Koopman K2 context.
-2. Offline A1 lattice anchor generation from the captured road geometry, using `configs/anchors/a1.yaml`.
-3. Atomic episode-shard packaging and deterministic train/validation/test split.
-4. Manifest generation, shard validation, native-worker logs, and resumable
-   progress tracking.
+```bash
+python scripts/data/build_a1_anchors.py --check-only
+python scripts/data/build_a1_anchors.py
+python scripts/diagnostics/validate_expert_dataset.py
+```
 
-Raw episode files are an internal staging format only. The only supported
-training dataset is the final `shards/shard_*.npz` dataset containing A1 paired
-control/trajectory anchors and K2 context. Legacy standard expert datasets and
-separate raw-collection commands are unsupported.
+The A1 builder uses `configs/anchors/a1.yaml`, reads the completed raw dataset
+without modifying it, and creates `expert_trucksim_k2_anchor_pair_100k` with
+paired A1 control/trajectory anchors, K2 context and deterministic episode
+splits. Use a new `--output-dir` for each A1 parameter variant. The final
+training format is unchanged. Do not run collection and A1 build concurrently.
+Legacy standard datasets and separate raw-collection commands are unsupported.
 
 ## Diffusion training and evaluation
 

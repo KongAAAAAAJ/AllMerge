@@ -11,16 +11,16 @@ history_dt_s: 0.1
 expert_horizon_s: 4.0
 expert_dt_s: 0.1
 koopman_collection_config: configs/koopman/collect.yaml
-a1_anchor_config: configs/anchors/a1.yaml
 conditions:
   selection: round_robin_payload_friction
   operating_condition_per_episode: true
   independent_dll_images: true
   copy_instances_beside_source_dll: true
 collection:
-  dataset_name: expert_trucksim_k2_anchor_pair_100k
+  dataset_name: expert_trucksim_k2_raw_100k
   output_root: outputs/expert_dataset
   target_samples: 100000
+  min_episodes: 0
   episode_duration_s: 12.0
   max_episodes: 10000
   timeout_s: 300

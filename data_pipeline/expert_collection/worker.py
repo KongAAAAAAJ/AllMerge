@@ -410,7 +410,7 @@ def main(argv=None):
     manifest = {
         "schema_version": "trace_expert_preanchor_episode_v2",
         "anchor_generation": "disabled_during_collection",
-        "a1_builder": "integrated_into_unified_batch_pipeline",
+        "a1_builder": "independent_offline_dataset_build",
         "scenario": args.scenario,
         "episode_index": int(args.episode_index),
         "seed": int(args.seed),

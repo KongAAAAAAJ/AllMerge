@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,8 +17,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data_pipeline.expert_collection.trucksim import load_collection_config, physical_cases
-from data_pipeline.expert_dataset import split_shards
-MODE_SEMANTIC_IDS = (0, 0, 0, 1, 1, 1, 2, 2, 2, 3)
 
 PREANCHOR_REQUIRED = (
     "ego_state", "agent_states", "agent_valid_mask", "map_polylines",
@@ -35,14 +34,7 @@ PREANCHOR_REQUIRED = (
     "koopman_model_id", "koopman_vx_init_kmh", "episode_index", "frame_index",
     "episode_step", "ego_index", "seed", "scenario", "expert_type",
 )
-FINAL_REQUIRED = PREANCHOR_REQUIRED + (
-    "a1_coarse_controls", "a1_coarse_trajectories", "a1_dense_trajectories",
-    "a1_valid_mask", "a1_invalid_reasons", "coarse_controls",
-    "coarse_trajectories", "mode_valid_mask", "target_mode", "target_semantic",
-    "target_mode_geometry_valid", "target_mode_assignment_distance",
-)
-
-PREANCHOR_FORBIDDEN = {"coarse_controls", "coarse_trajectories", "mode_valid_mask", "target_mode", "target_semantic"}
+PREANCHOR_FORBIDDEN = {"coarse_controls", "coarse_trajectories", "mode_valid_mask", "target_mode", "target_semantic", "target_mode_geometry_valid", "target_mode_assignment_distance"}
 
 
 def _atomic_json(path: Path, value: dict):
@@ -89,12 +81,14 @@ def _validate_preanchor_episode(path: Path):
     with np.load(path, allow_pickle=False) as z:
         keys = set(z.files)
         missing = sorted(set(PREANCHOR_REQUIRED) - keys)
-        forbidden = sorted(PREANCHOR_FORBIDDEN & keys)
+        forbidden = sorted((PREANCHOR_FORBIDDEN & keys) | {k for k in keys if k.startswith("a1_")})
         if missing:
             raise ValueError(f"{path.name}: missing pre-anchor fields {missing}")
         if forbidden:
             raise ValueError(f"{path.name}: anchor-dependent fields present before A1 stage: {forbidden}")
         n = int(z["ego_state"].shape[0])
+        if n <= 0:
+            raise ValueError(f"{path.name}: empty episode")
         shapes = {
             "expert_trajectory_xy": (n, 8, 2),
             "future_trajectory_dense": (n, 40, 2),
@@ -132,78 +126,6 @@ def _validate_preanchor_episode(path: Path):
         return n, int(episode_ids[0])
 
 
-def _validate_final_shard(path: Path):
-    with np.load(path, allow_pickle=False) as z:
-        missing = sorted(set(FINAL_REQUIRED) - set(z.files))
-        if missing:
-            raise ValueError(f"{path.name}: missing final TRACE fields {missing}")
-        n = int(z["expert_trajectory_xy"].shape[0])
-        if z["coarse_controls"].shape != (n, 10, 40, 2):
-            raise ValueError(f"{path.name}: coarse_controls must be [N,10,40,2]")
-        if z["coarse_trajectories"].shape != (n, 10, 8, 2):
-            raise ValueError(f"{path.name}: coarse_trajectories must be [N,10,8,2]")
-        if z["mode_valid_mask"].shape != (n, 10) or not z["mode_valid_mask"].astype(bool).any(axis=1).all():
-            raise ValueError(f"{path.name}: invalid A1 mode_valid_mask")
-        if not np.array_equal(z["mode_valid_mask"], z["a1_valid_mask"]):
-            raise ValueError(f"{path.name}: mode_valid_mask and a1_valid_mask differ")
-        if not np.allclose(z["coarse_controls"], z["a1_coarse_controls"], atol=0, rtol=0):
-            raise ValueError(f"{path.name}: paired A1 control aliases differ")
-        if not np.allclose(z["coarse_trajectories"], z["a1_coarse_trajectories"], atol=0, rtol=0):
-            raise ValueError(f"{path.name}: paired A1 trajectory aliases differ")
-        for key in z.files:
-            a = np.asarray(z[key])
-            if a.dtype.kind in "fiu" and not np.isfinite(a).all():
-                raise ValueError(f"{path.name}: nonfinite values in {key}")
-        return n, sorted(set(np.asarray(z["episode_index"]).reshape(-1).astype(int).tolist()))
-
-
-def _package_episode(preanchor_path: Path, final_path: Path, builder: A1AnchorBuilder):
-    with np.load(preanchor_path, allow_pickle=False) as z:
-        arrays = {k: np.array(z[k], copy=True) for k in z.files}
-    n = len(arrays["ego_state"])
-    built = [builder.build({k: v[i] for k, v in arrays.items()}) for i in range(n)]
-    for key in built[0]:
-        arrays[key] = np.stack([x[key] for x in built], axis=0)
-    arrays["coarse_controls"] = arrays["a1_coarse_controls"].astype(np.float32, copy=True)
-    arrays["coarse_trajectories"] = arrays["a1_coarse_trajectories"].astype(np.float32, copy=True)
-    arrays["mode_valid_mask"] = arrays["a1_valid_mask"].astype(bool, copy=True)
-
-    # Fine-grained A1 mode labels are retained for the trajectory-space trainer
-    # and its diagnostics. Labels are nearest valid A1 anchor to the Polynomial GT.
-    gt = arrays["expert_trajectory_xy"]
-    dist = np.linalg.norm(arrays["coarse_trajectories"] - gt[:, None], axis=-1).mean(axis=-1)
-    dist = np.where(arrays["mode_valid_mask"], dist, np.inf)
-    if not np.isfinite(dist.min(axis=1)).all():
-        bad = np.flatnonzero(~np.isfinite(dist.min(axis=1))).tolist()
-        raise RuntimeError(f"A1 builder produced no valid anchor for samples {bad[:10]}")
-    mode = dist.argmin(axis=1).astype(np.int64)
-    arrays["target_mode"] = mode
-    arrays["target_semantic"] = np.asarray(MODE_SEMANTIC_IDS, np.int64)[mode]
-    arrays["target_mode_geometry_valid"] = np.ones((n,), dtype=bool)
-    arrays["target_mode_assignment_distance"] = dist[np.arange(n), mode].astype(np.float32)
-
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = final_path.with_suffix(final_path.suffix + ".tmp")
-    with tmp.open("wb") as f:
-        np.savez_compressed(f, **arrays)
-    os.replace(tmp, final_path)
-    _validate_final_shard(final_path)
-    return n
-
-
-def _existing_final(dataset: Path):
-    result = {}
-    for path in sorted((dataset / "shards").glob("shard_*.npz")):
-        n, episode_ids = _validate_final_shard(path)
-        if len(episode_ids) != 1:
-            raise RuntimeError(f"{path.name}: final shard must contain exactly one episode")
-        for episode in episode_ids:
-            if episode in result:
-                raise RuntimeError(f"Episode {episode} appears in multiple final shards")
-            result[episode] = (path, n)
-    return result
-
-
 def _write_audit(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.exists()
@@ -222,13 +144,16 @@ def main(args=None):
         raise ValueError("Only the unified TruckSim expert pipeline is supported")
 
     dataset = (args.output_root / args.dataset_name).resolve()
-    preanchor_dir = dataset / ".collection_work" / "preanchor_episodes"
+    preanchor_dir = dataset / "episodes"
     logs_dir = dataset / "reports" / "native_logs"
     reports = dataset / "reports"
-    shards_dir = dataset / "shards"
+    if (dataset / "shards").exists() or (dataset / ".collection_work").exists():
+        raise RuntimeError(f"{dataset} is an old integrated dataset or staging directory; choose a new raw dataset name")
 
     koopman_cfg = load_collection_config(args.koopman_config)
     cases = _resolve_case_paths(list(physical_cases(koopman_cfg)))
+    if args.trucksim_model_id is not None:
+        cases = [case for case in cases if case["model_id"] == args.trucksim_model_id]
     if not cases:
         raise RuntimeError("No verified payload/friction TruckSim cases were found")
     if args.check_only:
@@ -244,11 +169,10 @@ def main(args=None):
               f"scenarios={args.scenarios} | output={dataset}")
         return 0
 
-    for d in (preanchor_dir, logs_dir, reports, shards_dir):
+    for d in (preanchor_dir, logs_dir, reports):
         d.mkdir(parents=True, exist_ok=True)
     progress_path = reports / "collection_progress.json"
-    existing_data = (any(shards_dir.glob("shard_*.npz")) or
-                     any(preanchor_dir.glob("episode_*.npz")) or progress_path.exists() or
+    existing_data = (any(preanchor_dir.glob("episode_*.npz")) or progress_path.exists() or
                      (dataset / "engine_map_cache.npy").exists())
     if existing_data and not args.resume:
         raise FileExistsError(
@@ -256,27 +180,43 @@ def main(args=None):
             "Set collection.resume: true or select a new dataset_name."
         )
 
+    # Resume only under the same sampling contract; target size and episode cap may change.
+    contract_path = reports / "collection_contract.json"
+    contract = {"scenarios": args.scenarios, "cases": cases, "seed": args.start_seed,
+                "start_episode_index": args.start_episode_index, "duration": args.duration,
+                "group_action": args.group_action, "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
+                "road_geometry": args.road_geometry,
+                "split_ratios": [args.train_split_ratio, args.val_split_ratio, args.test_split_ratio],
+                "split_seed": args.split_seed,
+                "koopman_config_sha256": hashlib.sha256(args.koopman_config.read_bytes()).hexdigest()}
+    if contract_path.exists():
+        if json.loads(contract_path.read_text(encoding="utf-8")) != contract:
+            raise RuntimeError("Raw collection contract differs; choose a new dataset name")
+    elif existing_data:
+        raise RuntimeError("Existing raw collection has no resume contract; use a new dataset name")
+    else:
+        _atomic_json(contract_path, contract)
     cache_path = _engine_map_cache(dataset, koopman_cfg)
-    final_by_episode = _existing_final(dataset)
     preanchor_files = sorted(preanchor_dir.glob("episode_*.npz"))
     preanchor_by_episode = {}
     for p in preanchor_files:
         n, episode = _validate_preanchor_episode(p)
-        if episode in final_by_episode:
-            continue
         if episode in preanchor_by_episode:
             raise RuntimeError(f"Duplicate pre-anchor episode index {episode}")
         preanchor_by_episode[episode] = (p, n)
 
-    accepted = sum(v[1] for v in final_by_episode.values()) + sum(v[1] for v in preanchor_by_episode.values())
+    accepted = sum(v[1] for v in preanchor_by_episode.values())
     progress = json.loads(progress_path.read_text(encoding="utf-8")) if progress_path.exists() else {}
-    max_seen = max([*final_by_episode.keys(), *preanchor_by_episode.keys()], default=args.start_episode_index - 1)
+    max_seen = max(list(preanchor_by_episode), default=args.start_episode_index - 1)
     next_episode = max(int(progress.get("next_episode_index", args.start_episode_index)), max_seen + 1)
     attempts = 0
     consecutive_empty = 0
     audit_path = reports / "episode_audit.csv"
 
-    while accepted < args.target_samples and attempts < args.max_episodes:
+    if accepted < args.target_samples or len(preanchor_by_episode) < args.min_episodes:
+        _atomic_json(reports / "manifest.json", {"schema_version": "trace_expert_raw_k2_v2", "complete": False})
+
+    while (accepted < args.target_samples or len(preanchor_by_episode) < args.min_episodes) and attempts < args.max_episodes:
         episode = next_episode
         case = cases[(episode // len(args.scenarios)) % len(cases)]
         scenario = args.scenarios[episode % len(args.scenarios)]
@@ -309,7 +249,9 @@ def main(args=None):
             except subprocess.TimeoutExpired:
                 status = -999
             try:
-                n, _ = _validate_preanchor_episode(preanchor_path)
+                n, actual_episode = _validate_preanchor_episode(preanchor_path)
+                if actual_episode != episode:
+                    raise ValueError(f"Worker episode id mismatch: {actual_episode} != {episode}")
                 preanchor_by_episode[episode] = (preanchor_path, n)
                 accepted += n
                 _write_audit(audit_path, [episode, case["model_id"], scenario, n, status, attempt,
@@ -327,82 +269,37 @@ def main(args=None):
         next_episode += 1
         attempts += 1
         _atomic_json(progress_path, {
-            "schema_version": "trace_unified_expert_collection_v2",
+            "schema_version": "trace_expert_raw_k2_v2",
             "next_episode_index": next_episode, "accepted_samples": accepted,
             "target_samples": args.target_samples, "preanchor_episode_count": len(preanchor_by_episode),
-            "final_shard_count": len(final_by_episode), "last_episode": episode,
+            "last_episode": episode,
         })
         if consecutive_empty >= args.max_consecutive_empty_episodes:
             raise RuntimeError(f"{consecutive_empty} consecutive episodes failed validation; see {logs_dir}")
 
-    # Offline A1 anchor generation is part of this same pipeline. Pre-anchor
-    # files remain internal staging data, never a second public dataset.
-    from highway_env.planner.a1_anchor_builder import A1AnchorBuilder
-    builder = A1AnchorBuilder(args.a1_anchors)
-    packaged = 0
-    for episode, (preanchor_path, _) in sorted(preanchor_by_episode.items()):
-        final_path = shards_dir / f"shard_{episode:06d}.npz"
-        if final_path.exists():
-            _validate_final_shard(final_path)
-            continue
-        n = _package_episode(preanchor_path, final_path, builder)
-        packaged += n
-        print(f"[A1 + SHARD] episode={episode} samples={n} -> {final_path.name}", flush=True)
-
-    final_by_episode = _existing_final(dataset)
-    final_samples = sum(v[1] for v in final_by_episode.values())
-    if final_by_episode:
-        split_result = split_shards(
-            dataset_root=dataset,
-            train_ratio=args.train_split_ratio,
-            val_ratio=args.val_split_ratio,
-            test_ratio=args.test_split_ratio,
-            seed=args.split_seed,
-        )
-    else:
-        split_result = {"train": [], "val": [], "test": []}
-
+    complete = accepted >= args.target_samples and len(preanchor_by_episode) >= args.min_episodes
     manifest = {
-        "schema_version": "trace_expert_road_geometry_a1_k2_v2",
-        "pipeline": "single_unified_Polynomial_TruckSim_batch_collector",
-        "expert": "Polynomial",
-        "plant": "TruckSim_longitudinal_lateral",
-        "anchor_generation": "offline_A1_Lattice_inside_unified_collection_pipeline",
+        "schema_version": "trace_expert_raw_k2_v2",
+        "pipeline": "single_Polynomial_TruckSim_batch_collector",
+        "expert": "Polynomial", "plant": "TruckSim_longitudinal_lateral",
+        "anchor_generation": "none; independent offline A1 dataset build",
         "sample_unit": "one controlled ego at one valid 10-Hz planning frame",
-        "samples": final_samples,
-        "target_samples": args.target_samples,
-        "episodes": len(final_by_episode),
-        "trucksim_physical_cases": len(cases),
-        "scenarios": args.scenarios,
+        "samples": accepted, "target_samples": args.target_samples,
+        "episodes": len(preanchor_by_episode), "min_episodes": args.min_episodes,
+        "episode_files": [{"name": p.name, "episode_index": e, "samples": n}
+                          for e, (p, n) in sorted(preanchor_by_episode.items())],
+        "trucksim_physical_cases": len(cases), "scenarios": args.scenarios,
         "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
         "road_geometry": args.road_geometry,
-        "a1_anchor_config": str(args.a1_config_path),
-        "a1_anchor_parameters": args.a1_anchors,
         "trajectory": {"sparse_shape": [8, 2], "dense_future_shape": [40, 2],
                        "visualization_shape": [41, 2], "dt_s": 0.1, "horizon_s": 4.0},
-        "koopman_context": {"state_history": [5, 5], "control_history": [4, 2],
-                            "pose0": [3], "payload_kg": "scalar", "road_mu": "scalar"},
-        "a1_anchor_fields": {"coarse_controls": [10, 40, 2], "coarse_trajectories": [10, 8, 2],
-                             "mode_valid_mask": [10]},
-        "splits": {k: len(v) for k, v in split_result.items()},
-        "complete": final_samples >= args.target_samples,
+        "split_ratios": contract["split_ratios"], "split_seed": args.split_seed,
+        "complete": complete,
     }
     _atomic_json(reports / "manifest.json", manifest)
     _atomic_json(progress_path, {"schema_version": manifest["schema_version"],
                                  "next_episode_index": next_episode,
-                                 "accepted_samples": final_samples,
-                                 "target_samples": args.target_samples,
-                                 "complete": manifest["complete"]})
-
-    if manifest["complete"]:
-        # Pre-anchor files are an internal staging representation only. Once every
-        # episode has been A1-enriched and atomically committed, remove staging.
-        import shutil
-        shutil.rmtree(preanchor_dir, ignore_errors=True)
-        try:
-            preanchor_dir.parent.rmdir()
-        except OSError:
-            pass
-    print(f"[DONE] unified TRACE dataset: {final_samples}/{args.target_samples} samples, "
-          f"{len(final_by_episode)} episode shards, complete={manifest['complete']}", flush=True)
-    return 0 if manifest["complete"] else 2
+                                 "accepted_samples": accepted, "target_samples": args.target_samples,
+                                 "complete": complete})
+    print(f"[RAW DONE] {accepted}/{args.target_samples} samples, {len(preanchor_by_episode)} episodes, complete={complete}", flush=True)
+    return 0 if complete else 2

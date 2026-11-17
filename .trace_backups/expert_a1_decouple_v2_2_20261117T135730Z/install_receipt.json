@@ -1,0 +1,24 @@
+{
+  "patch_id": "TRACE_EXPERT_A1_DECOUPLE_V2_2",
+  "installed_utc": "20261117T135730Z",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "written": [
+    "README.md",
+    "configs\\data\\expert_collection.yaml",
+    "data_pipeline\\expert_collection\\a1_dataset.py",
+    "data_pipeline\\expert_collection\\config.py",
+    "data_pipeline\\expert_collection\\runner.py",
+    "data_pipeline\\expert_collection\\worker.py",
+    "scripts\\README.md",
+    "scripts\\data\\build_a1_anchors.py",
+    "tests\\test_expert_a1_decouple.py",
+    "tests\\test_unified_expert_pipeline.py"
+  ],
+  "three_way_merged": [],
+  "overlapping_local_hunks_replaced_by_TRACE": {},
+  "deleted": [],
+  "changed_obsolete_archived_then_deleted": [],
+  "already_matching": [],
+  "backup_dir": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\expert_a1_decouple_v2_2_20261117T135730Z",
+  "validation": "compile + unified-entrypoint help smoke tests + stale-reference scan"
+}
