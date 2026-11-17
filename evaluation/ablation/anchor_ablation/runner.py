@@ -5,33 +5,40 @@ from collections import defaultdict
 import hashlib
 import json
 from pathlib import Path
-from typing import Dict, List, Mapping
+import random
+from typing import Mapping, Sequence
 
 import numpy as np
 import torch
 import yaml
+from torch.utils.data import Subset
 
+from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
 from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
-from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
+from highway_env.planner.diffusion.projection import JointTrajectoryProjector
 
 from .data import build_complete_frame_subset, make_loader
-from .feasibility import (
-    apply_intertruck_group_constraints,
-    evaluate_single_preprojection,
-    validate_feasibility_config,
+from .paper_feasibility import (
+    external_collision_free,
+    intertruck_group_collision_free,
+    road_geometry_from_features,
 )
-from .metrics import compute_anchor_metrics, geometry_valid_mask
-from .reporting import summarize_anchor_rows, write_csv, write_json, write_latex_table
-from .visualization import draw_anchor_ablation
+from .paper_metrics import (
+    compute_anchor_metrics,
+    compute_planning_minade,
+    geometry_valid_mask,
+)
+from .reporting import summarize, write_csv, write_json, write_latex_table
+from .visualization import draw_anchor_ablation, draw_diffusion_planning
 
 
 def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(block)
-    return h.hexdigest()
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _jsonable(value):
@@ -39,7 +46,7 @@ def _jsonable(value):
         return value.detach().cpu().tolist()
     if isinstance(value, np.ndarray):
         return value.tolist()
-    if isinstance(value, (np.generic,)):
+    if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, Path):
         return str(value)
@@ -56,40 +63,48 @@ def _meta_int(meta: Mapping, key: str, default=-1) -> int:
 
 
 def _features_to_device(features: dict, device: torch.device) -> dict:
-    return {k: (v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
-            for k, v in features.items()}
+    return {
+        key: value.to(device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+        for key, value in features.items()
+    }
 
 
-def _targets_to_device_context(targets: dict, device: torch.device) -> dict:
-    missing = [k for k in K2_CONTEXT if k not in targets]
+def _context_to_device(targets: dict, device: torch.device) -> dict:
+    missing = [key for key in K2_CONTEXT if key not in targets]
     if missing:
-        raise KeyError(f"TRACE K2 raw-feasibility evaluation requires synchronized context: {missing}")
-    return {k: targets[k].to(device, non_blocking=True) for k in K2_CONTEXT}
+        raise KeyError(f"TRACE JTP evaluation requires synchronized K2 context fields: {missing}")
+    return {key: targets[key].to(device, non_blocking=True) for key in K2_CONTEXT}
+
+
+def _slice_context(context: Mapping[str, torch.Tensor], index: int) -> dict:
+    return {key: value[index:index + 1] for key, value in context.items()}
 
 
 def _strategy(model) -> str:
-    return str((model.anchors_config or {}).get("strategy", "dynamic")).lower()
+    return str((getattr(model, "anchors_config", None) or {}).get("strategy", "dynamic")).lower()
 
 
 def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
+    """Load only requested methods, while checking shared architecture and K2 weights."""
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
     expected = {"A0": "fixed", "A1": "dynamic", "A2": "adaptive"}
     models, payloads, checkpoint_info = {}, {}, {}
     reference_signature = None
     reference_k2_hash = None
-    for method in checkpoints:
-        path = resolve_repo_file(checkpoints[method])
+    for method, checkpoint in checkpoints.items():
+        path = resolve_repo_file(checkpoint)
         if not path.is_file():
             raise FileNotFoundError(f"{method} diffusion checkpoint not found: {path}")
         model, payload = load_control_checkpoint(path, device="cpu")
         strategy = _strategy(model)
         if strategy != expected[method]:
-            raise ValueError(f"{method} checkpoint uses anchor strategy={strategy!r}; expected {expected[method]!r}")
-        if model.vehicle_model.kind != "koopman_k2":
-            raise ValueError(f"{method} checkpoint execution model must be koopman_k2 for TRACE feasibility")
-        if any(k.startswith("denoiser.mode_embedding.") for k in payload["model_state"]):
-            raise RuntimeError(f"{method} checkpoint still contains semantic mode_embedding")
+            raise ValueError(f"{method} checkpoint uses strategy={strategy!r}; expected {expected[method]!r}")
+        if getattr(model.vehicle_model, "kind", None) != "koopman_k2":
+            raise ValueError(f"{method} checkpoint must use the TRACE Koopman K2 execution model")
+        if any(key.startswith("denoiser.mode_embedding.") for key in payload["model_state"]):
+            raise RuntimeError(f"{method} checkpoint still contains deprecated semantic mode_embedding")
+
         signature = {
             "model_config": payload.get("model_config"),
             "control_config": payload.get("control_config"),
@@ -101,11 +116,14 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
         if reference_signature is None:
             reference_signature = signature_text
         elif signature_text != reference_signature:
-            raise ValueError(f"{method} checkpoint is not configuration-compatible with the other ablation models")
-        k2_state = {k: v for k, v in payload["model_state"].items()
-                    if k.startswith("vehicle_model.koopman.")}
+            raise ValueError("Selected diffusion checkpoints are not configuration-compatible")
+
+        k2_state = {
+            key: value for key, value in payload["model_state"].items()
+            if key.startswith("vehicle_model.koopman.")
+        }
         if not k2_state:
-            raise ValueError(f"{method} checkpoint does not contain frozen K2 weights in model_state")
+            raise ValueError(f"{method} checkpoint does not contain frozen K2 weights")
         digest = hashlib.sha256()
         for key in sorted(k2_state):
             digest.update(key.encode("utf-8"))
@@ -114,184 +132,361 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device):
         if reference_k2_hash is None:
             reference_k2_hash = k2_hash
         elif k2_hash != reference_k2_hash:
-            raise ValueError(f"{method} checkpoint uses a different frozen K2 model; raw-feasibility comparison is invalid")
+            raise ValueError("Selected A0/A1/A2 checkpoints use different frozen K2 weights")
+
         model.to(device).eval()
         models[method], payloads[method] = model, payload
         checkpoint_info[method] = {
-            "path": str(path), "sha256": _sha256(path), "strategy": strategy,
-            "epoch": payload.get("epoch"), "k2_state_sha256": k2_hash,
+            "path": str(path),
+            "sha256": _sha256(path),
+            "strategy": strategy,
+            "epoch": payload.get("epoch"),
+            "k2_state_sha256": k2_hash,
             "anchors_config": payload.get("anchors_config", {}),
         }
     return models, payloads, checkpoint_info
 
 
-def _teacher_config_from_a2(model) -> dict:
-    scorer_path = (model.anchors_config or {}).get("scorer_checkpoint")
+def _teacher_config_from_a2(model):
+    scorer_path = (getattr(model, "anchors_config", None) or {}).get("scorer_checkpoint")
     if not scorer_path:
-        raise ValueError("A2 checkpoint does not specify anchors.scorer_checkpoint")
+        raise ValueError("A2 diffusion checkpoint does not specify anchors.scorer_checkpoint")
     path = resolve_repo_file(scorer_path)
     if not path.is_file():
-        raise FileNotFoundError(f"A2 scorer checkpoint not found: {path}")
-    scorer_payload = torch.load(path, map_location="cpu", weights_only=True)
-    teacher = scorer_payload.get("teacher_config")
+        raise FileNotFoundError(f"A2 safety scorer checkpoint not found: {path}")
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    teacher = payload.get("teacher_config")
     if not isinstance(teacher, dict) or not teacher:
-        raise ValueError("A2 scorer checkpoint has no teacher_config; cannot reproduce common Safe Anchor Ratio labels")
-    return teacher
-
-
-def _anchor_batch_metrics(method: str, model, features: dict, targets: dict,
-                          expert_xy: torch.Tensor, teacher_cfg: dict):
-    prepared = model._prepare_anchors(features)
-    xy = prepared["coarse_trajectories"]
-    controls = prepared["coarse_controls"]
-    if xy.shape[1] != 10 or controls.shape[1] != 10:
-        raise ValueError(f"{method} must supply exactly 10 selected anchors; got {xy.shape[1]}")
-    valid = geometry_valid_mask(_strategy(model), prepared, targets, xy)
-    safety = anchor_safety_cost(prepared, xy, valid=valid, **teacher_cfg)
-    metrics = compute_anchor_metrics(
-        xy=xy, controls=controls, expert_xy=expert_xy,
-        valid=valid, safety=safety,
-        trajectory_weight=float(model.anchors_config.get("trajectory_weight", 1.0)),
-        control_weight=float(model.anchors_config.get("control_weight", 1.0)),
-    )
-    return prepared, valid, metrics
+        raise ValueError("A2 scorer checkpoint has no teacher_config")
+    return teacher, path
 
 
 def _extract_features_numpy(features: Mapping, index: int) -> dict:
-    names = ("ego_state", "agent_states", "agent_valid_mask", "map_polylines", "map_valid_mask", "target_point")
-    return {k: features[k][index].detach().cpu().numpy().copy() for k in names}
+    names = (
+        "ego_state", "agent_states", "agent_valid_mask",
+        "map_polylines", "map_valid_mask", "target_point",
+    )
+    missing = [key for key in names if key not in features]
+    if missing:
+        raise KeyError(f"Figure generation requires feature fields: {missing}")
+    return {
+        key: features[key][index].detach().cpu().numpy().copy()
+        for key in names
+    }
 
 
-def _run_feasibility_seed(method: str, model, loader, device: torch.device, seed: int,
-                          feasibility_cfg: dict, dt: float):
+def _world_to_local(world_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
+    pose0 = np.asarray(pose0, dtype=np.float64).reshape(3)
+    world = np.asarray(world_poses, dtype=np.float64)
+    dx, dy = world[:, 0] - pose0[0], world[:, 1] - pose0[1]
+    c, s = np.cos(pose0[2]), np.sin(pose0[2])
+    x = c * dx + s * dy
+    y = -s * dx + c * dy
+    yaw = world[:, 2] - pose0[2]
+    return np.stack((x, y, yaw), axis=-1)
+
+
+def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
+                                 num_frames: int, seed: int):
+    """Use only synchronized frames where every A1 ego has K geometric anchors."""
+    groups = defaultdict(list)
+    for local_index in range(len(subset)):
+        features, _targets, meta = subset[local_index]
+        if "coarse_trajectories" not in features:
+            raise KeyError(
+                "A1 anchor filtering requires dataset feature 'coarse_trajectories'; "
+                "the current expert shard must contain paired dynamic anchors."
+            )
+        xy = features["coarse_trajectories"]
+        if isinstance(xy, torch.Tensor):
+            xy = xy.detach().cpu().numpy()
+        xy = np.asarray(xy, dtype=np.float64)
+        if xy.shape != (expected_anchor_count, 8, 2):
+            raise ValueError(
+                f"A1 stored anchors must be [{expected_anchor_count},8,2], got {xy.shape}"
+            )
+        path_length = np.linalg.norm(np.diff(xy, axis=1), axis=-1).sum(axis=-1)
+        valid = np.isfinite(xy).all(axis=(-1, -2)) & (path_length > 0.5)
+        key = (_meta_int(meta, "episode_index"), _meta_int(meta, "frame_index"))
+        groups[key].append((local_index, bool(valid.sum() == expected_anchor_count)))
+
+    complete_keys = sorted(key for key, entries in groups.items() if all(ok for _, ok in entries))
+    skipped_keys = sorted(key for key, entries in groups.items() if not all(ok for _, ok in entries))
+    if not complete_keys:
+        raise RuntimeError(
+            "No synchronized frames contain ten geometrically instantiated A1 anchors for every ego. "
+            "Inspect/refill the paired dynamic-anchor data; unavailable zero-filled slots must not be marked valid."
+        )
+    if num_frames > 0 and num_frames < len(complete_keys):
+        rng = random.Random(int(seed))
+        selected_keys = sorted(rng.sample(complete_keys, int(num_frames)))
+    else:
+        selected_keys = complete_keys
+
+    selected_local = [
+        index for key in selected_keys for index, _ in groups[key]
+    ]
+    original_indices = [subset.indices[index] for index in selected_local]
+    filtered = Subset(subset.dataset, original_indices)
+    return filtered, {
+        "a1_full_anchor_frames_available": len(groups),
+        "a1_full_anchor_frames_retained_before_sampling": len(complete_keys),
+        "a1_full_anchor_frames_skipped": len(skipped_keys),
+        "a1_selected_frames": len(selected_keys),
+        "a1_common_subset_samples": len(filtered),
+        "a1_skipped_frame_examples": skipped_keys[:20],
+        "a1_mode_valid_mask_ignored_for_anchor_quality": True,
+        "a1_geometry_rule": f"finite XY and travelled path length > 0.5 m; exactly {expected_anchor_count} anchors",
+    }
+
+
+def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, figure_meta):
+    rows, figure_payload = [], None
+    if hasattr(model, "eval"):
+        model.eval()
+    with torch.no_grad():
+        for features_cpu, targets_cpu, metadata in loader:
+            features = _features_to_device(features_cpu, device)
+            expert_xy = targets_cpu["trajectory"].to(device)
+            prepared = model._prepare_anchors(features)
+            xy = prepared["coarse_trajectories"]
+            controls = prepared["coarse_controls"]
+            valid = geometry_valid_mask(_strategy(model), prepared, targets_cpu, xy)
+            safety = anchor_safety_cost(prepared, xy, valid=valid, **teacher_cfg)
+            metrics = compute_anchor_metrics(
+                xy=xy,
+                controls=controls,
+                expert_xy=expert_xy,
+                valid=valid,
+                safety=safety,
+                expected_anchor_count=expected_count,
+            )
+            for index, meta in enumerate(metadata):
+                key = (
+                    _meta_int(meta, "episode_index"),
+                    _meta_int(meta, "frame_index"),
+                    _meta_int(meta, "ego_index"),
+                )
+                rows.append({
+                    "method": method,
+                    "episode_index": key[0],
+                    "frame_index": key[1],
+                    "ego_index": key[2],
+                    "dataset_seed": _meta_int(meta, "seed", -1),
+                    "anchor_minade_m": float(metrics["anchor_minade_m"][index].cpu()),
+                    "safe_ratio": float(metrics["safe_ratio"][index].cpu()),
+                    "safe_anchor_count": int(metrics["safe_anchor_count"][index].cpu()),
+                    "valid_anchor_count": int(metrics["valid_anchor_count"][index].cpu()),
+                    "trajectory_diversity_m": float(metrics["trajectory_diversity_m"][index].cpu()),
+                    "control_diversity_normalized": float(metrics["control_diversity_normalized"][index].cpu()),
+                })
+                if key == figure_meta:
+                    figure_payload = {
+                        "features": _extract_features_numpy(prepared, index),
+                        "expert_xy": expert_xy[index].detach().cpu().numpy(),
+                        "anchors_xy": xy[index].detach().cpu().numpy(),
+                        "valid": valid[index].detach().cpu().numpy(),
+                    }
+    if not rows:
+        raise RuntimeError(f"{method} anchor evaluation produced no samples")
+    return rows, figure_payload
+
+
+def _planning_seed_pass(method, model, projector, loader, device, seed,
+                        jtp_cfg, figure_meta):
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
-    pending = defaultdict(list)
-    rows = []
+    rows, figure_payload = [], None
     model.eval()
     with torch.no_grad():
         for features_cpu, targets_cpu, metadata in loader:
             features = _features_to_device(features_cpu, device)
-            context = _targets_to_device_context(targets_cpu, device)
+            context = _context_to_device(targets_cpu, device)
+            expert_xy = targets_cpu["trajectory"].to(device)
             prepared = model._prepare_anchors(features)
             controls_all = model._sample_controls(prepared, generator=generator)
             prediction = model._all_predictions(controls_all, prepared, context)
-            if prediction.get("states") is None or prediction.get("ltr") is None:
-                raise RuntimeError("K2 execution must return chassis states and LTR for full TRACE feasibility")
-            selected, _ = model._select_goal_endpoint_mode(prediction["poses"], prepared)
+            poses_all = prediction["poses"]
+            if poses_all.ndim != 4 or poses_all.shape[-1] != 3:
+                raise ValueError(f"Expected diffusion K2 poses [B,M,H+1,3], got {tuple(poses_all.shape)}")
+
+            selected, _ = model._select_goal_endpoint_mode(poses_all, prepared)
             batch_index = torch.arange(controls_all.shape[0], device=device)
-            controls = controls_all[batch_index, selected]
-            poses = prediction["poses"][batch_index, selected]
-            states = prediction["states"][batch_index, selected]
-            ltr = prediction["ltr"][batch_index, selected]
-            for i, meta in enumerate(metadata):
-                key = (_meta_int(meta, "episode_index"), _meta_int(meta, "frame_index"),
-                       _meta_int(meta, "seed", -1))
-                plan_features = _extract_features_numpy(prepared, i)
-                plan = {
-                    "poses": poses[i].detach().cpu().numpy(),
-                    "controls": controls[i].detach().cpu().numpy(),
-                    "states": states[i].detach().cpu().numpy(),
-                    "ltr": ltr[i].detach().cpu().numpy(),
-                    "features": plan_features,
-                    "road_mu": float(context["koopman_road_mu"][i].detach().cpu().reshape(-1)[0]),
-                    "payload_kg": float(context["koopman_payload_kg"][i].detach().cpu().reshape(-1)[0]),
-                    "pose0": context["koopman_pose0_si"][i].detach().cpu().numpy(),
-                }
-                feasibility = evaluate_single_preprojection(plan, feasibility_cfg, dt=dt)
-                controlled_count = int((prepared["agent_valid_mask"][i].bool() &
-                                         (prepared["agent_states"][i, :, 10] > 0.5)).sum().item())
-                record = {
-                    "method": method, "seed": int(seed),
-                    "episode_index": key[0], "frame_index": key[1], "dataset_seed": key[2],
-                    "ego_index": _meta_int(meta, "ego_index"),
-                    "expected_ego_count": controlled_count + 1,
-                    "feasibility": feasibility,
-                    "poses": plan["poses"], "pose0": plan["pose0"],
-                }
-                pending[key].append(record)
-    for key, group in pending.items():
-        expected_values = {int(x["expected_ego_count"]) for x in group}
-        expected = max(expected_values)
-        ego_ids = [int(x["ego_index"]) for x in group]
-        if len(expected_values) != 1 or len(group) != expected or len(set(ego_ids)) != expected:
-            raise RuntimeError(
-                f"Incomplete synchronized platoon frame for inter-truck feasibility: "
-                f"frame={key}, observed={len(group)}, expected={expected}, ego_ids={ego_ids}"
+            selected_controls = controls_all[batch_index, selected]
+            selected_poses = poses_all[batch_index, selected]
+            candidate_xy = poses_all[:, :, 5::5, :2]
+            if candidate_xy.shape[-2:] != (8, 2):
+                raise ValueError(
+                    f"Expected eight 0.5-s diffusion trajectory points, got {tuple(candidate_xy.shape)}"
+                )
+            valid_modes = geometry_valid_mask(
+                _strategy(model), prepared, targets_cpu, prepared["coarse_trajectories"]
             )
-        plans = [{"poses": x["poses"], "pose0": x["pose0"], "feasibility": x["feasibility"]}
-                 for x in group]
-        apply_intertruck_group_constraints(plans, feasibility_cfg)
-        for original, updated in zip(group, plans):
-            original["feasibility"] = updated["feasibility"]
-            f = original["feasibility"]
-            rows.append({
-                "method": method, "seed": int(seed),
-                "episode_index": original["episode_index"],
-                "frame_index": original["frame_index"],
-                "dataset_seed": original["dataset_seed"],
-                "ego_index": original["ego_index"],
-                "feasible": bool(f["feasible"]),
-                **{k: v for k, v in f.items() if isinstance(v, (bool, int, float, str))},
-            })
-    return rows
+            planning_minade = compute_planning_minade(candidate_xy, expert_xy, valid_modes)
+
+            for index, meta in enumerate(metadata):
+                key = (
+                    _meta_int(meta, "episode_index"),
+                    _meta_int(meta, "frame_index"),
+                    _meta_int(meta, "ego_index"),
+                )
+                features_np = _extract_features_numpy(prepared, index)
+                context_i = _slice_context(context, index)
+                pose0 = context_i["koopman_pose0_si"][0].detach().cpu().numpy()
+                road = road_geometry_from_features(features_np, pose0)
+                nominal = selected_controls[index:index + 1].detach()
+                jtp_pre = projector.evaluate_preprojection(nominal, context_i, road)
+                jtp_result = projector.project(nominal, context_i, road)
+
+                raw_world = jtp_pre["trajectories"][0].detach().cpu().numpy()
+                projected_world = jtp_result.trajectories[0].detach().cpu().numpy()
+                raw_local = selected_poses[index].detach().cpu().numpy()
+                external_ok = external_collision_free(raw_local, features_np, jtp_cfg)
+                projection_success = bool(jtp_result.projector_constraints_satisfied)
+                correction = (
+                    float(np.linalg.norm(
+                        projected_world[1:, :2] - raw_world[1:, :2], axis=-1
+                    ).mean())
+                    if projection_success else float("nan")
+                )
+                jtp_metrics = jtp_pre["metrics"]
+                record = {
+                    "method": method,
+                    "seed": int(seed),
+                    "episode_index": key[0],
+                    "frame_index": key[1],
+                    "ego_index": key[2],
+                    "dataset_seed": _meta_int(meta, "seed", -1),
+                    "planning_minade_m": float(planning_minade[index].cpu()),
+                    "jtp_constraints_feasible": bool(jtp_pre["projector_constraints_satisfied"]),
+                    "external_collision_feasible": bool(external_ok),
+                    "intertruck_collision_feasible": True,
+                    "preprojection_feasible": bool(
+                        jtp_pre["projector_constraints_satisfied"] and external_ok
+                    ),
+                    "jtp_max_violation": float(jtp_metrics.get("max_violation", float("nan"))),
+                    "jtp_violation_count_by_group": jtp_metrics.get("violation_count_by_group", {}),
+                    "projection_success": projection_success,
+                    "projection_status": str(jtp_result.status),
+                    "projection_correction_m": correction,
+                    "projection_iterations": int(jtp_result.iterations),
+                    "_raw_world_poses": raw_world,
+                }
+                rows.append(record)
+
+                if figure_payload is None and key == figure_meta:
+                    raw_local_sampled = raw_local[5::5, :2]
+                    projected_local = _world_to_local(projected_world, pose0)[5::5, :2]
+                    figure_payload = {
+                        "features": features_np,
+                        "expert_xy": expert_xy[index].detach().cpu().numpy(),
+                        "anchors_xy": prepared["coarse_trajectories"][index].detach().cpu().numpy(),
+                        "valid": valid_modes[index].detach().cpu().numpy(),
+                        "diffusion_candidates": candidate_xy[index].detach().cpu().numpy(),
+                        "diffusion_valid": valid_modes[index].detach().cpu().numpy(),
+                        "selected_raw_xy": raw_local_sampled,
+                        "selected_projected_xy": projected_local,
+                    }
+    if not rows:
+        raise RuntimeError(f"{method} diffusion feasibility evaluation produced no samples")
+    return rows, figure_payload
 
 
-def _parse_seeds(text: str):
-    values = [int(x.strip()) for x in str(text).split(",") if x.strip()]
+def _apply_synchronized_intertruck(rows, jtp_cfg):
+    groups = defaultdict(list)
+    for row in rows:
+        key = (
+            row["seed"], row["episode_index"], row["frame_index"], row["dataset_seed"]
+        )
+        groups[key].append(row)
+    for key, group in groups.items():
+        collision_free = (
+            intertruck_group_collision_free(
+                [{"raw_world_poses": item["_raw_world_poses"]} for item in group],
+                jtp_cfg,
+            )
+            if len(group) > 1 else True
+        )
+        for item in group:
+            item["intertruck_collision_feasible"] = bool(collision_free)
+            item["preprojection_feasible"] = bool(
+                item["jtp_constraints_feasible"]
+                and item["external_collision_feasible"]
+                and collision_free
+            )
+            item.pop("_raw_world_poses", None)
+
+
+def _parse_seeds(text: str) -> list[int]:
+    values = [int(value.strip()) for value in str(text).split(",") if value.strip()]
     if not values:
-        raise ValueError("At least one inference seed is required")
+        raise ValueError("At least one diffusion inference seed is required")
     return values
 
 
 def run(args=None):
-    parser = argparse.ArgumentParser(description="TRACE A0/A1/A2 Adaptive Anchor Ablation Evaluator")
+    parser = argparse.ArgumentParser(
+        description="TRACE A0/A1/A2 Adaptive Anchor Ablation (anchors / feasibility / all)"
+    )
     parser.add_argument("--config", default="configs/evaluation/anchor_ablation.yaml")
     parser.add_argument("--checkpoint-a0")
     parser.add_argument("--checkpoint-a1")
     parser.add_argument("--checkpoint-a2")
-    parser.add_argument("--stage", choices=("anchors", "feasibility", "all"), default=None,
-                        help="anchors needs no diffusion checkpoints; feasibility checks trained planners")
-    parser.add_argument("--methods", nargs='+', choices=("A0", "A1", "A2"), default=None)
+    parser.add_argument("--stage", choices=("anchors", "feasibility", "all"), default=None)
+    parser.add_argument("--methods", nargs="+", choices=("A0", "A1", "A2"), default=None)
     parser.add_argument("--a0-bank", default=None)
     parser.add_argument("--a2-scorer", default=None)
-    parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml",
-                        help="Common safety-teacher config, and A2 selection settings for anchors stage")
+    parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("train", "val", "test"), default=None)
-    parser.add_argument("--num-frames", type=int, default=None, help="0 evaluates all complete synchronized frames")
+    parser.add_argument("--num-frames", type=int, default=None,
+                        help="0 evaluates all complete synchronized frames")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seeds", default=None, help="Comma-separated diffusion inference seeds")
     parser.add_argument("--sample-seed", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--feasibility-config", default="configs/evaluation/trace_feasibility.yaml")
+    parser.add_argument("--jtp-config", default=None,
+                        help="JTP configuration used for pre-projection feasibility and projection")
+    parser.add_argument("--feasibility-config", default=None,
+                        help="Deprecated alias for --jtp-config")
     parser.add_argument("--skip-feasibility", action="store_true",
-                        help="Only calculate the three Anchor metrics. Feasibility is exported as --.")
+                        help="Compatibility alias for --stage anchors")
     parsed = parser.parse_args(args)
+
+    if parsed.jtp_config and parsed.feasibility_config:
+        parser.error("Specify only one of --jtp-config and --feasibility-config")
+    if parsed.feasibility_config:
+        parsed.jtp_config = parsed.feasibility_config
 
     config_path = resolve_repo_file(parsed.config)
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
-        raise ValueError("Anchor ablation config must be a YAML mapping")
-    stage = parsed.stage or cfg.get('stage', 'all')
+        raise ValueError("Anchor Ablation config must be a YAML mapping")
+
+    stage = parsed.stage or cfg.get("stage", "all")
     if parsed.skip_feasibility:
-        if parsed.stage not in (None, 'anchors'):
-            parser.error('--skip-feasibility conflicts with --stage; use --stage anchors')
-        stage = 'anchors'
-    methods = parsed.methods or cfg.get('methods', ['A0', 'A1', 'A2'])
-    if not methods or len(set(methods)) != len(methods) or any(m not in ('A0', 'A1', 'A2') for m in methods):
-        parser.error('methods must be a nonempty list of unique A0/A1/A2 names')
-    if stage not in ('anchors', 'feasibility', 'all'):
-        parser.error('stage must be anchors, feasibility, or all')
+        if parsed.stage not in (None, "anchors"):
+            parser.error("--skip-feasibility conflicts with --stage; use --stage anchors")
+        stage = "anchors"
+    if stage not in ("anchors", "feasibility", "all"):
+        parser.error("stage must be anchors, feasibility, or all")
+
+    methods = parsed.methods or cfg.get("methods", ["A0", "A1", "A2"])
+    if not methods or len(set(methods)) != len(methods):
+        parser.error("--methods must contain one or more unique methods")
+    if any(method not in ("A0", "A1", "A2") for method in methods):
+        parser.error("methods must be selected from A0/A1/A2")
+
     checkpoint_paths = {}
-    if stage != 'anchors':
+    if stage != "anchors":
         for method in methods:
-            value = getattr(parsed, f'checkpoint_{method.lower()}')
+            value = getattr(parsed, f"checkpoint_{method.lower()}")
             if not value:
-                parser.error(f'--checkpoint-{method.lower()} is required for {stage}')
+                parser.error(f"--checkpoint-{method.lower()} is required for stage={stage}")
             checkpoint_paths[method] = Path(value)
+
     dataset_root = resolve_repo_file(parsed.dataset_root or cfg["dataset_root"])
     split = parsed.split or cfg.get("split", "test")
     num_frames = int(parsed.num_frames if parsed.num_frames is not None else cfg.get("num_frames", 0))
@@ -299,152 +494,214 @@ def run(args=None):
     workers = int(parsed.num_workers if parsed.num_workers is not None else cfg.get("num_workers", 0))
     seeds = _parse_seeds(parsed.seeds if parsed.seeds is not None else cfg.get("seeds", "0,1,2"))
     sample_seed = int(parsed.sample_seed if parsed.sample_seed is not None else cfg.get("sample_seed", 2026))
-    output_dir = resolve_repo_file(parsed.output_dir or cfg.get("output_dir", "outputs/anchor_ablation/evaluation"))
-    if parsed.output_dir is None:
-        output_dir = output_dir / stage / '_'.join(methods)
     device_name = parsed.device or cfg.get("device", "auto")
-    device = torch.device("cuda" if device_name == "auto" and torch.cuda.is_available()
-                          else "cpu" if device_name == "auto" else device_name)
-
-    feasibility_cfg = None
-    if stage != 'anchors':
-        feasibility_path = resolve_repo_file(parsed.feasibility_config)
-        feasibility_cfg = yaml.safe_load(feasibility_path.read_text(encoding="utf-8"))
-        validate_feasibility_config(feasibility_cfg)
-
-    subset, data_manifest = build_complete_frame_subset(
-        dataset_root, split, num_frames=num_frames, seed=sample_seed,
-        max_samples=cfg.get("max_samples"),
+    device = torch.device(
+        "cuda" if device_name == "auto" and torch.cuda.is_available()
+        else "cpu" if device_name == "auto" else device_name
     )
+
+    base_output = resolve_repo_file(parsed.output_dir or cfg.get(
+        "output_dir", "outputs/anchor_ablation/evaluation"
+    ))
+    output_dir = base_output if parsed.output_dir else base_output / stage / "_".join(methods)
+
+    jtp_path = None
+    jtp_cfg = None
+    if stage != "anchors":
+        jtp_path = resolve_repo_file(
+            parsed.jtp_config or cfg.get("jtp_config", "configs/projection/jtp.yaml")
+        )
+        if not jtp_path.is_file():
+            raise FileNotFoundError(f"JTP config not found: {jtp_path}")
+        jtp_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
+
+    # If A1 participates, first identify all complete frames, then remove frames
+    # where any A1 ego has a geometrically unavailable anchor. Sampling occurs
+    # after this common-subset filter so the requested frame count is retained.
+    if "A1" in methods:
+        subset, data_manifest = build_complete_frame_subset(
+            dataset_root, split, num_frames=0, seed=sample_seed,
+            max_samples=cfg.get("max_samples"),
+        )
+        subset, a1_manifest = _filter_a1_and_sample_frames(
+            subset,
+            expected_anchor_count=int(cfg.get("num_anchors", 10)),
+            num_frames=num_frames,
+            seed=sample_seed,
+        )
+        data_manifest.update(a1_manifest)
+    else:
+        subset, data_manifest = build_complete_frame_subset(
+            dataset_root, split, num_frames=num_frames, seed=sample_seed,
+            max_samples=cfg.get("max_samples"),
+        )
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
-    checkpoint_info = {}
-    source_info = {}
-    teacher_cfg = None
-    if stage == 'anchors':
+    first_batch = next(iter(loader))
+    first_meta = first_batch[2][0]
+    figure_meta = (
+        _meta_int(first_meta, "episode_index"),
+        _meta_int(first_meta, "frame_index"),
+        _meta_int(first_meta, "ego_index"),
+    )
+
+    checkpoint_info, source_info = {}, {}
+    scorer_path = None
+    if stage == "anchors":
         from .sources import build_sources
         models, teacher_cfg, source_info = build_sources(
-            methods, cfg, bank_path=parsed.a0_bank, scorer_path=parsed.a2_scorer,
-            scorer_config=parsed.scorer_config, device=device)
+            methods, cfg,
+            bank_path=parsed.a0_bank,
+            scorer_path=parsed.a2_scorer,
+            scorer_config=parsed.scorer_config,
+            device=device,
+        )
         for info in source_info.values():
-            if info.get('scorer_path'):
-                info['scorer_sha256'] = _sha256(Path(info['scorer_path']))
+            if info.get("scorer_path"):
+                info["scorer_sha256"] = _sha256(Path(info["scorer_path"]))
+                scorer_path = info["scorer_path"]
     else:
-        models, _, checkpoint_info = _load_models(checkpoint_paths, device)
-        if stage == 'all':
-            if 'A2' in models:
-                teacher_cfg = _teacher_config_from_a2(models['A2'])
-            else:
-                teacher_cfg = yaml.safe_load(resolve_repo_file(parsed.scorer_config).read_text(encoding='utf-8'))['teacher']
-    if feasibility_cfg is not None:
-        control_cfg = feasibility_cfg.setdefault("control", {})
-        if control_cfg.get("acceleration_min_mps2") is None:
-            control_cfg["acceleration_min_mps2"] = -float(models[methods[0]].ctrl_cfg.max_accel_mps2)
-        if control_cfg.get("acceleration_max_mps2") is None:
-            control_cfg["acceleration_max_mps2"] = float(models[methods[0]].ctrl_cfg.max_accel_mps2)
-        if control_cfg.get("steering_min_rad") is None:
-            control_cfg["steering_min_rad"] = -float(models[methods[0]].ctrl_cfg.max_steer_rad)
-        if control_cfg.get("steering_max_rad") is None:
-            control_cfg["steering_max_rad"] = float(models[methods[0]].ctrl_cfg.max_steer_rad)
-    anchor_rows = []
-    feasibility_rows = []
-    figure_payload = {}
-    figure_meta = None
-    dt = float(models[methods[0]].ctrl_cfg.dt) if stage != 'anchors' else None
+        models, _payloads, checkpoint_info = _load_models(checkpoint_paths, device)
+        if stage == "all" and "A2" in models:
+            teacher_cfg, scorer_path = _teacher_config_from_a2(models["A2"])
+        elif stage == "all":
+            scorer_cfg_path = resolve_repo_file(parsed.scorer_config)
+            scorer_cfg = yaml.safe_load(scorer_cfg_path.read_text(encoding="utf-8"))
+            teacher_cfg = scorer_cfg["teacher"]
+        else:
+            teacher_cfg = None
+        for method, model in models.items():
+            source_info[method] = {
+                "strategy": _strategy(model),
+                "anchors_config": getattr(model, "anchors_config", {}),
+            }
+            if method == "A0" and getattr(model, "anchor_manager", None) is not None:
+                source_info[method]["fixed_anchor_metadata"] = getattr(
+                    model.anchor_manager, "metadata", {}
+                )
 
-    # Same selected scenes, batch order, and random seeds are used for all methods.
+    anchor_rows, planning_rows = [], []
+    anchor_figures, planning_figures = {}, {}
+    projector_info = {}
+
     for method in methods:
         model = models[method]
-        if stage != 'anchors':
-            model.eval()
-        if stage != 'feasibility':
-            with torch.no_grad():
-                seen_anchor = 0
-                for features_cpu, targets_cpu, metadata in loader:
-                    features = _features_to_device(features_cpu, device)
-                    expert_xy = targets_cpu["trajectory"].to(device)
-                    prepared, valid, metrics = _anchor_batch_metrics(
-                        method, model, features, targets_cpu, expert_xy, teacher_cfg)
-                    B = expert_xy.shape[0]
-                    controls = prepared["coarse_controls"]
-                    xy = prepared["coarse_trajectories"]
-                    for i, meta in enumerate(metadata):
-                        episode = _meta_int(meta, "episode_index")
-                        frame = _meta_int(meta, "frame_index")
-                        ego_index = _meta_int(meta, "ego_index")
-                        row = {
-                            "method": method,
-                            "episode_index": episode,
-                            "frame_index": frame,
-                            "ego_index": ego_index,
-                            "dataset_seed": _meta_int(meta, "seed", -1),
-                            "minade_m": float(metrics["minade_m"][i].detach().cpu()),
-                            "safe_anchor_count": int(metrics["safe_count"][i].detach().cpu()),
-                            "valid_anchor_count": int(metrics["valid_anchor_count"][i].detach().cpu()),
-                            "safe_ratio": float(metrics["safe_ratio"][i].detach().cpu()),
-                            "diversity_m": float(metrics["diversity_m"][i].detach().cpu()),
-                            "control_diversity_normalized": float(metrics["control_diversity_normalized"][i].detach().cpu()),
-                            "joint_diversity_normalized": float(metrics["joint_diversity_normalized"][i].detach().cpu()),
-                        }
-                        anchor_rows.append(row)
-                        if figure_meta is None:
-                            figure_meta = (episode, frame, ego_index)
-                        if (episode, frame, ego_index) == figure_meta:
-                            figure_payload[method] = {
-                                "features": _extract_features_numpy(prepared, i),
-                                "expert_xy": expert_xy[i].detach().cpu().numpy(),
-                                "anchors_xy": xy[i].detach().cpu().numpy(),
-                                "valid": valid[i].detach().cpu().numpy(),
-                            }
-                        seen_anchor += 1
-                if seen_anchor != len(subset):
-                    raise RuntimeError(f"{method} anchor pass processed {seen_anchor} samples, expected {len(subset)}")
+        if stage != "feasibility":
+            print(f"[ANCHOR ABLATION] anchor quality: {method}", flush=True)
+            method_anchor_rows, anchor_figure = _anchor_pass(
+                method, model, loader, device, teacher_cfg,
+                int(cfg.get("num_anchors", 10)), figure_meta,
+            )
+            anchor_rows.extend(method_anchor_rows)
+            if anchor_figure is None:
+                raise RuntimeError(f"{method} did not produce the common representative anchor scene")
+            anchor_figures[method] = anchor_figure
 
-        if feasibility_cfg is not None:
-            for seed in seeds:
-                print(f"[ANCHOR ABLATION] feasibility method={method} seed={seed}", flush=True)
-                feasibility_rows.extend(_run_feasibility_seed(
-                    method, model, loader, device, seed, feasibility_cfg, dt))
+        if stage != "anchors":
+            print(f"[ANCHOR ABLATION] diffusion feasibility: {method}", flush=True)
+            projector = JointTrajectoryProjector(model.vehicle_model, config=jtp_path)
+            projector_info[method] = {
+                "config_path": str(jtp_path),
+                "constraint_families": ["stability", "road", "curvature", "control"],
+                "external_collision_evaluated_separately": True,
+                "intertruck_collision_evaluated_separately": True,
+            }
+            for seed_index, seed in enumerate(seeds):
+                print(f"[ANCHOR ABLATION] planning method={method}, seed={seed}", flush=True)
+                method_rows, planning_figure = _planning_seed_pass(
+                    method, model, projector, loader, device, seed,
+                    jtp_cfg, figure_meta,
+                )
+                _apply_synchronized_intertruck(method_rows, jtp_cfg)
+                planning_rows.extend(method_rows)
+                if seed_index == 0:
+                    if planning_figure is None:
+                        raise RuntimeError(
+                            f"{method} did not produce the common representative planning scene"
+                        )
+                    planning_figures[method] = planning_figure
 
-    summary = summarize_anchor_rows(anchor_rows, feasibility_rows)
+    summary = summarize(anchor_rows, planning_rows, methods=methods)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if stage != 'feasibility':
-        write_csv(output_dir / "anchor_metrics_per_sample.csv", anchor_rows)
-        if len(figure_payload) != len(methods):
-            raise RuntimeError('Could not collect the same representative scene for selected methods')
-        draw_anchor_ablation(output_dir / "anchor_ablation.pdf", figure_payload,
-                             sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}")
-    if feasibility_cfg is not None:
-        write_csv(output_dir / "feasibility_per_sample.csv", feasibility_rows)
+
+    if stage != "feasibility":
+        write_csv(output_dir / "anchor_quality_per_sample.csv", anchor_rows)
+        draw_anchor_ablation(
+            output_dir / "anchor_ablation.pdf",
+            anchor_figures,
+            sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}",
+        )
+    if stage != "anchors":
+        write_csv(output_dir / "planning_per_sample.csv", planning_rows)
+        draw_diffusion_planning(
+            output_dir / "anchor_planning_ablation.pdf",
+            planning_figures,
+            sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}",
+        )
+
     write_csv(output_dir / "anchor_ablation_summary.csv", summary)
     write_latex_table(output_dir / "anchor_ablation_table.tex", summary)
 
+    completed_metrics = []
+    if stage != "feasibility":
+        completed_metrics.extend([
+            "anchor_minade_m", "safe_ratio_pct",
+            "trajectory_diversity_m", "control_diversity_normalized",
+        ])
+    if stage != "anchors":
+        completed_metrics.extend([
+            "planning_minade_m", "preprojection_feasibility_pct",
+            "projection_correction_m",
+        ])
+
     manifest = {
         "study": "TRACE Adaptive Anchor Ablation",
-        "stage": stage, "selected_methods": methods, "anchor_sources": source_info,
-        "methods": {"A0": "Fixed control-space K-means centroids",
-                    "A1": "Dynamic control sampling and kinematic propagation",
-                    "A2": "Safety scoring, Top-R prescreening and joint control/trajectory diversity selection"},
-        "paper_metrics": ((["minADE_m", "safe_anchor_ratio_pct", "diversity_m"] if stage != 'feasibility' else [])
-                          + (["feasibility_pct"] if feasibility_cfg is not None else [])),
-        "safe_anchor_definition": "Common A2 scorer teacher hard-safe label: constant-velocity collision plus drivable-lane corridor compliance; geometry-valid anchors form the denominator.",
-        "diversity_definition": "Mean pairwise trajectory ADE in metres for the paper table; normalized control/trajectory joint distance is retained as an auxiliary diagnostic.",
-        "feasibility_definition": "Selected diffusion execution trajectory, before MATP projection; full-horizon K2 yaw/sideslip/roll/LTR, road, curvature, external/inter-truck collision, and control/rate constraints.",
-        "feasibility_enabled": feasibility_cfg is not None,
-        "feasibility_config": str(resolve_repo_file(parsed.feasibility_config)) if feasibility_cfg is not None else None,
-        "feasibility_note": "Missing-stage metrics are reported as --; separate stages do not fabricate or merge results.",
+        "stage": stage,
+        "selected_methods": methods,
+        "evaluation_protocol": "staged; use --stage all for the complete seven-metric paper result",
+        "methods": {
+            "A0": "Fixed anchors generated from the configured fixed control-anchor bank and kinematic rollout",
+            "A1": "Dynamic control samples paired with expert data and kinematic propagation",
+            "A2": "Safety scoring, Top-R prescreening, and joint control/trajectory diversity selection",
+        },
+        "paper_metrics": [
+            "anchor_minade_m", "safe_ratio_pct", "trajectory_diversity_m",
+            "control_diversity_normalized", "planning_minade_m",
+            "preprojection_feasibility_pct", "projection_correction_m",
+        ],
+        "completed_metrics": completed_metrics,
+        "definitions": {
+            "anchor_minADE": "Minimum average displacement error over ten geometrically instantiated anchors",
+            "safe_ratio": "Hard-safe anchors divided by ten, using the common A2 safety teacher's constant-velocity collision and drivable-road corridor labels",
+            "trajectory_diversity": "Mean pairwise pointwise XY distance across anchor trajectories, in metres",
+            "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
+            "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point execution trajectories",
+            "preprojection_feasibility": "JTP nominal constraints plus independent constant-velocity external-actor and synchronized inter-truck collision checks, before projection",
+            "projection_correction": "Mean pointwise XY displacement between raw and successfully JTP-projected execution trajectories; projection success/failure is reported separately",
+        },
+        "jtp": projector_info,
+        "jtp_config": str(jtp_path) if jtp_path else None,
         "dataset": {"root": str(dataset_root), **data_manifest},
-        "seeds": seeds if feasibility_cfg is not None else [],
-        "figure_sample": ({"episode_index": figure_meta[0], "frame_index": figure_meta[1], "ego_index": figure_meta[2]} if figure_meta else None),
+        "split": split,
+        "inference_seeds": seeds if stage != "anchors" else [],
+        "scorer_checkpoint": str(scorer_path) if scorer_path else None,
+        "scorer_sha256": _sha256(Path(scorer_path)) if scorer_path else None,
         "checkpoints": checkpoint_info,
+        "anchor_sources": source_info,
         "a2_safety_teacher_config": teacher_cfg,
+        "figure_sample": {
+            "episode_index": figure_meta[0],
+            "frame_index": figure_meta[1],
+            "ego_index": figure_meta[2],
+        },
+        "projection_failures_reported_separately": True,
+        "summary": summary,
         "device": str(device),
         "batch_size": batch_size,
         "sample_seed": sample_seed,
-        "summary": summary,
     }
     write_json(output_dir / "evaluation_manifest.json", manifest)
     write_json(output_dir / "evaluation_summary.json", {"summary": summary, "manifest": manifest})
-    print("[ANCHOR ABLATION DONE]", output_dir, flush=True)
+    print(f"[ANCHOR ABLATION DONE] stage={stage} output={output_dir}", flush=True)
     for row in summary:
         print(f"[{row['method']}] {row}", flush=True)
     return {"summary": summary, "output_dir": str(output_dir), "manifest": manifest}

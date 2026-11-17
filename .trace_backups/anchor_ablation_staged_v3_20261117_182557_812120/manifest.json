@@ -1,0 +1,50 @@
+{
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "files": [
+    {
+      "path": "evaluation/ablation/anchor_ablation/paper_feasibility.py",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/paper_metrics.py",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/README.md",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/reporting.py",
+      "existed": true,
+      "backup": "files/evaluation/ablation/anchor_ablation/reporting.py"
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/runner.py",
+      "existed": true,
+      "backup": "files/evaluation/ablation/anchor_ablation/runner.py"
+    },
+    {
+      "path": "evaluation/ablation/anchor_ablation/visualization.py",
+      "existed": true,
+      "backup": "files/evaluation/ablation/anchor_ablation/visualization.py"
+    },
+    {
+      "path": "evaluation/ablation/README.md",
+      "existed": true,
+      "backup": "files/evaluation/ablation/README.md"
+    },
+    {
+      "path": "tests/test_anchor_ablation_staged_v3.py",
+      "existed": false,
+      "backup": null
+    },
+    {
+      "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+      "existed": true,
+      "backup": "files/highway_env/planner/diffusion/projection/joint_projector.py"
+    }
+  ]
+}

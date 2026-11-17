@@ -326,6 +326,47 @@ class JointTrajectoryProjector:
             "max_active_violation": float(residual.detach().max().cpu()),
         }
 
+    def evaluate_preprojection(self, nominal_controls: torch.Tensor, context: dict,
+                                road_geometry) -> dict:
+        """Evaluate nominal controls with the exact JTP constraints, without projection.
+
+        The method shares the same K2 rollout, road geometry, residuals,
+        normalization, and tolerance as :meth:`project`. It never modifies
+        the supplied controls and never performs a solver iteration.
+        External/inter-truck collision checks remain the responsibility of
+        the synchronized Anchor Ablation evaluator.
+        """
+        if (not torch.is_tensor(nominal_controls) or nominal_controls.ndim != 3
+                or nominal_controls.shape[-1] != 2):
+            raise ValueError("nominal_controls must be [N,K,2]")
+        if not nominal_controls.is_floating_point() or not torch.isfinite(nominal_controls).all():
+            raise ValueError("nominal_controls must be finite floating-point SI controls")
+        n, k, _ = nominal_controls.shape
+        if k != self.control_steps:
+            raise ValueError(f"Expected K={self.control_steps} control nodes, got {k}")
+        self._ensure_execution_device(nominal_controls.device, nominal_controls.dtype)
+        ctx = self._to_context(
+            context, n=n, device=nominal_controls.device, dtype=nominal_controls.dtype
+        )
+        roads = self._road_list(
+            road_geometry, n, device=nominal_controls.device, dtype=nominal_controls.dtype
+        )
+        with torch.no_grad():
+            evaluated = self._evaluate(nominal_controls.detach(), ctx, roads)
+        return {
+            "controls": nominal_controls.detach(),
+            "trajectories": evaluated.rollout["trajectory"].detach(),
+            "states": evaluated.rollout["states"].detach(),
+            "ltr": evaluated.rollout["ltr"].detach(),
+            "projector_constraints_satisfied": bool(
+                evaluated.metrics["projector_constraints_satisfied"]
+            ),
+            "metrics": evaluated.metrics,
+            "constraint_groups": {
+                key: value.detach() for key, value in evaluated.groups.items()
+            },
+        }
+
     def project(self, nominal_controls: torch.Tensor, context: dict,
                 road_geometry: RoadGeometry | list[RoadGeometry]) -> JTPResult:
         """Project nominal controls while preserving Koopman execution consistency.
