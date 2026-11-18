@@ -114,6 +114,47 @@ class A1AnchorManager:
                 or not manifest.get("complete")):
             raise ValueError("Selected dataset is not a completed TRACE A1/K2 dataset")
         recorded_a1 = manifest.get("a1_anchor_parameters") or {}
+        recorded_fields = manifest.get("a1_anchor_fields") or {}
+
+        # The authoritative stored tensor contract is a1_anchor_fields. Always
+        # validate its three shapes, then use the inferred K when the parameter
+        # was omitted by an earlier A1 manifest writer.
+        controls_shape = recorded_fields.get("coarse_controls")
+        trajectories_shape = recorded_fields.get("coarse_trajectories")
+        valid_shape = recorded_fields.get("mode_valid_mask")
+        if not (
+            isinstance(controls_shape, (list, tuple)) and len(controls_shape) == 3
+            and isinstance(trajectories_shape, (list, tuple)) and len(trajectories_shape) == 3
+            and isinstance(valid_shape, (list, tuple)) and len(valid_shape) == 1
+        ):
+            raise ValueError(
+                "A1 dataset manifest must declare a1_anchor_fields shapes for "
+                "coarse_controls, coarse_trajectories, and mode_valid_mask"
+            )
+        inferred_k = int(controls_shape[0])
+        expected_shapes = (
+            (tuple(controls_shape), (inferred_k, self.CONTROL_STEPS, 2), "coarse_controls"),
+            (tuple(trajectories_shape), (inferred_k, self.SPARSE_STEPS, 2), "coarse_trajectories"),
+            (tuple(valid_shape), (inferred_k,), "mode_valid_mask"),
+        )
+        for actual_shape, expected_shape, field_name in expected_shapes:
+            if actual_shape != expected_shape:
+                raise ValueError(
+                    f"A1 manifest field shape mismatch for {field_name}: "
+                    f"declared={actual_shape}, expected={expected_shape}"
+                )
+        if "num_selected" in recorded_a1 and int(recorded_a1["num_selected"]) != inferred_k:
+            raise ValueError(
+                f"A1 manifest num_selected={recorded_a1['num_selected']} conflicts "
+                f"with a1_anchor_fields K={inferred_k}"
+            )
+        if inferred_k != self.num_selected:
+            raise ValueError(
+                f"A1 dataset anchor count mismatch: manifest fields encode K={inferred_k}, "
+                f"runtime requires K={self.num_selected}"
+            )
+        recorded_a1 = {**recorded_a1, "num_selected": inferred_k}
+
         for key, expected in self.builder_config.items():
             if key not in recorded_a1:
                 raise ValueError(f"A1 dataset manifest is missing parameter {key!r}")

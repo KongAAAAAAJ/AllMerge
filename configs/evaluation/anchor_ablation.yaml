@@ -3,7 +3,7 @@ stage: all              # anchors | feasibility | all
 methods: [A0, A1, A2]   # Select one or several methods
 
 anchor_sources:
-  a0_bank: /outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
+  a0_bank: outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
   a0_rollout:
     dt: 0.1
     wheelbase_m: 5.5
@@ -16,8 +16,8 @@ split: test
 num_frames: 200          # feasibility/all: complete synchronized frames; 0 = all
 num_samples: 500        # anchors: raw controlled-ego samples; 0 = all
 max_samples: null
-batch_size: 16
-num_workers: 0
+batch_size: 128
+num_workers: 4
 device: auto
 seeds: "0,1,2"
 sample_seed: 2026

@@ -6,8 +6,4 @@ cd /d D:\KONG_Files\AllMerge\all_merge
 
 python evaluation/ablation/run_anchor.py ^
   --stage anchors ^
-  --methods A0 ^
-  --num-samples 500 ^
-  --batch-size 128 ^
-  --num-workers 4 ^
-  --device auto
+  --methods A0 A1

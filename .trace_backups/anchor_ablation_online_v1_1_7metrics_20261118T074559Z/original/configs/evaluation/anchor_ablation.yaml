@@ -1,0 +1,28 @@
+# TRACE paper-aligned A0/A1/A2 Anchor Ablation evaluation.
+stage: all              # anchors | feasibility | all
+methods: [A0, A1, A2]   # Select one or several methods
+
+anchor_sources:
+  a0_bank: /outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
+  a0_rollout:
+    dt: 0.1
+    wheelbase_m: 5.5
+    max_accel_mps2: 4.0
+    max_steer_rad: 0.5
+  # a2_scorer defaults to output_dir/best.pt from --scorer-config.
+dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
+a1_dataset_root: outputs/anchor_ablation/ckpt/A1_anchors
+split: test
+num_frames: 200          # feasibility/all: complete synchronized frames; 0 = all
+num_samples: 500        # anchors: raw controlled-ego samples; 0 = all
+max_samples: null
+batch_size: 16
+num_workers: 0
+device: auto
+seeds: "0,1,2"
+sample_seed: 2026
+figure_scenes: 3        # Distinct frames; rows in the anchor comparison figure
+figure_seed: 2027       # Independent of evaluation scores and inference seeds
+output_dir: outputs/anchor_ablation/evaluation
+
+
