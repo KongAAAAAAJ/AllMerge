@@ -30,7 +30,7 @@ class IDMVehicle(ControlledVehicle):
     COMFORT_ACC_MAX = 1.0  # [m/s2]
     """Desired maximum acceleration."""
 
-    COMFORT_ACC_MIN = -5.0  # [m/s2]
+    COMFORT_ACC_MIN = -ControlledVehicle.MAX_DECELERATION  # [m/s2]
     """Desired maximum deceleration."""
 
     DISTANCE_WANTED = 5.0 + ControlledVehicle.LENGTH  # [m]
@@ -289,7 +289,9 @@ class IDMVehicle(ControlledVehicle):
             )
         # action_num['acceleration'] = self.recover_from_stop(action_num['acceleration'])
         action["acceleration"] = np.clip(
-            action["acceleration"], -self.ACC_MAX, self.ACC_MAX
+            action["acceleration"],
+            -min(self.ACC_MAX, self.MAX_DECELERATION),
+            min(self.ACC_MAX, self.MAX_ACCELERATION),
         )
         Vehicle.act(
             self, action
@@ -960,7 +962,9 @@ class SpecialControlledVehicle(IDMVehicle):
             )
         # action_num['acceleration'] = self.recover_from_stop(action_num['acceleration'])
         action["acceleration"] = np.clip(
-            action["acceleration"], -self.ACC_MAX, self.ACC_MAX
+            action["acceleration"],
+            -min(self.ACC_MAX, self.MAX_DECELERATION),
+            min(self.ACC_MAX, self.MAX_ACCELERATION),
         )
 
         """Update"""

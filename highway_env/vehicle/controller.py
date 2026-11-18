@@ -40,7 +40,9 @@ class ControlledVehicle(Vehicle):
     KP_HEADING = 1 / TAU_HEADING
     KP_LATERAL = 1 / TAU_LATERAL  # [1/s]
     MAX_STEERING_ANGLE = 0.08  # [rad]
-    MAX_DELTA_STEERING_ANGLE = np.pi / 180  # [rad]
+    MAX_ACCELERATION = 2.5  # [m/s2], shared actuator upper bound
+    MAX_DECELERATION = 4.0  # [m/s2], positive braking magnitude
+    MAX_DELTA_STEERING_ANGLE = 0.015  # [rad]
     DELTA_SPEED = 5  # [m/s]
 
     # Lateral policy parameters
@@ -1474,6 +1476,7 @@ class FOLLOWVehicle(ControlledVehicle):
     COMFORT_ACC_MIN = -4.0  # [m/s2]
     """Desired maximum deceleration."""
 
+
     TTC_MIN = 2.5  # [s]
 
     DISTANCE_WANTED = 5.0 + ControlledVehicle.LENGTH  # [m]
@@ -1980,11 +1983,26 @@ class FOLLOWVehicle(ControlledVehicle):
             }
             self.latest_control_source = "lane_follow"
 
-        action["steering"] = np.clip(
+
+
+
+        # 1. Longitudinal acceleration saturation
+        action["acceleration"] = float(np.clip(
+            action["acceleration"],
+            -self.MAX_DECELERATION,
+            self.MAX_ACCELERATION,
+        ))
+
+        # 2. Absolute steering angle saturation
+        action["steering"] = float(np.clip(
             action["steering"],
             -self.MAX_STEERING_ANGLE,
             self.MAX_STEERING_ANGLE,
-        )
+        ))
+
+
+
+
 
         self.action = action
         self.action_list.append(self.group_action)
@@ -1994,6 +2012,7 @@ class FOLLOWVehicle(ControlledVehicle):
         self.info["v"].append(self.speed)
         self.info["a"].append(self.action["acceleration"])
         self.info["delta"].append(self.action["steering"])
+
     def steering_pid_control(self, ref_y, ref_heading):
         Ky = 0.05
         Kh = 1.15

@@ -72,6 +72,7 @@ def load_config(filename=DEFAULT_CONFIG):
         "target_samples": 100000,
         "min_episodes": 0,
         "episode_duration_s": 12.0,
+        "min_contiguous_control_steps": 40,
         "max_episodes": 10000,
         "timeout_s": 300.0,
         "worker_retries": 2,
@@ -91,6 +92,8 @@ def load_config(filename=DEFAULT_CONFIG):
         collection[key] = _positive_int(collection[key], f"collection.{key}")
     for key in ("start_seed", "start_episode_index", "group_action", "split_seed", "min_episodes"):
         collection[key] = _positive_int(collection[key], f"collection.{key}", allow_zero=True)
+    collection['min_contiguous_control_steps'] = _positive_int(
+        collection['min_contiguous_control_steps'], 'collection.min_contiguous_control_steps', allow_zero=True)
     if collection["group_action"] not in (0, 1, 2, 3):
         raise ValueError("collection.group_action must be in [0,3]")
     for key in ("episode_duration_s", "timeout_s"):
@@ -146,6 +149,7 @@ def collection_args(cfg, *, config_path=DEFAULT_CONFIG, check_only=False, overri
         min_episodes=int(c["min_episodes"]),
         trucksim_model_id=c.get("trucksim_model_id"),
         duration=float(c["episode_duration_s"]),
+        min_contiguous_control_steps=int(c['min_contiguous_control_steps']),
         max_episodes=int(c["max_episodes"]),
         timeout_s=float(c["timeout_s"]),
         retries=int(c["worker_retries"]),

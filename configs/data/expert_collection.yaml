@@ -22,6 +22,8 @@ collection:
   target_samples: 100000
   min_episodes: 0
   episode_duration_s: 12.0
+  # Defer task-success termination until every ego has this many recorded controls.
+  min_contiguous_control_steps: 60
   max_episodes: 10000
   timeout_s: 300
   worker_retries: 2

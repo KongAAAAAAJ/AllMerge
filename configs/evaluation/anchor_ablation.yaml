@@ -9,7 +9,7 @@ anchor_sources:
     wheelbase_m: 5.5
     max_accel_mps2: 4.0
     max_steer_rad: 0.5
-  # a2_scorer defaults to output_dir/best.pt from --scorer-config.
+  a2_scorer: outputs/anchor_ablation/ckpt/A2_smoke/best.pt
 dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
 a1_dataset_root: outputs/anchor_ablation/ckpt/A1_anchors
 split: test

@@ -182,6 +182,7 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     from data_pipeline.expert_collection.config import load_config, resolve_path
     cfg = load_config(args.config)
+    args.min_contiguous_control_steps = int(cfg['collection']['min_contiguous_control_steps'])
     args.config_path = resolve_path(args.config)
     args.trucksim_koopman_config = Path(cfg["koopman_collection_config"])
     args.ego_length_m = float(cfg["vehicle_dimensions"]["length_m"])
@@ -202,6 +203,17 @@ def parse_args(argv=None):
 def _extract_one(value, i, n):
     a = np.asarray(value)
     return np.asarray(a[i] if a.ndim and a.shape[0] == n else a).copy()
+
+
+def longest_control_run(steps):
+    """Count consecutive controls recovered from saved history windows."""
+    longest = run = 0
+    previous = None
+    for step in sorted(steps):
+        run = run + 1 if previous is not None and step == previous + 1 else 1
+        longest = max(longest, run)
+        previous = step
+    return longest
 
 
 def _resolve_project_path(value):
@@ -227,7 +239,9 @@ def main(argv=None):
     os.chdir(ROOT)
 
     trucksim_cfg = case = history = None
-    env_config = {"duration": float(args.duration), "offscreen_rendering": False}
+    min_control_steps = args.min_contiguous_control_steps
+    env_config = {"duration": float(args.duration), "offscreen_rendering": False,
+                  "expert_collection_min_control_steps": min_control_steps}
     if args.trucksim_koopman_config is not None:
         from data_pipeline.expert_collection.trucksim import (
             load_collection_config, select_case, scenario_trucksim_config,
@@ -309,7 +323,10 @@ def main(argv=None):
         print(f"[TRUCKSIM] case={case['model_id']} payload={case['payload_kg']}kg mu={case['road_mu']}", flush=True)
 
     samples = []
+    recorded_controls = [set() for _ in env.controlled_vehicles]
+    env._expert_collection_control_windows_ready = min_control_steps == 0
     frame_count = int(np.ceil(args.duration * float(env.config["policy_frequency"])))
+    exit_status = None
     try:
         for step in range(frame_count):
             pre_context = None
@@ -319,6 +336,20 @@ def main(argv=None):
             if history is not None:
                 history.append_executed_transition(env.controlled_vehicles)
             if bool(terminated) or bool(truncated):
+                exit_status = {
+                    'step': step + 1, 'time_s': float(env.time),
+                    'terminated': bool(terminated), 'truncated': bool(truncated),
+                    'task_success': bool(info.get('task_success', False)),
+                    'offroad_terminal': bool(env.config.get('offroad_terminal', False)),
+                    'recorded_control_runs': [longest_control_run(s) for s in recorded_controls],
+                    'min_contiguous_control_steps': min_control_steps,
+                    'vehicles': [dict(ego_index=i, crashed=bool(v.crashed),
+                                      on_road=bool(v.on_road), speed_mps=float(v.speed),
+                                      position=np.asarray(v.position).tolist(),
+                                      lane_index=list(v.lane_index))
+                                 for i, v in enumerate(env.controlled_vehicles)],
+                }
+                print('[EPISODE-END] ' + json.dumps(exit_status), flush=True)
                 break
 
             features = getattr(env, "latest_planner_features", None)
@@ -385,6 +416,10 @@ def main(argv=None):
                     # future_trajectory_dense, which is added above.
                     check_context(sample)
                 samples.append(sample)
+                if case is not None:
+                    recorded_controls[ego_i].update(range(step - 4, step))
+            env._expert_collection_control_windows_ready = all(
+                longest_control_run(s) >= min_control_steps for s in recorded_controls)
             if step % 10 == 0:
                 print(f"[EXPERT-COLLECT] step={step+1}/{frame_count} samples={len(samples)}", flush=True)
     finally:
@@ -415,6 +450,9 @@ def main(argv=None):
         "episode_index": int(args.episode_index),
         "seed": int(args.seed),
         "sample_count": len(samples),
+        "exit_status": exit_status,
+        "min_contiguous_control_steps": min_control_steps,
+        "recorded_control_runs": [longest_control_run(s) for s in recorded_controls],
         "fields": {k: {"shape": list(np.asarray(samples[0][k]).shape), "dtype": str(np.asarray(samples[0][k]).dtype)} for k in keys},
         "vehicle_dimensions": {
             "length_m": float(args.ego_length_m),

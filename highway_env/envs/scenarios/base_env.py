@@ -679,6 +679,9 @@ class BaseScenarioEnv(AbstractEnv, ABC):
             not vehicle.on_road for vehicle in self.controlled_vehicles
         ):
             return True
+        if self.config.get('expert_collection_min_control_steps', 0) > 0:
+            return self._task_success() and bool(
+                getattr(self, '_expert_collection_control_windows_ready', False))
         return self._task_success()
 
     def _is_truncated(self) -> bool:

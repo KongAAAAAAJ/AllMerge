@@ -184,7 +184,9 @@ def main(args=None):
     contract_path = reports / "collection_contract.json"
     contract = {"scenarios": args.scenarios, "cases": cases, "seed": args.start_seed,
                 "start_episode_index": args.start_episode_index, "duration": args.duration,
-                "group_action": args.group_action, "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
+                "group_action": args.group_action,
+                "min_contiguous_control_steps": args.min_contiguous_control_steps,
+                "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
                 "road_geometry": args.road_geometry,
                 "split_ratios": [args.train_split_ratio, args.val_split_ratio, args.test_split_ratio],
                 "split_seed": args.split_seed,
