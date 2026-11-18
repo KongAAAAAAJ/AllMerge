@@ -654,7 +654,7 @@ class MultiAgentAction(ActionType):
                 jtp_inputs = live
 
         # A1 is rebuilt from the current road graph at every online planning
-        # cycle. The offline A1 dataset is never reused as a live trajectory.
+        # cycle. A1 anchors are generated from the current observed scene.
         a1_road_geometry = None
         anchor_manager = getattr(getattr(runtime, "model", None), "anchor_manager", None)
         if getattr(anchor_manager, "runtime_kind", None) == "a1":

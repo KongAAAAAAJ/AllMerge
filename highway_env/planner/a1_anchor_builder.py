@@ -1,4 +1,4 @@
-"""Offline A1 lattice anchors from pre-anchor expert samples and exact lane geometry."""
+"""Online A1 anchors from observed scenes and exact lane geometry."""
 from __future__ import annotations
 
 import numpy as np
@@ -21,7 +21,7 @@ class A1AnchorBuilder:
 
     The raw road-geometry export is converted to the same compact map-feature
     contract consumed by the online A1/A2 candidate generator. This keeps the
-    offline A1 artifact builder synchronized with the active diffusion path.
+    A1 online builder synchronized with the active diffusion path.
     """
 
     def __init__(self, config: dict):

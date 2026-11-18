@@ -30,13 +30,13 @@ A1AnchorManager/A1AnchorBuilder interface. It does not support legacy datasets.
 Anchor-only A0/A1 smoke (A2 scorer not required):
 
 ```bat
-python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a1-dataset-root outputs/anchor_ablation/ckpt/A1_anchors --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --num-samples 500 --batch-size 128 --num-workers 4 --device auto
+python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --num-samples 500 --batch-size 128 --num-workers 4 --device auto
 ```
 
 After A2 scorer training:
 
 ```bat
-python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a1-dataset-root outputs/anchor_ablation/ckpt/A1_anchors --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --a2-scorer outputs/anchor_ablation/ckpt/A2_anchors/best.pt --num-samples 5000 --batch-size 128 --num-workers 4 --device auto
+python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --a2-scorer outputs/anchor_ablation/ckpt/A2_anchors/best.pt --num-samples 5000 --batch-size 128 --num-workers 4 --device auto
 ```
 
 ## Planning-stage entry points
@@ -68,3 +68,5 @@ controls independent raw ego samples in `anchors`. For backwards convenience,
 The existing `visualization.py` is retained unchanged, preserving the PDF format,
 Times New Roman typography, panel arrangement, line styles, legend placement,
 vehicle rendering and trajectory display semantics.
+
+A1 is generated online from raw scenes; no precomputed A1 dataset is required.

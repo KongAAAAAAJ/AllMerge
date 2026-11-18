@@ -19,8 +19,18 @@ __pycache__/
 /tests/*
 !/tests/test_dense_expert_dataset.py
 !/tests/test_dense_supervision.py
-!/tests/test_diffusion_runtime_load.py
 !/tests/test_diffusion_spline_runtime.py
 !/tests/test_gru_full_coarse_head.py
 !/tests/test_gru_goal_refinement_v3.py
 !/tests/test_trajectory_spline.py
+
+# Raw data and online A1 regression coverage.
+!/tests/__init__.py
+!/tests/test_a1_raw_diffusion_pipeline.py
+!/tests/test_a1_online_runtime.py
+!/tests/test_a1_variable_count_raw.py
+!/tests/test_raw_anchor_dataset.py
+!/tests/test_a2_raw_training_data.py
+!/tests/test_a0_raw_controls.py
+!/tests/test_trace_fuel_aware_evaluation.py
+!/tests/test_fixed_anchor_manager.py

@@ -5,7 +5,7 @@ Training accepts only completed `trace_expert_raw_k2_v2` datasets with
 shared `RawExpertDataset` loader. Legacy shard datasets are unsupported.
 
 A2 generates the full candidate pool using the same candidate generator and
-raw road conversion as the current A1 builder. It does not require precomputed
+raw road conversion as the current A1 online builder. It does not require precomputed
 A1 anchors: the scorer learns to rank the full pool before selecting K anchors.
 K comes from `control.model.num_modes` in the diffusion configuration;
 `top_r_fraction` controls the ranking shortlist. Safety labels use observed

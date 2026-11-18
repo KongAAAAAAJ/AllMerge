@@ -14,8 +14,6 @@ class AnchorSource:
         self.manager = manager
 
     def _prepare_anchors(self, features):
-        if getattr(self.manager, 'runtime_kind', None) == 'a1' and 'coarse_controls' not in features:
-            features = {**features, '_a1_online_runtime': True}
         return features if self.manager is None else self.manager.select(features)
 
 
@@ -64,7 +62,7 @@ def build_sources(methods, cfg, *, bank_path=None, scorer_path=None,
                 control_steps=dynamics['horizon_steps'], dt=dynamics['dt'],
                 wheelbase_m=dynamics['wheelbase_m'], max_accel_mps2=dynamics['max_accel_mps2'],
                 max_steer_rad=dynamics['max_steer_rad'])
-            artifacts[method] = {'source': 'shared offline/online A1AnchorBuilder',
+            artifacts[method] = {'source': 'online A1AnchorBuilder',
                                  'a1_config_path': manager.config_path,
                                  'a1_parameters': manager.builder_config}
         else:

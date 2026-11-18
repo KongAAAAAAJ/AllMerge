@@ -17,20 +17,14 @@ python scripts/data/collect_expert_dataset.py
 Configuration is centralized in `configs/data/expert_collection.yaml`.
 The collection command writes only persistent anchor-independent raw episodes to
 `outputs/expert_dataset/expert_trucksim_k2_raw_100k/episodes/`, together with
-resume state and reports. Build final training shards separately:
+resume state and reports. These raw episodes are used directly by training
+and evaluation. A1 anchors are generated online from observed ego state and road
+geometry using `configs/anchors/a1.yaml`; K is `control.model.num_modes` in
+`configs/train/diffusion.yaml`. No paired A1 dataset or offline build is needed.
 
 ```bash
-python scripts/data/build_a1_anchors.py --check-only
-python scripts/data/build_a1_anchors.py
-python scripts/diagnostics/validate_expert_dataset.py
+python scripts/diagnostics/validate_expert_dataset.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k
 ```
-
-The A1 builder uses `configs/anchors/a1.yaml`, reads the completed raw dataset
-without modifying it, and creates `expert_trucksim_k2_anchor_pair_100k` with
-paired A1 control/trajectory anchors, K2 context and deterministic episode
-splits. Use a new `--output-dir` for each A1 parameter variant. The final
-training format is unchanged. Do not run collection and A1 build concurrently.
-Legacy standard datasets and separate raw-collection commands are unsupported.
 
 ## Diffusion training and evaluation
 
@@ -47,8 +41,7 @@ and `--max-steer-rad` are retained; values are never clipped. Per-channel
 exclusion counts are reported (they may overlap). The resulting centroids are
 also checked. Short or discontinuous histories are not padded or interpolated.
 
-Both trajectory-space and control-space Diffusion configurations use the same
-unified dataset root configured in `configs/train/diffusion.yaml`:
+Control-space Diffusion uses the raw dataset root configured in `configs/train/diffusion.yaml`:
 
 ```bash
 python scripts/diagnostics/validate_expert_dataset.py --help

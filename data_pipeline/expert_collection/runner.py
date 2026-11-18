@@ -284,7 +284,7 @@ def main(args=None):
         "schema_version": "trace_expert_raw_k2_v2",
         "pipeline": "single_Polynomial_TruckSim_batch_collector",
         "expert": "Polynomial", "plant": "TruckSim_longitudinal_lateral",
-        "anchor_generation": "none; independent offline A1 dataset build",
+        "anchor_generation": "none; A1 generated online by consumers",
         "sample_unit": "one controlled ego at one valid 10-Hz planning frame",
         "samples": accepted, "target_samples": args.target_samples,
         "episodes": len(preanchor_by_episode), "min_episodes": args.min_episodes,

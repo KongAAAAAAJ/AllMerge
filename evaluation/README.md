@@ -7,7 +7,5 @@ loads a TRACE **control-space** Diffusion checkpoint and scores its frozen-K2
 actual TruckSim closed-loop evaluation procedures.
 
 `evaluation/ablation/` retains the existing Anchor and Fuel experiments.
-`legacy_open_loop_cli.py`, `open_loop_eval.py`, `open_loop_metrics.py` and
-`open_loop_visualization.py` remain in place strictly for historical
-trajectory-space experiment compatibility. They are not used by TRACE and
-should not be used for the proposed paper's comparison table.
+All current evaluators read raw expert episodes and generate A1 anchors online.
+The retired W1/W2 trajectory-space evaluation and paired dataset loaders have been removed.

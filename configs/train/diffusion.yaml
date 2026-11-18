@@ -1,41 +1,8 @@
-# Common trajectory/control diffusion settings.
-# Control defaults: dynamic anchors, frozen Koopman K2, paper MSE and fuel/progress losses.
+# Control-space diffusion with online A1 anchors, frozen Koopman K2,
+# paper MSE and fuel/progress losses.
 # Experiment YAMLs under ablation/ inherit this file with extends.
 output_space: control
 
-trajectory:
-  model:
-    reg_head_type: gru
-  training:
-    dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
-    output_dir: outputs/final_compare/trajectory_v0
-    train_split: train
-    val_split: val
-    batch_size: 64
-    num_workers: 8
-    persistent_workers: true
-    prefetch_factor: 2
-    pin_memory: auto
-    max_epochs: 100
-    max_steps: -1
-    learning_rate: 0.0001
-    weight_decay: 0.0001
-    min_lr: 1.0e-06
-    warmup_epochs: 3
-    device: auto
-    precision: auto
-    grad_clip: 5.0
-    check_val_every_n_epoch: 1
-    log_every_n_steps: 10
-    seed: 0
-    dense_loss_enabled: false
-    dense_loss_lambda_p: 0.0
-    dense_loss_type: smooth_l1
-    dense_loss_terminal_only: true
-    dense_loss_weight_mode: terminal_constant
-    dense_loss_terminal_timestep: 0
-    dense_loss_terminal_weight: 1.0
-    dense_loss_dense_dt: 0.1
 control:
   # TRACE A2 is opt-in; A1 remains unchanged during expert data collection.
   anchors:
@@ -61,7 +28,7 @@ control:
     position_scale_m: 10.0
     loss_position: 1.0
   training:
-    dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
+    dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
     output_dir: outputs/final_compare/control_v0
     train_split: train
     val_split: val
@@ -108,7 +75,6 @@ runtime:
   jtp_config: configs/projection/jtp.yaml
   jtp_control_execution_enabled: false
   checkpoint:
-    trajectory: outputs/diffusion_pretrain/run_1/checkpoints/best.pt
     control: outputs/fuel_ablation/F0/best.pt
   diffusion_spline_enabled: false
   diffusion_execution_enabled: false

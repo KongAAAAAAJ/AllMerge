@@ -3,15 +3,14 @@ stage: all              # anchors | feasibility | all
 methods: [A0, A1, A2]   # Select one or several methods
 
 anchor_sources:
-  a0_bank: outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors_smoke.npz
+  a0_bank: outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors_smoke2.npz
   a0_rollout:
     dt: 0.1
     wheelbase_m: 5.5
     max_accel_mps2: 4.0
     max_steer_rad: 0.5
-  a2_scorer: outputs/anchor_ablation/ckpt/A2_smoke/best.pt
-dataset_root: outputs/expert_dataset/smoke_actuator_constraints_v1
-a1_dataset_root: outputs/anchor_ablation/ckpt/A1_anchors_smoke
+  a2_scorer: outputs/anchor_ablation/ckpt/A2_smoke2/best.pt
+dataset_root: outputs/expert_dataset/smoke_actuator_constraints_v2
 split: test
 num_frames: 200          # feasibility/all: complete synchronized frames; 0 = all
 num_samples: 500        # anchors: raw controlled-ego samples; 0 = all

@@ -48,30 +48,15 @@ def _sync(device):
         torch.cuda.synchronize(device)
 
 
-def _preflight(ds, *, require_k2=True, strategy='dynamic'):
-    if len(ds) < 1:
-        raise ValueError('Empty evaluation split')
-    # Validate EVERY shard, preventing a late failure halfway through an experiment.
-    for path in ds.shard_paths:
-        with np.load(path, allow_pickle=False) as content:
-            required = ['future_trajectory_dense', 'coarse_trajectories', 'mode_valid_mask']
-            if strategy == 'dynamic':
-                required.append('coarse_controls')
-            if require_k2:
-                from highway_env.planner.diffusion.common.execution import K2_CONTEXT
-                required.extend(K2_CONTEXT)
-            missing = [x for x in required if x not in content.files]
-            if missing:
-                raise ValueError(f'{path.name} lacks required TRACE fields: {missing}. '
-                                 'Use the synchronized paired-anchor TruckSim expert dataset.')
-            if content['future_trajectory_dense'].shape[1:] != (40,2):
-                raise ValueError(f'{path.name}: future_trajectory_dense must be [N,40,2]')
-    f,t = ds[0]
-    if strategy == 'dynamic' and 'coarse_controls' not in f:
-        raise ValueError('Dynamic control anchors were not saved in the expert dataset')
-    if require_k2 and t['koopman_state_hist_si'].shape != (5,5):
-        raise ValueError('K2 state history must be [5,5]')
-
+def _preflight(ds, *, require_k2=True, strategy='a1'):
+    if not len(ds):
+        raise ValueError('Raw evaluation split is empty')
+    features, targets, _ = ds[0]
+    missing = [key for key in ds.ROAD_KEYS if key not in features]
+    if require_k2:
+        missing += [key for key in ds.CONTEXT_KEYS if key not in targets]
+    if missing:
+        raise KeyError(f'Raw evaluation input is missing fields: {missing}')
 
 
 def _anchor_prediction(model, features, context):
@@ -145,7 +130,7 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
              output_dir='outputs/evaluation/trace_open_loop',
              jtp_config='configs/projection/jtp.yaml', allow_kinematic=False,
              visualization_seed=0, figure_samples=8, chassis_stat_samples=64):
-    from data_pipeline.expert_dataset import AllMergeExpertDatasetConfig, AllMergeExpertShardDataset
+    from data_pipeline.raw_expert_dataset import RawExpertDataset
     from highway_env.planner.diffusion.config.experiment import load_mode_yaml, resolve_repo_file
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
     from highway_env.planner.diffusion.projection.config import load_jtp_config
@@ -182,9 +167,7 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         fuel = None
     model.to(dev).eval()
     root = resolve_repo_file(dataset_root or cfg['training']['dataset_root'])
-    ds = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=root, split=split,
-        max_samples=(int(num_samples) or None)))
+    ds = RawExpertDataset(root, split=split, max_samples=(int(num_samples) or None))
     _preflight(ds, require_k2=(model.vehicle_model.kind == 'koopman_k2'),
                strategy=model.anchors_config.get('strategy', 'dynamic'))
     loader = DataLoader(ds, batch_size=int(batch_size), shuffle=False,
@@ -215,7 +198,7 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
         run_rows, global_idx, elapsed_times = [], 0, []
         shard_metadata_cache = {}
         with torch.inference_mode():
-            for features_cpu, targets_cpu in loader:
+            for features_cpu, targets_cpu, metadata_cpu in loader:
                 feats = {k: v.to(dev, non_blocking=True) for k,v in features_cpu.items()}
                 truth = targets_cpu['trajectory_dense'].to(dev)
                 ctx = {k: targets_cpu[k].to(dev, non_blocking=True) for k in K2_CONTEXT} if fuel is not None else {}

@@ -277,7 +277,7 @@ class AdaptiveCandidateBuilder:
         mask = array("map_valid_mask")
         n = len(ego)
         if "road_lane_geometry" in features:
-            # Reuse the exact raw road conversion used by the offline A1 bank.
+            # Reuse the exact raw road conversion used by the online A1 generator.
             from highway_env.planner.a1_anchor_builder import A1AnchorBuilder
             from data_pipeline.raw_expert_dataset import RawExpertDataset
             roads = {name: array(name) for name in RawExpertDataset.ROAD_KEYS}

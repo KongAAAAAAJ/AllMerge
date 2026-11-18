@@ -132,25 +132,10 @@ class ControlDiffusionRuntime:
         anchor_manager = getattr(self.model, "anchor_manager", None)
         anchor_kind = getattr(anchor_manager, "runtime_kind", None)
         adapter_input = dict(numpy_features)
-        # Fixed/A1/A2 strategies construct their own online candidate bank.
-        # The shared tensor adapter keeps a stable schema, so supply inert
-        # placeholders only when the live environment did not emit legacy
-        # coarse anchors. The selected manager overwrites them before denoising.
-        if anchor_kind in ("a0", "a1", "a2"):
-            ego_raw = np.asarray(adapter_input["ego_state"])
-            batch_size = int(ego_raw.shape[0])
-            modes = int(self.model.scene_config.num_modes)
-            horizon = int(self.model.scene_config.horizon_steps)
-            adapter_input.setdefault(
-                "coarse_trajectories",
-                np.zeros((batch_size, modes, horizon, 2), dtype=np.float32),
-            )
-            adapter_input.setdefault(
-                "mode_valid_mask",
-                np.zeros((batch_size, modes), dtype=np.bool_),
-            )
         features = self.adapter.to_torch(adapter_input)
         if anchor_kind == "a1":
+            if a1_road_geometry is None:
+                a1_road_geometry = numpy_features
             if not isinstance(a1_road_geometry, dict):
                 raise RuntimeError(
                     "A1 is configured for online inference but live full-resolution road geometry "
@@ -173,7 +158,6 @@ class ControlDiffusionRuntime:
                         f"expected {batch_size}"
                     )
                 features[key] = torch.as_tensor(value, device=self.device)
-            features["_a1_online_runtime"] = True
         generator = None
         if self.deterministic_seed is not None:
             generator = torch.Generator(device=self.device)

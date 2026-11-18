@@ -20,7 +20,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from data_pipeline.expert_dataset import AllMergeExpertDatasetConfig, AllMergeExpertShardDataset
+from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.diffusion.models.control import ControlDiffusionPlanner
 from highway_env.planner.diffusion.config.experiment import load_mode_yaml, resolve_repo_file
 
@@ -37,9 +37,8 @@ def unpack(batch, device):
 
 
 def _make_loader(dataset_root, split, batch_size, workers, max_samples, shuffle):
-    ds = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=Path(dataset_root), split=split,
-        max_samples=(int(max_samples) if max_samples else None)))
+    ds = RawExpertDataset(Path(dataset_root), split=split,
+        max_samples=(int(max_samples) if max_samples else None))
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=workers,
                       pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0)
 
@@ -95,8 +94,6 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         execution_config=cfg.get('execution'), loss_config=cfg.get('losses'),
                 anchors_config=cfg.get('anchors'),
             ).to(selected_device)
-    if getattr(model.anchor_manager, "runtime_kind", None) == "a1":
-        model.anchor_manager.validate_dataset_contract(root)
     # Explicitly exclude frozen K2 parameters from the optimizer.
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
     batch_size = int(tr.get('batch_size', 8))
@@ -105,8 +102,7 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
                                 batch_size, workers, limit_samples, True)
     val_loader = _make_loader(root, val_split or tr.get('val_split', 'val'),
                               batch_size, workers, limit_samples, False)
-    # Audit the selected dataset before the first optimizer step. Older
-    # kinematic expert shards are legal only when K2/fuel are not requested.
+    # Audit observed execution context before the first optimizer step.
     from highway_env.planner.diffusion.common.execution import K2_CONTEXT
     first_targets = train_loader.dataset[0][1]
     required = K2_CONTEXT if model.vehicle_model.kind == 'koopman_k2' else ()
@@ -114,13 +110,14 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         required = tuple(set(required) | {'koopman_payload_kg'})
     missing = [key for key in required if key not in first_targets]
     if missing:
-        raise KeyError(f'Selected expert shard is incompatible with execution/loss config: missing {missing}')
+        raise KeyError(f'Selected raw dataset is incompatible with execution/loss config: missing {missing}')
     optimizer = torch.optim.AdamW(trainable_parameters, lr=float(tr.get('lr', 1e-4)),
                                   weight_decay=float(tr.get('weight_decay', 1e-4)))
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     (output / 'resolved_config.yaml').write_text(
-        __import__('yaml').safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        __import__('yaml').safe_dump({**cfg, 'anchors': model.anchors_config},
+                                    allow_unicode=True, sort_keys=False), encoding='utf-8')
     history = []
     best = float('inf')
     best_epoch = 0

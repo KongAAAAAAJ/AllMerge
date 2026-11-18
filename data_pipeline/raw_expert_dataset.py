@@ -78,7 +78,7 @@ class RawExpertDataset(Dataset):
         self._cached = None
         for file_index, path in enumerate(self.shard_paths):
             with np.load(path, allow_pickle=False) as data:
-                required = (*self.FEATURE_KEYS, *self.CONTEXT_KEYS, 'expert_trajectory_xy',
+                required = (*self.FEATURE_KEYS, *self.ROAD_KEYS, *self.CONTEXT_KEYS, 'expert_trajectory_xy',
                             'future_trajectory_dense', 'episode_index', 'frame_index', 'ego_index')
                 missing = [key for key in required if key not in data.files]
                 if missing:

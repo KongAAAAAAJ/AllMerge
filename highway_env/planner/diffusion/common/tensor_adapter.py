@@ -14,13 +14,11 @@ FLOAT_KEYS = (
     "map_polylines",
     "target_point",
     "target_lane_polyline",
-    "coarse_trajectories",
 )
 
 BOOL_KEYS = (
     "agent_valid_mask",
     "map_valid_mask",
-    "mode_valid_mask",
 )
 
 
@@ -100,6 +98,16 @@ class PlannerTensorAdapter:
             result["coarse_controls"] = torch.as_tensor(
                 features["coarse_controls"], dtype=torch.float32, device=self.device
             )
+        for key in ("coarse_trajectories", "mode_valid_mask"):
+            if key in features:
+                result[key] = torch.as_tensor(features[key], device=self.device,
+                    dtype=torch.bool if key.endswith('_mask') else torch.float32)
+        from data_pipeline.raw_expert_dataset import RawExpertDataset
+        for key in RawExpertDataset.ROAD_KEYS:
+            if key in features:
+                dtype = (torch.bool if key.endswith('_mask') or key == 'road_lane_connections'
+                         else torch.long if key.endswith('_slot') else torch.float32)
+                result[key] = torch.as_tensor(features[key], device=self.device, dtype=dtype)
         self._validate_shapes(result)
         return result
 
@@ -195,6 +203,8 @@ class PlannerTensorAdapter:
             expected["coarse_controls"] = (batch, cfg.num_modes, 40, 2)
 
         for key, shape in expected.items():
+            if key in ('coarse_trajectories', 'mode_valid_mask') and key not in features:
+                continue
             actual = tuple(
                 features[key].shape
             )

@@ -61,7 +61,7 @@ def score_open_loop(pred: dict[str, torch.Tensor], truth: torch.Tensor,
     if dense_candidates is None or dense_candidates.shape != (b, candidates.shape[1], h, 2):
         raise ValueError('Dense candidate trajectories [B,K,40,2] required for paper minADE_K/minFDE_K')
     dense_candidates_err = torch.linalg.vector_norm(dense_candidates - truth[:, None], dim=-1)
-    valid = pred.get('trajectory_candidate_valid_mask', features['mode_valid_mask']).bool()
+    valid = pred['trajectory_candidate_valid_mask'].bool()
     if valid.shape != candidates_err.shape[:2] or not bool(valid.any(dim=1).all()):
         raise ValueError('Invalid candidate mask or no valid modes')
     candidate_ade = candidates_err.mean(dim=-1).masked_fill(~valid, float('inf'))

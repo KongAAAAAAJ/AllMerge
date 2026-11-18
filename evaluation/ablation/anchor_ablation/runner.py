@@ -552,8 +552,6 @@ def run(args=None):
     parser.add_argument("--methods", nargs="+", choices=("A0", "A1", "A2"), default=None)
     parser.add_argument("--a0-bank", default=None)
     parser.add_argument("--a2-scorer", default=None)
-    parser.add_argument("--a1-dataset-root", default=None,
-                        help="Completed A1/K2 dataset used to verify the online A1 configuration contract")
     parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("train", "val", "test"), default=None)
@@ -633,9 +631,6 @@ def run(args=None):
         parsed.num_samples if parsed.num_samples is not None
         else (parsed.num_frames if parsed.num_frames is not None else cfg.get("num_samples", 5000))
     )
-    a1_dataset_root = resolve_repo_file(
-        parsed.a1_dataset_root or cfg.get("a1_dataset_root", "outputs/anchor_ablation/ckpt/A1_anchors")
-    )
     batch_size = int(parsed.batch_size if parsed.batch_size is not None else cfg.get("batch_size", 16))
     workers = int(parsed.num_workers if parsed.num_workers is not None else cfg.get("num_workers", 0))
     seeds = _parse_seeds(parsed.seeds if parsed.seeds is not None else cfg.get("seeds", "0,1,2"))
@@ -665,6 +660,8 @@ def run(args=None):
             raise FileNotFoundError(f"JTP config not found: {jtp_path}")
         jtp_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
 
+    if 'a1_dataset_root' in cfg:
+        raise ValueError('a1_dataset_root is removed; A1 is generated online from dataset_root')
     checkpoint_info, source_info = {}, {}
     scorer_path = None
     if stage == "anchors":
@@ -677,18 +674,6 @@ def run(args=None):
             diffusion_config=str(diffusion_config_path),
             device=device,
         )
-        if "A1" in methods:
-            a1_manifest = models["A1"].manager.validate_dataset_contract(a1_dataset_root)
-            raw_manifest = dataset_root / "reports" / "manifest.json"
-            if not raw_manifest.is_file():
-                raise FileNotFoundError(f"Current raw dataset manifest missing: {raw_manifest}")
-            raw_hash = _sha256(raw_manifest)
-            source_hash = a1_manifest.get("source_manifest_sha256")
-            if source_hash and source_hash != raw_hash:
-                raise ValueError(
-                    "A1 anchor dataset was built from a different raw expert manifest: "
-                    f"A1 source={source_hash}, current raw={raw_hash}"
-                )
         for info in source_info.values():
             if info.get("scorer_path"):
                 info["scorer_sha256"] = _sha256(Path(info["scorer_path"]))
@@ -871,7 +856,6 @@ def run(args=None):
         "jtp": projector_info,
         "jtp_config": str(jtp_path) if jtp_path else None,
         "dataset": {"root": str(dataset_root), **data_manifest},
-        "a1_dataset_root": str(a1_dataset_root) if "A1" in methods else None,
         "split": split,
         "num_modes": num_modes,
         "diffusion_config": str(diffusion_config_path),

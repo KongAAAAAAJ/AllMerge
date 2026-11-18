@@ -4,8 +4,7 @@ Raw episodes contain four prior commands per observed planning frame. Restore
 these commands on each ego's integer 10-Hz timeline and cluster only continuous
 40-command windows from TRAIN episodes, then keep only whole windows inside
 the configured acceleration/steering ranges. No A1 candidates, inverse dynamics,
-interpolation, repetition, or zero padding are used. Legacy shard inputs remain
-available explicitly through --input-format shards.
+interpolation, repetition, or zero padding are used. Only raw episodes are accepted.
 """
 from __future__ import annotations
 
@@ -30,26 +29,6 @@ CONTROL_DIM = 2
 def _resolve_dataset_root(value: str | Path) -> Path:
     path = Path(value).expanduser()
     return path.resolve() if path.is_absolute() else (ROOT / path).resolve()
-
-
-def resolve_shards(dataset_root: Path, split: str = "train") -> list[Path]:
-    if split != "train":
-        raise ValueError("A0 fixed control anchors must be clustered from split='train' only")
-    shard_dir = dataset_root / "shards"
-    if not shard_dir.is_dir():
-        raise FileNotFoundError(f"Shard directory not found: {shard_dir}")
-    available = {p.name: p for p in shard_dir.glob("shard_*.npz")}
-    split_file = dataset_root / "splits" / "train.txt"
-    if not split_file.is_file():
-        raise FileNotFoundError(f"Training split file not found: {split_file}")
-    names = [line.strip() for line in split_file.read_text(encoding="utf-8").splitlines()
-             if line.strip() and not line.lstrip().startswith("#")]
-    if not names:
-        raise RuntimeError(f"Training split is empty: {split_file}")
-    missing = [Path(name).name for name in names if Path(name).name not in available]
-    if missing:
-        raise FileNotFoundError(f"Training split references missing shards: {missing[:5]}")
-    return [available[Path(name).name] for name in names]
 
 
 def raw_training_episodes(root: Path):
@@ -119,112 +98,6 @@ def load_raw_expert_controls(root: Path, *, max_samples=0):
         'trajectory_geometry_filter_used': False, 'trajectory_geometry_filter_key': None,
         'min_path_length_m': None, 'mode_valid_mask_used': False,
     }
-
-
-def _candidate_mask(controls: np.ndarray, trajectories: np.ndarray | None,
-                    min_path_length_m: float) -> np.ndarray:
-    finite = np.isfinite(controls).all(axis=(-1, -2))
-    if trajectories is None:
-        return finite
-    if trajectories.shape[:-2] != controls.shape[:-2] or trajectories.shape[-2:] != (8, 2):
-        raise ValueError(
-            f"control/trajectory candidate shapes do not align: {controls.shape} vs {trajectories.shape}"
-        )
-    finite &= np.isfinite(trajectories).all(axis=(-1, -2))
-    segment = np.linalg.norm(np.diff(trajectories, axis=-2), axis=-1)
-    path_length = segment.sum(axis=-1)
-    # A1 stores unavailable geometry slots as all-zero XY/control arrays.
-    # This geometric availability check deliberately does NOT inspect the
-    # traffic-filtered mode_valid_mask.
-    return finite & (path_length >= float(min_path_length_m))
-
-
-def load_control_candidates(
-    shards: list[Path], *, control_key: str = "coarse_controls",
-    trajectory_key: str = "coarse_trajectories", max_samples: int = 0,
-    min_path_length_m: float = 0.5,
-) -> tuple[np.ndarray, dict]:
-    parts: list[np.ndarray] = []
-    scene_samples = 0
-    candidate_count = 0
-    source_candidate_count = 0
-    source_shape = None
-    used_trajectory_geometry_filter = False
-    selected_shards: list[str] = []
-
-    for shard_path in shards:
-        with np.load(shard_path, allow_pickle=False) as data:
-            if control_key not in data.files:
-                raise KeyError(f"{shard_path} missing control field {control_key!r}")
-            controls = np.asarray(data[control_key], dtype=np.float32)
-            if controls.ndim not in (3, 4) or controls.shape[-2:] != (CONTROL_STEPS, CONTROL_DIM):
-                raise ValueError(
-                    f"{shard_path}:{control_key} must be [N,40,2] or [N,M,40,2], got {controls.shape}"
-                )
-            n = len(controls)
-            if max_samples > 0:
-                remaining = max_samples - scene_samples
-                if remaining <= 0:
-                    break
-                controls = controls[:remaining]
-                n = len(controls)
-            if n == 0:
-                continue
-            source_shape = list(np.asarray(data[control_key]).shape[1:])
-
-            if controls.ndim == 4:
-                if trajectory_key not in data.files:
-                    raise KeyError(
-                        f"{shard_path} has multi-candidate {control_key}, but lacks {trajectory_key}; "
-                        "the trajectory field is needed only to exclude zero-filled unavailable geometry slots"
-                    )
-                trajectories = np.asarray(data[trajectory_key][:n], dtype=np.float32)
-                if trajectories.shape != (n, controls.shape[1], 8, 2):
-                    raise ValueError(
-                        f"{shard_path}:{trajectory_key} expected {(n, controls.shape[1], 8, 2)}, "
-                        f"got {trajectories.shape}"
-                    )
-                valid = _candidate_mask(controls, trajectories, min_path_length_m)
-                used_trajectory_geometry_filter = True
-                flat_controls = controls.reshape(-1, CONTROL_STEPS, CONTROL_DIM)
-                flat_valid = valid.reshape(-1)
-            else:
-                flat_controls = controls
-                flat_valid = np.isfinite(flat_controls).all(axis=(-1, -2))
-
-            source_candidate_count += int(flat_controls.shape[0])
-            selected = flat_controls[flat_valid]
-            if selected.size:
-                parts.append(np.ascontiguousarray(selected, dtype=np.float32))
-                candidate_count += int(len(selected))
-            scene_samples += n
-            selected_shards.append(shard_path.name)
-            if max_samples > 0 and scene_samples >= max_samples:
-                break
-
-    if not parts:
-        raise RuntimeError("No valid control sequences were found in the training split")
-    candidates = np.concatenate(parts, axis=0)
-    if len(candidates) < 10:
-        raise RuntimeError(f"Need at least 10 valid control sequences, found {len(candidates)}")
-    if not np.isfinite(candidates).all():
-        raise RuntimeError("Nonfinite controls remained after candidate filtering")
-
-    audit = {
-        "source_split": "train",
-        "source_shards": selected_shards,
-        "num_scene_samples": int(scene_samples),
-        "control_source_key": control_key,
-        "control_source_shape_per_sample": source_shape,
-        "num_source_control_sequences": int(source_candidate_count),
-        "num_valid_control_sequences": int(candidate_count),
-        "num_filtered_control_sequences": int(source_candidate_count - candidate_count),
-        "trajectory_geometry_filter_used": bool(used_trajectory_geometry_filter),
-        "trajectory_geometry_filter_key": trajectory_key if used_trajectory_geometry_filter else None,
-        "min_path_length_m": float(min_path_length_m) if used_trajectory_geometry_filter else None,
-        "mode_valid_mask_used": False,
-    }
-    return candidates, audit
 
 
 def _squared_distances(x: np.ndarray, centers: np.ndarray) -> np.ndarray:
@@ -398,15 +271,12 @@ def build_fixed_anchor_bank(
     dataset_root: str | Path, output_path: str | Path, *, split: str = "train",
     num_anchors: int = 10, seed: int = 0, batch_size: int = 8192,
     epochs: int = 10, lloyd_refine: int = 5, max_samples: int = 0,
-    control_key: str = "coarse_controls", trajectory_key: str = "coarse_trajectories",
-    min_path_length_m: float = 0.5,
     max_accel_mps2: float = 2.5, max_steer_rad: float = 0.08,
-    input_format: str = "auto",
 ) -> dict:
     if num_anchors <= 0:
         raise ValueError("num_anchors must be positive")
-    if max_samples < 0 or min_path_length_m < 0:
-        raise ValueError("max_samples and min_path_length_m must be nonnegative")
+    if max_samples < 0:
+        raise ValueError("max_samples must be nonnegative")
     if batch_size <= 0 or epochs <= 0 or lloyd_refine < 0:
         raise ValueError("batch_size/epochs must be positive and lloyd_refine nonnegative")
     if max_accel_mps2 <= 0 or max_steer_rad <= 0:
@@ -414,21 +284,9 @@ def build_fixed_anchor_bank(
     root = _resolve_dataset_root(dataset_root)
     if split != 'train':
         raise ValueError('A0 must use training episodes only')
-    if input_format == 'auto':
-        input_format = 'raw' if (root / 'episodes').is_dir() else 'shards'
-    if input_format == 'raw':
-        candidates, audit = load_raw_expert_controls(root, max_samples=max_samples)
-        control_key = audit['control_source_key']
-        if len(candidates) < num_anchors:
-            raise ValueError(f'Only {len(candidates)} valid expert windows for {num_anchors} anchors')
-    elif input_format == 'shards':
-        shards = resolve_shards(root, split)
-        candidates, audit = load_control_candidates(
-            shards, control_key=control_key, trajectory_key=trajectory_key,
-            max_samples=max_samples, min_path_length_m=min_path_length_m)
-        audit['input_format'] = 'shards'
-    else:
-        raise ValueError('input_format must be auto, raw or shards')
+    candidates, audit = load_raw_expert_controls(root, max_samples=max_samples)
+    control_key = audit['control_source_key']
+    input_format = 'raw'
 
     candidates, range_audit = filter_control_range(
         candidates, max_accel_mps2=max_accel_mps2, max_steer_rad=max_steer_rad)
@@ -476,11 +334,7 @@ def build_fixed_anchor_bank(
         "control_order": ["longitudinal_acceleration_mps2", "front_wheel_steering_rad"],
         "control_shape": [CONTROL_STEPS, CONTROL_DIM],
         "control_source": audit,
-        "control_source_semantics": (
-            "raw_executed_expert_commands_recovered_from_observed_histories"
-            if input_format == "raw" else ("A1_scene_conditioned_control_candidates_stored_with_expert_samples"
-            if control_key == "coarse_controls" else "dataset_control_sequence_field")
-        ),
+        "control_source_semantics": "raw_executed_expert_commands_recovered_from_observed_histories",
         "kmeans": {
             "algorithm": "deterministic_minibatch_kmeans_plus_plus_with_full_lloyd_refinement",
             "seed": int(seed), "batch_size": int(batch_size),
@@ -556,7 +410,6 @@ def build_fixed_anchor_bank(
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build A0 fixed anchors by direct control-sequence K-means")
     parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_raw_100k")
-    parser.add_argument("--input-format", choices=("auto", "raw", "shards"), default="auto")
     parser.add_argument("--split", default="train", choices=("train",))
     parser.add_argument("--num-anchors", type=int, default=None,
                         help="Number of fixed anchors; defaults to control.model.num_modes.")
@@ -566,10 +419,7 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lloyd-refine", type=int, default=5)
-    parser.add_argument("--max-samples", type=int, default=0, help="Cap source scenes (shards) or recovered windows (raw), 0 uses all TRAIN data")
-    parser.add_argument("--control-key", default="coarse_controls")
-    parser.add_argument("--trajectory-key", default="coarse_trajectories")
-    parser.add_argument("--min-path-length-m", type=float, default=0.5)
+    parser.add_argument("--max-samples", type=int, default=0, help="Cap recovered raw control windows; 0 uses all TRAIN episodes")
     parser.add_argument("--max-accel-mps2", type=float, default=2.5)
     parser.add_argument("--max-steer-rad", type=float, default=0.08)
     parser.add_argument("--output", default="outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz")
@@ -588,11 +438,9 @@ def main(argv=None) -> int:
         parser.error("Resolved control.model.num_modes must be positive")
     build_fixed_anchor_bank(
         args.dataset_root, args.output, split=args.split,
-        num_anchors=num_anchors, seed=args.seed, input_format=args.input_format,
+        num_anchors=num_anchors, seed=args.seed,
         batch_size=args.batch_size, epochs=args.epochs,
         lloyd_refine=args.lloyd_refine, max_samples=args.max_samples,
-        control_key=args.control_key, trajectory_key=args.trajectory_key,
-        min_path_length_m=args.min_path_length_m,
         max_accel_mps2=args.max_accel_mps2, max_steer_rad=args.max_steer_rad,
     )
     return 0

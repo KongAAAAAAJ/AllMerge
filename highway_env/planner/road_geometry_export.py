@@ -1,4 +1,4 @@
-"""Lossless, anchor-independent road geometry export for offline A1 Lattice.
+"""Lossless, anchor-independent road geometry export for online A1 anchors.
 
 Coordinates are stored in the planning ego frame.  Center and both lane-edge
 curves are sampled directly from the live lane geometry object; no boundary is

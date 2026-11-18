@@ -113,16 +113,12 @@ class ControlDiffusionPlanner(nn.Module):
             wheelbase_m=self.ctrl_cfg.wheelbase_m,
             koopman_metadata=koopman_metadata,
         )
-        self.anchors_config = dict(anchors_config or {'strategy': 'dynamic'})
-        anchor_strategy = self.anchors_config.get('strategy', 'dynamic')
-        # A0_FIXED_CONTROL_KMEANS_V3
-        if anchor_strategy not in ('dynamic', 'adaptive', 'fixed', 'a0', 'a1', 'a2'):
-            raise ValueError('Control anchor strategy must be dynamic, a0/fixed, a1 or a2/adaptive')
+        self.anchors_config = dict(anchors_config or {'strategy': 'a1'})
+        anchor_strategy = self.anchors_config.get('strategy', 'a1')
+        if anchor_strategy not in ('adaptive', 'fixed', 'a0', 'a1', 'a2'):
+            raise ValueError('Control anchor strategy must be a0/fixed, a1 or a2/adaptive')
         self.anchors_config["num_selected"] = int(self.scene_config.num_modes)
         self.anchor_manager = None
-        if anchor_strategy in ('adaptive', 'fixed', 'a0', 'a1', 'a2'):
-            if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
-                raise ValueError('num_selected must equal model num_modes')
         if anchor_strategy in ('adaptive', 'a2'):
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
             self.anchor_manager = AdaptiveAnchorManager(
@@ -150,6 +146,7 @@ class ControlDiffusionPlanner(nn.Module):
                 max_accel_mps2=self.ctrl_cfg.max_accel_mps2,
                 max_steer_rad=self.ctrl_cfg.max_steer_rad,
             )
+            self.anchors_config.update(self.anchor_manager.config)
         self._validate_objectives()
 
     def _encode_scene(self, features):
@@ -161,18 +158,14 @@ class ControlDiffusionPlanner(nn.Module):
         return self.scene_encoder(features)
 
     def _prepare_anchors(self, features):
-        """Dispatch dynamic, adaptive, or fixed anchors without semantic mode identities."""
-        if (getattr(self.anchor_manager, 'runtime_kind', None) == 'a1'
-                and 'coarse_controls' not in features):
-            features = {**features, '_a1_online_runtime': True}
-        return features if self.anchor_manager is None else self.anchor_manager.select(features)
+        """Generate current-scene A0/A1/A2 anchors without semantic mode identities."""
+        return self.anchor_manager.select(features)
 
     def _sample_controls(self, features, *, generator=None, num_steps=None):
-        """Control-space DDIM initialized from the paired offline A1 controls.
+        """Control-space DDIM initialized from current-scene control anchors.
 
-        The unified dataset stores the road-bounded A1 trajectory/control pair
-        and validity mask. No online anchor generation or inverse XY decoding
-        is performed by the control diffusion planner.
+        Current-scene anchors are generated before entering this method.
+        No inverse XY decoding or stored anchor library is used.
         """
         cfg = self.ctrl_cfg
         B, M, H = (features['ego_state'].shape[0], self.scene_config.num_modes,

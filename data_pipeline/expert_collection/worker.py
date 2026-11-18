@@ -1,8 +1,7 @@
 """Isolated one-episode worker for the unified TRACE expert data pipeline.
 
 One process owns one episode. This is intentional for native TruckSim DLL
-isolation. The batch controller subsequently builds A1 anchors before exposing
-the final training dataset.
+isolation. Raw scenes are consumed directly by online anchor generation.
 """
 from __future__ import annotations
 
@@ -445,7 +444,7 @@ def main(argv=None):
     manifest = {
         "schema_version": "trace_expert_preanchor_episode_v2",
         "anchor_generation": "disabled_during_collection",
-        "a1_builder": "independent_offline_dataset_build",
+        "a1_builder": "online_runtime",
         "scenario": args.scenario,
         "episode_index": int(args.episode_index),
         "seed": int(args.seed),

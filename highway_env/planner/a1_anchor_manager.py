@@ -1,12 +1,6 @@
-"""Online A1 anchor generation using the same builder as offline dataset enrichment.
-
-Offline training consumes the paired A1 anchors already stored in each shard.
-Online inference rebuilds those anchors from the current ego state and the
-full-resolution road geometry exported by the live environment.
-"""
+"""Generate A1 anchors from current observed scene and raw road geometry."""
 from __future__ import annotations
 
-from pathlib import Path
 import time
 
 import numpy as np
@@ -28,7 +22,7 @@ A1_ROAD_GEOMETRY_KEYS = (
 
 
 class A1AnchorManager:
-    """Shared offline/online A1 adapter with a single ``select`` contract."""
+    """Online A1 adapter with a single ``select`` contract."""
 
     runtime_kind = "a1"
     CONTROL_STEPS = 40
@@ -60,9 +54,11 @@ class A1AnchorManager:
         )
         from highway_env.planner.diffusion.config.experiment import resolve_repo_file
         cfg_path = resolve_repo_file(cfg_value)
-        if not cfg_path.is_file():
-            raise FileNotFoundError(f"A1 configuration not found: {cfg_path}")
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        raw = self.config.get("resolved_a1")
+        if raw is None:
+            if not cfg_path.is_file():
+                raise FileNotFoundError(f"A1 configuration not found: {cfg_path}")
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         a1_cfg = raw.get("a1")
         if not isinstance(a1_cfg, dict):
             raise ValueError("A1 config must contain an 'a1' mapping")
@@ -86,10 +82,14 @@ class A1AnchorManager:
         self.road_geometry_config = dict(raw.get("road_geometry") or {})
         if not self.road_geometry_config:
             raise ValueError(
-                "A1 config must define road_geometry so online and offline geometry sampling match"
+                "A1 config must define road_geometry so training and live geometry sampling match"
             )
         self.config_path = str(cfg_path)
         self.builder = A1AnchorBuilder(self.builder_config)
+        self.builder_config['candidate_generation'] = self.builder.candidate_builder.resolved_config
+        self.config['resolved_a1'] = {
+            'a1': self.builder_config, 'road_geometry': self.road_geometry_config,
+        }
         self.last_latency_ms = 0.0
         self.last_valid_counts = None
         self.last_invalid_reasons = None
@@ -100,122 +100,9 @@ class A1AnchorManager:
             return value.detach().cpu().numpy()
         return np.asarray(value)
 
-    def validate_dataset_contract(self, dataset_root):
-        """Reject offline A1 training data built with different A1/map settings."""
-        dataset_root = Path(dataset_root)
-        manifest_path = dataset_root / "reports" / "manifest.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(
-                f"A1 training requires the final dataset manifest: {manifest_path}"
-            )
-        import json
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if (manifest.get("schema_version") != "trace_expert_road_geometry_a1_k2_v2"
-                or not manifest.get("complete")):
-            raise ValueError("Selected dataset is not a completed TRACE A1/K2 dataset")
-        recorded_a1 = manifest.get("a1_anchor_parameters") or {}
-        recorded_fields = manifest.get("a1_anchor_fields") or {}
-
-        # The authoritative stored tensor contract is a1_anchor_fields. Always
-        # validate its three shapes, then use the inferred K when the parameter
-        # was omitted by an earlier A1 manifest writer.
-        controls_shape = recorded_fields.get("coarse_controls")
-        trajectories_shape = recorded_fields.get("coarse_trajectories")
-        valid_shape = recorded_fields.get("mode_valid_mask")
-        if not (
-            isinstance(controls_shape, (list, tuple)) and len(controls_shape) == 3
-            and isinstance(trajectories_shape, (list, tuple)) and len(trajectories_shape) == 3
-            and isinstance(valid_shape, (list, tuple)) and len(valid_shape) == 1
-        ):
-            raise ValueError(
-                "A1 dataset manifest must declare a1_anchor_fields shapes for "
-                "coarse_controls, coarse_trajectories, and mode_valid_mask"
-            )
-        inferred_k = int(controls_shape[0])
-        expected_shapes = (
-            (tuple(controls_shape), (inferred_k, self.CONTROL_STEPS, 2), "coarse_controls"),
-            (tuple(trajectories_shape), (inferred_k, self.SPARSE_STEPS, 2), "coarse_trajectories"),
-            (tuple(valid_shape), (inferred_k,), "mode_valid_mask"),
-        )
-        for actual_shape, expected_shape, field_name in expected_shapes:
-            if actual_shape != expected_shape:
-                raise ValueError(
-                    f"A1 manifest field shape mismatch for {field_name}: "
-                    f"declared={actual_shape}, expected={expected_shape}"
-                )
-        if "num_selected" in recorded_a1 and int(recorded_a1["num_selected"]) != inferred_k:
-            raise ValueError(
-                f"A1 manifest num_selected={recorded_a1['num_selected']} conflicts "
-                f"with a1_anchor_fields K={inferred_k}"
-            )
-        if inferred_k != self.num_selected:
-            raise ValueError(
-                f"A1 dataset anchor count mismatch: manifest fields encode K={inferred_k}, "
-                f"runtime requires K={self.num_selected}"
-            )
-        recorded_a1 = {**recorded_a1, "num_selected": inferred_k}
-
-        for key, expected in self.builder_config.items():
-            if key not in recorded_a1:
-                raise ValueError(f"A1 dataset manifest is missing parameter {key!r}")
-            actual = recorded_a1[key]
-            if isinstance(expected, (int, float)) and not isinstance(expected, bool):
-                if not np.isclose(float(actual), float(expected), atol=1e-8, rtol=0.0):
-                    raise ValueError(
-                        f"A1 dataset/config mismatch for {key}: dataset={actual}, "
-                        f"runtime={expected}"
-                    )
-            elif actual != expected:
-                raise ValueError(
-                    f"A1 dataset/config mismatch for {key}: dataset={actual!r}, "
-                    f"runtime={expected!r}"
-                )
-        recorded_road = manifest.get("road_geometry") or {}
-        for key, expected in self.road_geometry_config.items():
-            if key not in recorded_road:
-                raise ValueError(f"A1 dataset manifest is missing road_geometry.{key}")
-            if not np.isclose(float(recorded_road[key]), float(expected), atol=1e-8, rtol=0.0):
-                raise ValueError(
-                    f"A1 road geometry mismatch for {key}: dataset={recorded_road[key]}, "
-                    f"runtime={expected}"
-                )
-        return manifest
-
-    def _validate_offline(self, features):
-        required = ("coarse_controls", "coarse_trajectories", "mode_valid_mask")
-        missing = [key for key in required if key not in features]
-        if missing:
-            raise RuntimeError(
-                "A1 offline training requires prebuilt paired anchors in the dataset; "
-                f"missing {missing}. Build the A1 dataset before training."
-            )
-        controls = features["coarse_controls"]
-        trajectories = features["coarse_trajectories"]
-        valid = features["mode_valid_mask"]
-        if tuple(controls.shape[1:]) != (self.num_selected, 40, 2):
-            raise ValueError(f"A1 offline controls must be [B,{self.num_selected},40,2], got {tuple(controls.shape)}")
-        if tuple(trajectories.shape[1:]) != (self.num_selected, 8, 2):
-            raise ValueError(
-                f"A1 offline trajectories must be [B,{self.num_selected},8,2], got {tuple(trajectories.shape)}"
-            )
-        if tuple(valid.shape[1:]) != (self.num_selected,):
-            raise ValueError(f"A1 offline validity mask must be [B,{self.num_selected}], got {tuple(valid.shape)}")
-        if not torch.as_tensor(valid).bool().any(dim=1).all():
-            raise ValueError("A1 offline dataset contains a sample with no valid anchor")
-        return features
-
     @torch.no_grad()
     def select(self, features):
-        """Use stored anchors offline, or rebuild them from live road geometry.
-
-        The runtime explicitly sets ``_a1_online_runtime``. This prevents a
-        stale legacy coarse-anchor field from being mistaken for the live A1
-        result when the environment has not supplied current road geometry.
-        """
-        online = bool(features.get("_a1_online_runtime", False))
-        if not online:
-            return self._validate_offline(features)
-
+        """Build K anchors online; stored anchor tensors never replace geometry."""
         missing = [key for key in A1_ROAD_GEOMETRY_KEYS if key not in features]
         if missing:
             raise KeyError(f"Online A1 generation is missing live road geometry: {missing}")
@@ -255,13 +142,15 @@ class A1AnchorManager:
             device=device, dtype=torch.bool,
         )
         valid_counts = valid.sum(dim=1)
-        if (valid_counts <= 0).any():
-            bad = torch.nonzero(valid_counts <= 0).flatten().cpu().tolist()
-            raise RuntimeError(f"Online A1 produced no valid anchors for batch items {bad}")
+        if not torch.isfinite(controls).all() or not torch.isfinite(trajectories).all():
+            raise ValueError('Online A1 generated nonfinite controls or trajectories')
+        if (valid_counts != self.num_selected).any():
+            bad = torch.nonzero(valid_counts != self.num_selected).flatten().cpu().tolist()
+            raise RuntimeError(f"Online A1 did not produce K valid anchors for batch items {bad}")
 
         selected = {
             key: value for key, value in features.items()
-            if key not in A1_ROAD_GEOMETRY_KEYS and key != "_a1_online_runtime"
+            if key not in A1_ROAD_GEOMETRY_KEYS
         }
         selected["coarse_controls"] = controls
         selected["coarse_trajectories"] = trajectories
