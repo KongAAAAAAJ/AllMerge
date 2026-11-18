@@ -572,7 +572,7 @@ def main(argv=None) -> int:
     parser.add_argument("--min-path-length-m", type=float, default=0.5)
     parser.add_argument("--max-accel-mps2", type=float, default=2.5)
     parser.add_argument("--max-steer-rad", type=float, default=0.08)
-    parser.add_argument("--output", default="outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz")
+    parser.add_argument("--output", default="outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz")
     args = parser.parse_args(argv)
     num_anchors = args.num_anchors
     if num_anchors is None:

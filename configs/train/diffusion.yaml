@@ -47,7 +47,7 @@ control:
     scorer_checkpoint: outputs/trace_adaptive_anchors/best.pt
   model:
     reg_head_type: mlp
-    num_modes: 20
+    num_modes: 10
   dynamics:
     horizon_steps: 40
     dt: 0.1
