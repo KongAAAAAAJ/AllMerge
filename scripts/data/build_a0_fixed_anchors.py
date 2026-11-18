@@ -1,18 +1,10 @@
-"""Build TRACE A0 fixed control anchors with control-space K-means.
+"""Build A0 fixed K-means control centroids from raw executed expert controls.
 
-The current AllMerge expert shards store scene-conditioned A1 control
-candidates in ``coarse_controls [N,M,40,2]``; M is the source dataset mode count. This builder pools those
-collected 40-step control sequences over the TRAIN split and clusters them
-DIRECTLY in normalized control space. K-means centroids are used as the fixed
-control anchors; no medoid/sample retrieval or trajectory-to-control matching
-is performed.
-
-For 4-D candidate banks, ``coarse_trajectories`` is used only to discard
-zero-filled geometrically unavailable slots. ``mode_valid_mask`` is never
-read, so A0 does not inherit A1 traffic/collision filtering.
-
-If a dataset provides one 40-step control sequence per sample, pass its field
-name through ``--control-key``; [N,40,2] is also supported.
+Raw episodes contain four prior commands per observed planning frame. Restore
+these commands on each ego's integer 10-Hz timeline and cluster only continuous
+40-command windows from TRAIN episodes. No A1 candidates, inverse dynamics,
+interpolation, repetition, or zero padding are used. Legacy shard inputs remain
+available explicitly through --input-format shards.
 """
 from __future__ import annotations
 
@@ -57,6 +49,117 @@ def resolve_shards(dataset_root: Path, split: str = "train") -> list[Path]:
     if missing:
         raise FileNotFoundError(f"Training split references missing shards: {missing[:5]}")
     return [available[Path(name).name] for name in names]
+
+
+def raw_training_episodes(root: Path):
+    manifest_path = root / 'reports/manifest.json'
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    if not manifest.get('complete') or manifest.get('schema_version') != 'trace_expert_raw_k2_v2':
+        raise ValueError('Expected a completed trace_expert_raw_k2_v2 dataset')
+    if not np.isclose(float(manifest['trajectory']['dt_s']), 0.1):
+        raise ValueError('Raw A0 controls require a 0.1 s observation grid')
+    records = manifest['episode_files']
+    paths = sorted((root / 'episodes').glob('episode_*.npz'))
+    if len(paths) != len(records) or {p.name for p in paths} != {r['name'] for r in records}:
+        raise ValueError('Raw episode inventory differs from manifest')
+    if len({r['episode_index'] for r in records}) != len(records):
+        raise ValueError('Duplicate raw episode IDs')
+    # Match expert_dataset.split_shards: one final shard per episode, same sort,
+    # RandomState shuffle, reserved splits and largest-remainder allocation.
+    by_name = {r['name']: r for r in records}
+    paths.sort(key=lambda p: f"shard_{int(by_name[p.name]['episode_index']):06d}.npz")
+    ratios = np.asarray(manifest['split_ratios'], dtype=float)
+    if ratios.shape != (3,) or not np.isfinite(ratios).all() or (ratios < 0).any() or ratios.sum() <= 0:
+        raise ValueError('Invalid raw split ratios')
+    ratios /= ratios.sum()
+    active = [i for i, ratio in enumerate(ratios) if ratio > 0]
+    counts = np.zeros(3, dtype=int)
+    if len(paths) >= len(active):
+        counts[active] = 1
+        exact = (len(paths) - len(active)) * ratios
+        extras = np.floor(exact).astype(int)
+        counts += extras
+        order = sorted(active, key=lambda i: exact[i] - extras[i], reverse=True)
+        for i in order[:len(paths) - int(counts.sum())]:
+            counts[i] += 1
+    else:
+        counts[active[:len(paths)]] = 1
+    indices = np.arange(len(paths))
+    np.random.RandomState(int(manifest['split_seed'])).shuffle(indices)
+    selected = [paths[i] for i in indices[:counts[0]]]
+    if not selected:
+        raise ValueError('Raw dataset has no training episodes')
+    return selected, by_name, {
+        'source_manifest_sha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        'split_seed': int(manifest['split_seed']), 'split_ratios': ratios.tolist(),
+        'training_episode_files': [p.name for p in selected],
+        'split_counts': dict(zip(('train', 'val', 'test'), counts.astype(int).tolist())),
+        'split_policy': 'episode-level; matches one-episode-per-shard split_shards',
+    }
+
+
+def restore_expert_windows(histories, frames, ego_ids):
+    """Recover u[k-4:k] from each frame k, retaining contiguous observed windows."""
+    if histories.shape != (len(frames), 4, 2) or ego_ids.shape != frames.shape:
+        raise ValueError('Raw histories must be [N,4,2] with matching frame/ego indices')
+    windows = []
+    for ego in np.unique(ego_ids):
+        timeline = {}
+        seen_frames = set()
+        for i in np.flatnonzero(ego_ids == ego):
+            frame = int(frames[i])
+            if frame in seen_frames:
+                raise ValueError(f'Duplicate frame {frame} for ego {ego}')
+            seen_frames.add(frame)
+            for offset, value in enumerate(histories[i]):
+                step = frame - 4 + offset
+                if step < 0 or not np.isfinite(value).all():
+                    raise ValueError('Invalid raw control history or time index')
+                if step in timeline and not np.allclose(timeline[step], value, rtol=0, atol=1e-6):
+                    raise ValueError(f'Inconsistent overlapping controls: ego={ego}, step={step}')
+                timeline[step] = value
+        for start in sorted(timeline):
+            if all(start + j in timeline for j in range(CONTROL_STEPS)):
+                windows.append(np.stack([timeline[start+j] for j in range(CONTROL_STEPS)]))
+    return np.asarray(windows, dtype=np.float32).reshape(-1, CONTROL_STEPS, CONTROL_DIM)
+
+
+def load_raw_expert_controls(root: Path, *, max_samples=0):
+    paths, records, split_audit = raw_training_episodes(root)
+    parts, used, total = [], [], 0
+    no_window_episodes = 0
+    for path in paths:
+        with np.load(path, allow_pickle=False) as data:
+            required = ('koopman_control_hist_si', 'frame_index', 'ego_index', 'episode_index')
+            if any(k not in data.files for k in required):
+                raise ValueError(f'{path.name} missing raw control history/index fields')
+            if len(data['frame_index']) != records[path.name]['samples'] or not np.all(data['episode_index'] == records[path.name]['episode_index']):
+                raise ValueError(f'{path.name} does not match raw manifest')
+            windows = restore_expert_windows(np.asarray(data['koopman_control_hist_si']),
+                                            np.asarray(data['frame_index']), np.asarray(data['ego_index']))
+        if not len(windows):
+            no_window_episodes += 1
+            continue
+        if max_samples:
+            windows = windows[:max_samples-total]
+        parts.append(windows)
+        used.append(path.name)
+        total += len(windows)
+        if max_samples and total >= max_samples:
+            break
+    if not parts:
+        raise RuntimeError('No contiguous 40-step expert control windows in TRAIN episodes; collect longer continuous episodes')
+    return np.concatenate(parts), {
+        **split_audit, 'input_format': 'raw', 'source_split': 'train',
+        'source_shards': used, 'source_episode_files_used': used, 'num_scene_samples': total,
+        'num_source_control_sequences': total, 'num_valid_control_sequences': total,
+        'num_filtered_control_sequences': 0, 'episodes_without_40step_windows': no_window_episodes,
+        'control_source_key': 'koopman_control_hist_si', 'control_source_shape_per_sample': [4, 2],
+        'window_steps': 40, 'window_dt_s': 0.1,
+        'window_policy': 'sliding continuous executed commands per episode/ego; no padding or interpolation',
+        'trajectory_geometry_filter_used': False, 'trajectory_geometry_filter_key': None,
+        'min_path_length_m': None, 'mode_valid_mask_used': False,
+    }
 
 
 def _candidate_mask(controls: np.ndarray, trajectories: np.ndarray | None,
@@ -301,6 +404,8 @@ def build_fixed_anchor_bank(
     control_key: str = "coarse_controls", trajectory_key: str = "coarse_trajectories",
     min_path_length_m: float = 0.5,
     max_accel_mps2: float = 2.5, max_steer_rad: float = 0.08,
+    input_format: str = "auto",
+    raw_out_of_bounds: str = "error",
 ) -> dict:
     if num_anchors <= 0:
         raise ValueError("num_anchors must be positive")
@@ -311,11 +416,41 @@ def build_fixed_anchor_bank(
     if max_accel_mps2 <= 0 or max_steer_rad <= 0:
         raise ValueError("Physical control scales must be positive")
     root = _resolve_dataset_root(dataset_root)
-    shards = resolve_shards(root, split)
-    candidates, audit = load_control_candidates(
-        shards, control_key=control_key, trajectory_key=trajectory_key,
-        max_samples=max_samples, min_path_length_m=min_path_length_m,
-    )
+    if split != 'train':
+        raise ValueError('A0 must use training episodes only')
+    if input_format == 'auto':
+        input_format = 'raw' if (root / 'episodes').is_dir() else 'shards'
+    if input_format == 'raw':
+        candidates, audit = load_raw_expert_controls(root, max_samples=max_samples)
+        control_key = audit['control_source_key']
+        within_limits = ((np.abs(candidates[..., 0]) <= max_accel_mps2 + 1e-4).all(axis=1)
+                         & (np.abs(candidates[..., 1]) <= max_steer_rad + 1e-5).all(axis=1))
+        outside = int((~within_limits).sum())
+        audit['out_of_bounds_windows'] = outside
+        audit['out_of_bounds_policy'] = raw_out_of_bounds
+        if outside:
+            if raw_out_of_bounds == 'error':
+                raise ValueError(
+                    f'{outside}/{len(candidates)} raw expert windows exceed acceleration '
+                    f'+/-{max_accel_mps2} m/s^2 or steering +/-{max_steer_rad} rad. '
+                    'Set limits to match your downstream model, or use '
+                    '--raw-out-of-bounds drop to exclude whole windows without clipping.')
+            if raw_out_of_bounds != 'drop':
+                raise ValueError('raw_out_of_bounds must be error or drop')
+            candidates = candidates[within_limits]
+            audit['num_valid_control_sequences'] = int(len(candidates))
+            audit['num_filtered_control_sequences'] = outside
+            print(f'[A0 RAW] excluded {outside} out-of-bounds windows; retained {len(candidates)}', flush=True)
+        if len(candidates) < num_anchors:
+            raise ValueError(f'Only {len(candidates)} valid expert windows for {num_anchors} anchors')
+    elif input_format == 'shards':
+        shards = resolve_shards(root, split)
+        candidates, audit = load_control_candidates(
+            shards, control_key=control_key, trajectory_key=trajectory_key,
+            max_samples=max_samples, min_path_length_m=min_path_length_m)
+        audit['input_format'] = 'shards'
+    else:
+        raise ValueError('input_format must be auto, raw or shards')
 
     # Dimensionless control utilization gives acceleration and steering equal
     # physical importance while preserving the complete 40-step sequence.
@@ -348,8 +483,9 @@ def build_fixed_anchor_bank(
         "control_shape": [CONTROL_STEPS, CONTROL_DIM],
         "control_source": audit,
         "control_source_semantics": (
-            "A1_scene_conditioned_control_candidates_stored_with_expert_samples"
-            if control_key == "coarse_controls" else "dataset_control_sequence_field"
+            "raw_executed_expert_commands_recovered_from_observed_histories"
+            if input_format == "raw" else ("A1_scene_conditioned_control_candidates_stored_with_expert_samples"
+            if control_key == "coarse_controls" else "dataset_control_sequence_field")
         ),
         "kmeans": {
             "algorithm": "deterministic_minibatch_kmeans_plus_plus_with_full_lloyd_refinement",
@@ -393,6 +529,7 @@ def build_fixed_anchor_bank(
 
     report = {
         "output": str(output), "bank_sha256": bank_hash,
+        "input_format": input_format,
         "num_anchors": int(num_anchors),
         "num_scene_samples": int(audit["num_scene_samples"]),
         "num_source_control_sequences": int(audit["num_source_control_sequences"]),
@@ -419,7 +556,10 @@ def build_fixed_anchor_bank(
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build A0 fixed anchors by direct control-sequence K-means")
-    parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k")
+    parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_raw_100k")
+    parser.add_argument("--input-format", choices=("auto", "raw", "shards"), default="auto")
+    parser.add_argument("--raw-out-of-bounds", choices=("error", "drop"), default="error",
+                        help="Reject out-of-limit raw controls, or explicitly drop whole windows; never clip")
     parser.add_argument("--split", default="train", choices=("train",))
     parser.add_argument("--num-anchors", type=int, default=None,
                         help="Number of fixed anchors; defaults to control.model.num_modes.")
@@ -429,7 +569,7 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lloyd-refine", type=int, default=5)
-    parser.add_argument("--max-samples", type=int, default=0, help="Optional cap on source scenes; 0 uses the complete train split")
+    parser.add_argument("--max-samples", type=int, default=0, help="Cap source scenes (shards) or recovered windows (raw), before limit filtering; 0 uses all TRAIN data")
     parser.add_argument("--control-key", default="coarse_controls")
     parser.add_argument("--trajectory-key", default="coarse_trajectories")
     parser.add_argument("--min-path-length-m", type=float, default=0.5)
@@ -442,7 +582,8 @@ def main(argv=None) -> int:
         import yaml
         diffusion_path = Path(args.diffusion_config).expanduser()
         diffusion_path = diffusion_path.resolve() if diffusion_path.is_absolute() else (ROOT / diffusion_path).resolve()
-        diffusion_cfg = yaml.safe_load(diffusion_path.read_text(encoding="utf-8"))
+        from learning.config import load_yaml_config
+        diffusion_cfg = load_yaml_config(diffusion_path)
         num_anchors = int(
             (((diffusion_cfg.get("control") or {}).get("model") or {}).get("num_modes", 10))
         )
@@ -450,7 +591,8 @@ def main(argv=None) -> int:
         parser.error("Resolved control.model.num_modes must be positive")
     build_fixed_anchor_bank(
         args.dataset_root, args.output, split=args.split,
-        num_anchors=num_anchors, seed=args.seed,
+        num_anchors=num_anchors, seed=args.seed, input_format=args.input_format,
+        raw_out_of_bounds=args.raw_out_of_bounds,
         batch_size=args.batch_size, epochs=args.epochs,
         lloyd_refine=args.lloyd_refine, max_samples=args.max_samples,
         control_key=args.control_key, trajectory_key=args.trajectory_key,

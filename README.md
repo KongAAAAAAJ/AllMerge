@@ -34,6 +34,18 @@ Legacy standard datasets and separate raw-collection commands are unsupported.
 
 ## Diffusion training and evaluation
 
+A0 fixed anchors can be built directly from the completed raw dataset, without
+building A1 shards. The builder recovers contiguous 40-step executed expert
+commands from recorded histories, using only the episode-level training split:
+
+```bash
+python scripts/data/build_a0_fixed_anchors.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --raw-out-of-bounds drop --output outputs/anchor_ablation/ckpt/A0_anchors/a0_fixed_control_anchors.npz
+```
+
+`drop` excludes whole windows outside the configured control bounds; it never
+clips control values. Without this explicit option, out-of-bounds windows cause
+an error. Short or discontinuous histories are not padded or interpolated.
+
 Both trajectory-space and control-space Diffusion configurations use the same
 unified dataset root configured in `configs/train/diffusion.yaml`:
 
