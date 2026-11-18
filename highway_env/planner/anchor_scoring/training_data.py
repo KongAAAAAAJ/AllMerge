@@ -1,4 +1,4 @@
-"""Fast, deterministic A2 scorer data path with candidate-count-aware V3 cache.
+"""Raw-only A2 scorer data path with candidate-count-aware episode cache.
 
 The expensive candidate pool and its deterministic safety teacher labels are
 computed once per dataset/configuration and stored as memory-mapped NumPy
@@ -18,18 +18,16 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from data_pipeline.expert_dataset import (
-    AllMergeExpertDatasetConfig,
-    AllMergeExpertShardDataset,
-    BOOL_FEATURE_KEYS,
-    FEATURE_KEYS,
-)
+from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from .safety import anchor_safety_cost
 
 
-CACHE_VERSION = "TRACE_A2_SCORER_CACHE_V3"
+CACHE_VERSION = "TRACE_A2_RAW_SCORER_CACHE_V4"
 CANDIDATE_ALGORITHM_VERSION = "shared-control-candidate-pool-v3"
+FEATURE_KEYS = (*RawExpertDataset.FEATURE_KEYS, *RawExpertDataset.ROAD_KEYS)
+BOOL_FEATURE_KEYS = {'agent_valid_mask', 'map_valid_mask', 'road_lane_point_mask',
+                     'road_lane_mask', 'road_lane_connections'}
 
 
 def cache_array_specs(candidate_count: int):
@@ -54,7 +52,7 @@ def _json_hash(value) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _source_manifest(dataset: AllMergeExpertShardDataset):
+def _source_manifest(dataset: RawExpertDataset):
     records = []
     counts = [0] * len(dataset.shard_paths)
     for shard_idx, _ in dataset._index:
@@ -77,10 +75,10 @@ def cache_fingerprint(dataset, *, candidate_config, teacher_config, temperature,
     payload = {
         "cache_version": CACHE_VERSION,
         "candidate_algorithm": CANDIDATE_ALGORITHM_VERSION,
-        "dataset_root": str(Path(dataset.dataset_root).resolve()),
-        "split": dataset.config.split,
-        "max_samples": dataset.config.max_samples,
-        "source_shards": _source_manifest(dataset),
+        "dataset_root": str(dataset.shard_paths[0].parent.parent.resolve()),
+        "split_manifest": dataset.split_manifest,
+        "num_samples": len(dataset),
+        "source_episodes": _source_manifest(dataset),
         "candidate_config": candidate_config,
         "teacher_config": teacher_config,
         "temperature": float(temperature),
@@ -100,14 +98,11 @@ def _feature_batch_from_shard(shard, sample_indices):
     features = {}
     for key in FEATURE_KEYS:
         if key not in shard:
-            raise KeyError(f"A2 scorer source shard is missing required feature {key!r}")
+            raise KeyError(f"A2 raw episode is missing required feature {key!r}")
         value = np.asarray(shard[key][sample_indices])
         tensor = torch.from_numpy(np.ascontiguousarray(value))
-        features[key] = tensor.bool() if key in BOOL_FEATURE_KEYS else tensor.float()
-    if "coarse_controls" in shard:
-        features["coarse_controls"] = torch.from_numpy(
-            np.ascontiguousarray(shard["coarse_controls"][sample_indices])
-        ).float()
+        features[key] = (tensor.bool() if key in BOOL_FEATURE_KEYS else
+                         tensor.long() if key.endswith('_slot') else tensor.float())
     return features
 
 
@@ -155,11 +150,9 @@ def prepare_split_cache(
     """Build one split cache. Returns its final directory and manifest."""
     dataset_root = Path(dataset_root)
     cache_root = Path(cache_root)
-    dataset = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=dataset_root,
-        split=split,
-        max_samples=cfg.get("max_samples"),
-    ))
+    dataset = RawExpertDataset(dataset_root, split=split, max_samples=cfg.get("max_samples"))
+    if not len(dataset):
+        raise ValueError('A2 raw training split has no selected samples')
     generator = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
     effective_candidate_config = generator.resolved_config
     candidate_count = int(generator.num_candidates)
@@ -205,19 +198,16 @@ def prepare_split_cache(
 
     try:
         for shard_idx, entries in groups.items():
-            shard = dataset._load_shard(shard_idx)
             shard_path = dataset.shard_paths[shard_idx]
+            with np.load(shard_path, allow_pickle=False) as source:
+                shard = {key: np.array(source[key], copy=True) for key in FEATURE_KEYS}
             for start in range(0, len(entries), batch_size):
                 chunk = entries[start:start + batch_size]
                 global_indices = np.asarray([item[0] for item in chunk], dtype=np.int64)
                 sample_indices = np.asarray([item[1] for item in chunk], dtype=np.int64)
                 features = _feature_batch_from_shard(shard, sample_indices)
 
-                pool = generator.build_batch({
-                    "ego_state": features["ego_state"].numpy(),
-                    "map_polylines": features["map_polylines"].numpy(),
-                    "map_valid_mask": features["map_valid_mask"].numpy(),
-                })
+                pool = generator.build_batch(features)
                 controls_np = np.asarray(pool["coarse_controls"], dtype=np.float32)
                 xy_np = np.asarray(pool["coarse_trajectories"], dtype=np.float32)
                 valid_np = np.asarray(pool["mode_valid_mask"], dtype=np.bool_)
@@ -253,7 +243,7 @@ def prepare_split_cache(
                 elapsed = max(time.perf_counter() - started, 1e-6)
                 rate = total_done / elapsed
                 print(
-                    f"[A2-cache] split={split} shard={shard_path.name} "
+                    f"[A2-cache] split={split} episode={shard_path.name} "
                     f"done={total_done}/{len(dataset)} rate={rate:.1f} samples/s",
                     flush=True,
                 )
@@ -290,7 +280,7 @@ def prepare_split_cache(
                       "shape": [len(dataset), *spec[2]]}
                 for key, spec in array_specs.items()
             },
-            "shards": shard_records,
+            "episodes": shard_records,
             "created_unix": time.time(),
         }
         (temp_dir / "manifest.json").write_text(
@@ -326,14 +316,20 @@ class CachedAnchorScoringDataset(Dataset):
         self.base = dataset
         self.cache_dir = Path(cache_dir)
         manifest = json.loads((self.cache_dir / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get('cache_version') != CACHE_VERSION:
+            raise ValueError('A2 cache format is obsolete; rebuild the raw cache')
+        if manifest['fingerprint_payload']['split_manifest'] != dataset.split_manifest:
+            raise ValueError('A2 raw cache split manifest differs from source dataset')
+        if manifest['fingerprint_payload']['source_episodes'] != _source_manifest(dataset):
+            raise ValueError('A2 raw source episodes changed; rebuild the cache')
         if int(manifest["num_samples"]) != len(dataset):
             raise ValueError("A2 cache sample count differs from source dataset")
         expected_names = [p.name for p in dataset.shard_paths]
-        cached_names = [x["name"] for x in manifest["shards"]]
+        cached_names = [x["name"] for x in manifest["episodes"]]
         if expected_names != cached_names:
-            raise ValueError("A2 cache shard order differs from source dataset")
+            raise ValueError("A2 cache episode order differs from source dataset")
         self.offset_by_shard = {
-            i: int(record["offset"]) for i, record in enumerate(manifest["shards"])
+            i: int(record["offset"]) for i, record in enumerate(manifest["episodes"])
         }
         self.candidate_count = int(manifest["candidate_count"])
         self.array_specs = cache_array_specs(self.candidate_count)
@@ -352,18 +348,8 @@ class CachedAnchorScoringDataset(Dataset):
 
     def __getitem__(self, idx):
         shard_idx, sample_idx = self.base._index[idx]
-        shard = self.base._load_shard(shard_idx)
-        features = {}
-        for key in FEATURE_KEYS:
-            if key not in shard:
-                raise KeyError(f"{self.base.shard_paths[shard_idx]} missing {key}")
-            value = np.asarray(shard[key][sample_idx])
-            tensor = torch.from_numpy(value)
-            features[key] = tensor.bool() if key in BOOL_FEATURE_KEYS else tensor.float()
-        if "coarse_controls" in shard:
-            features["coarse_controls"] = torch.from_numpy(
-                np.asarray(shard["coarse_controls"][sample_idx]).copy()
-            ).float()
+        raw_features, _, _ = self.base[idx]
+        features = {key: raw_features[key] for key in FEATURE_KEYS}
 
         cache_idx = self.offset_by_shard[int(shard_idx)] + int(sample_idx)
         cached = self._load_arrays()
@@ -416,11 +402,7 @@ class ShardGroupedBatchSampler(Sampler[List[int]]):
 
 
 def build_cached_loader(dataset_root, split, cfg, cache_dir, *, shuffle):
-    base = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=Path(dataset_root),
-        split=split,
-        max_samples=cfg.get("max_samples"),
-    ))
+    base = RawExpertDataset(Path(dataset_root), split=split, max_samples=cfg.get("max_samples"))
     cached = CachedAnchorScoringDataset(base, cache_dir)
     sampler = ShardGroupedBatchSampler(
         base,

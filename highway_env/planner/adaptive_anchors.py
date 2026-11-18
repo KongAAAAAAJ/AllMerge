@@ -276,6 +276,15 @@ class AdaptiveCandidateBuilder:
         maps = array("map_polylines")
         mask = array("map_valid_mask")
         n = len(ego)
+        if "road_lane_geometry" in features:
+            # Reuse the exact raw road conversion used by the offline A1 bank.
+            from highway_env.planner.a1_anchor_builder import A1AnchorBuilder
+            from data_pipeline.raw_expert_dataset import RawExpertDataset
+            roads = {name: array(name) for name in RawExpertDataset.ROAD_KEYS}
+            compact = [A1AnchorBuilder._compact_map_features(
+                {name: value[i] for name, value in roads.items()}) for i in range(n)]
+            maps = np.stack([item[0] for item in compact])
+            mask = np.stack([item[1] for item in compact])
         if target_accelerations is None:
             accelerations = np.asarray(ego[:, 2], dtype=np.float32)
         else:

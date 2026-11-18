@@ -6,4 +6,4 @@ cd /d D:\KONG_Files\AllMerge\all_merge
 python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2
 
 训练 A2 命令：
-python -m highway_env.planner.anchor_scoring.train --config configs/train/adaptive_anchors.yaml --output-dir outputs/anchor_ablation/ckpt/A2_anchors --cache-dir outputs/anchor_ablation/cache_A2
+python -m highway_env.planner.anchor_scoring.train --max-epochs 1 --max-batches 2 --max-samples 64 --output-dir outputs/anchor_ablation/ckpt/A2_smoke --cache-dir outputs/anchor_ablation/cache_A2_smoke

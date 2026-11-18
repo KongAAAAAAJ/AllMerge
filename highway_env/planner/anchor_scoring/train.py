@@ -1,4 +1,4 @@
-"""Offline TRACE A2 safety scorer train/eval with reusable V3 dynamic candidate cache.
+"""Raw-episode TRACE A2 safety scorer train/eval with reusable candidate cache.
 
 The scorer architecture, safety teacher, soft-label objective and Top-R metrics
 are unchanged. Candidate controls/trajectories and deterministic teacher labels
@@ -30,7 +30,8 @@ def _resolve_num_selected(cfg):
     diffusion_config = resolve_repo_file(
         cfg.get("diffusion_config", "configs/train/diffusion.yaml")
     )
-    diffusion_cfg = yaml.safe_load(diffusion_config.read_text(encoding="utf-8"))
+    from learning.config import load_yaml_config
+    diffusion_cfg = load_yaml_config(diffusion_config)
     num_selected = int(
         (((diffusion_cfg.get("control") or {}).get("model") or {}).get("num_modes", 10))
     )
@@ -169,6 +170,11 @@ def main(argv=None):
     if not isinstance(cfg, dict):
         raise ValueError("Scorer config must be a mapping")
     candidate_builder = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
+    cfg['num_selected'] = _resolve_num_selected(cfg)
+    cfg['top_r'] = max(cfg['num_selected'], int(round(
+        candidate_builder.num_candidates * float(cfg.get('top_r_fraction', 0.5555556)))))
+    if not 1 <= cfg['num_selected'] <= cfg['top_r'] <= candidate_builder.num_candidates:
+        raise ValueError('A2 requires 1 <= num_modes <= Top-R <= candidate pool size')
     candidate_generation_resolved = dict(getattr(
         candidate_builder, "resolved_config",
         getattr(getattr(candidate_builder, "base", None), "config",

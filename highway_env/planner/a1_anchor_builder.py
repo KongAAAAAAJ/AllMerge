@@ -46,7 +46,8 @@ class A1AnchorBuilder:
         self.length = float(self.candidate_builder.base.config.get("ego_length_m", 8.0))
         self.width = float(self.candidate_builder.base.config.get("ego_width_m", 2.6))
 
-    def _compact_map_features(self, sample):
+    @staticmethod
+    def _compact_map_features(sample):
         geometry = np.asarray(sample["road_lane_geometry"], dtype=np.float32)
         point_mask = np.asarray(sample["road_lane_point_mask"], dtype=bool)
         lane_mask = np.asarray(sample["road_lane_mask"], dtype=bool)
