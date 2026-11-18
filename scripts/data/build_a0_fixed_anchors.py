@@ -2,7 +2,8 @@
 
 Raw episodes contain four prior commands per observed planning frame. Restore
 these commands on each ego's integer 10-Hz timeline and cluster only continuous
-40-command windows from TRAIN episodes. No A1 candidates, inverse dynamics,
+40-command windows from TRAIN episodes, then keep only whole windows inside
+the configured acceleration/steering ranges. No A1 candidates, inverse dynamics,
 interpolation, repetition, or zero padding are used. Legacy shard inputs remain
 available explicitly through --input-format shards.
 """
@@ -355,6 +356,25 @@ def _content_sha256(arrays: Iterable[np.ndarray], metadata_text: str) -> str:
     return digest.hexdigest()
 
 
+def filter_control_range(candidates, *, max_accel_mps2, max_steer_rad):
+    """Keep complete original windows only; never clip or reassemble controls."""
+    finite = np.isfinite(candidates).all(axis=(1, 2))
+    accel_ok = (np.abs(candidates[..., 0]) <= max_accel_mps2).all(axis=1)
+    steer_ok = (np.abs(candidates[..., 1]) <= max_steer_rad).all(axis=1)
+    keep = finite & accel_ok & steer_ok
+    return candidates[keep], {
+        'policy': 'drop_whole_out_of_range_windows_before_kmeans',
+        'input_windows': int(len(candidates)), 'retained_windows': int(keep.sum()),
+        'excluded_windows': int((~keep).sum()),
+        'acceleration_exceeded_windows': int((~accel_ok).sum()),
+        'steering_exceeded_windows': int((~steer_ok).sum()),
+        'nonfinite_windows': int((~finite).sum()),
+        'acceleration_bounds_mps2': [-float(max_accel_mps2), float(max_accel_mps2)],
+        'steering_bounds_rad': [-float(max_steer_rad), float(max_steer_rad)],
+        'control_clipping_used': False,
+    }
+
+
 def build_fixed_anchor_bank(
     dataset_root: str | Path, output_path: str | Path, *, split: str = "train",
     num_anchors: int = 10, seed: int = 0, batch_size: int = 8192,
@@ -390,6 +410,21 @@ def build_fixed_anchor_bank(
         audit['input_format'] = 'shards'
     else:
         raise ValueError('input_format must be auto, raw or shards')
+
+    candidates, range_audit = filter_control_range(
+        candidates, max_accel_mps2=max_accel_mps2, max_steer_rad=max_steer_rad)
+    audit['control_range_filter'] = range_audit
+    audit['num_filtered_control_sequences'] += range_audit['excluded_windows']
+    audit['num_valid_control_sequences'] = len(candidates)
+    print(f"[A0 CONTROL RANGE] retained {len(candidates)}/{range_audit['input_windows']} windows; "
+          f"acceleration exceeded={range_audit['acceleration_exceeded_windows']}, "
+          f"steering exceeded={range_audit['steering_exceeded_windows']} "
+          '(counts may overlap)', flush=True)
+    if len(candidates) < num_anchors:
+        raise ValueError(
+            f'Only {len(candidates)} complete in-range windows for {num_anchors} anchors. '
+            'No controls were clipped or padded. Inspect the range counts and configured '
+            'model bounds; collect suitable data if no windows remain.')
 
     # Dimensionless control utilization gives acceleration and steering equal
     # physical importance while preserving the complete 40-step sequence.
@@ -469,6 +504,7 @@ def build_fixed_anchor_bank(
     report = {
         "output": str(output), "bank_sha256": bank_hash,
         "input_format": input_format,
+        "control_range_filter": range_audit,
         "num_anchors": int(num_anchors),
         "num_scene_samples": int(audit["num_scene_samples"]),
         "num_source_control_sequences": int(audit["num_source_control_sequences"]),

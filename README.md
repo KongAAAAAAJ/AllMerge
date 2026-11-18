@@ -42,9 +42,10 @@ commands from recorded histories, using only the episode-level training split:
 python scripts/data/build_a0_fixed_anchors.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --output outputs/anchor_ablation/ckpt/A0_anchors/a0_fixed_control_anchors.npz
 ```
 
-Raw control windows are neither clipped nor filtered by control limits before
-clustering. As in the original builder, limits are checked on the resulting
-centroids. Short or discontinuous histories are not padded or interpolated.
+Before clustering, only complete control windows within `--max-accel-mps2`
+and `--max-steer-rad` are retained; values are never clipped. Per-channel
+exclusion counts are reported (they may overlap). The resulting centroids are
+also checked. Short or discontinuous histories are not padded or interpolated.
 
 Both trajectory-space and control-space Diffusion configurations use the same
 unified dataset root configured in `configs/train/diffusion.yaml`:
