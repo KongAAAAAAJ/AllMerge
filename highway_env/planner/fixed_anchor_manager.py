@@ -1,4 +1,4 @@
-"""A0 scene-independent fixed control anchors from K-means centroids."""
+"""A0 scene-independent expert control representatives from K-means clusters."""
 from __future__ import annotations
 
 import hashlib
@@ -21,7 +21,7 @@ class FixedAnchorManager:
     is applied in A0.
     """
 
-    IMPLEMENTATION_ID = "A0_FIXED_CONTROL_KMEANS_CENTROIDS_V3"
+    IMPLEMENTATION_ID = "A0_FIXED_CONTROL_KMEANS_EXEMPLARS_V4"
 
     def __init__(self, config, *, num_modes: int = 10, dt: float = 0.1,
                  wheelbase_m: float = 5.5, max_accel_mps2: float = 2.5,
@@ -68,8 +68,6 @@ class FixedAnchorManager:
             raise ValueError(f"A0 control_scale must be finite positive [2], got {scale}")
         if not np.isfinite(anchors).all() or not np.isfinite(centers).all():
             raise ValueError("A0 control bank contains NaN/Inf")
-        if not np.allclose(anchors, centers, atol=1e-6, rtol=0.0):
-            raise ValueError("A0 anchors_controls must be the K-means centroids directly")
         if (np.abs(anchors[..., 0]) > self.max_accel_mps2 + 1e-4).any():
             raise ValueError("A0 acceleration centroid exceeds control planner limits")
         if (np.abs(anchors[..., 1]) > self.max_steer_rad + 1e-5).any():
@@ -87,8 +85,8 @@ class FixedAnchorManager:
             raise ValueError("A0 fixed control bank must be clustered from the training split only")
         if metadata.get("cluster_space") != "flattened_40_step_physical_control_sequence":
             raise ValueError("A0 bank was not clustered directly in control space")
-        if metadata.get("prototype_type") != "kmeans_centroid":
-            raise ValueError("A0 bank must contain K-means centroids, not medoids")
+        if metadata.get("prototype_type") != "nearest_expert_to_cluster_centroid":
+            raise ValueError("A0 bank must contain observed expert cluster representatives")
         if metadata.get("medoid_selection_used") or metadata.get("trajectory_to_control_matching_used"):
             raise ValueError("A0 direct control K-means must not use medoid or trajectory matching")
         if metadata.get("mode_valid_mask_used") or metadata.get("safety_scoring_used") or metadata.get("adaptive_selection_used"):

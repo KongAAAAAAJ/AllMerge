@@ -1,4 +1,4 @@
-"""Build A0 fixed K-means control centroids from raw executed expert controls.
+"""Build A0 fixed expert control representatives using K-means grouping.
 
 Raw episodes contain four prior commands per observed planning frame. Restore
 these commands on each ego's integer 10-Hz timeline and cluster only continuous
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-IMPLEMENTATION_ID = "A0_FIXED_CONTROL_KMEANS_CENTROIDS_V3"
+IMPLEMENTATION_ID = "A0_FIXED_CONTROL_KMEANS_EXEMPLARS_V4"
 CONTROL_STEPS = 40
 CONTROL_DIM = 2
 
@@ -356,6 +356,25 @@ def _content_sha256(arrays: Iterable[np.ndarray], metadata_text: str) -> str:
     return digest.hexdigest()
 
 
+def select_cluster_exemplars(x, centers, chunk_size=16384):
+    """Select the nearest observed member of each final K-means cluster."""
+    indices = np.full(len(centers), -1, dtype=np.int64)
+    best = np.full(len(centers), np.inf)
+    for start in range(0, len(x), chunk_size):
+        distances = _squared_distances(x[start:start + chunk_size], centers)
+        labels = distances.argmin(axis=1)
+        for cluster in range(len(centers)):
+            members = np.flatnonzero(labels == cluster)
+            if len(members):
+                local = members[np.argmin(distances[members, cluster])]
+                if distances[local, cluster] < best[cluster]:
+                    best[cluster] = distances[local, cluster]
+                    indices[cluster] = start + local
+    if (indices < 0).any():
+        raise RuntimeError('Cannot select an expert representative from an empty cluster')
+    return indices
+
+
 def filter_control_range(candidates, *, max_accel_mps2, max_steer_rad):
     """Keep complete original windows only; never clip or reassemble controls."""
     finite = np.isfinite(candidates).all(axis=(1, 2))
@@ -431,8 +450,7 @@ def build_fixed_anchor_bank(
     control_scale = np.asarray([max_accel_mps2, max_steer_rad], dtype=np.float32)
     physical_min = candidates.min(axis=(0, 1)).astype(np.float32)
     physical_max = candidates.max(axis=(0, 1)).astype(np.float32)
-    candidates /= control_scale[None, None, :]
-    x = candidates.reshape(len(candidates), -1)
+    x = (candidates / control_scale[None, None, :]).reshape(len(candidates), -1)
 
     centers_norm, cluster_sizes, inertia, iterations = minibatch_kmeans(
         x, num_anchors, seed=seed, batch_size=batch_size,
@@ -440,6 +458,8 @@ def build_fixed_anchor_bank(
     )
     centers_controls = (centers_norm.reshape(num_anchors, CONTROL_STEPS, CONTROL_DIM)
                         * control_scale[None, None, :]).astype(np.float32)
+    representative_indices = select_cluster_exemplars(x, centers_norm)
+    anchors_controls = candidates[representative_indices].copy()
     if not np.isfinite(centers_controls).all():
         raise RuntimeError("K-means generated nonfinite control centroids")
     if (np.abs(centers_controls[..., 0]) > max_accel_mps2 + 1e-4).any():
@@ -472,7 +492,9 @@ def build_fixed_anchor_bank(
             "iterations": int(iterations),
         },
         "cluster_sizes": cluster_sizes.astype(int).tolist(),
-        "prototype_type": "kmeans_centroid",
+        "prototype_type": "nearest_expert_to_cluster_centroid",
+        "representative_selection": "nearest_member_within_each_final_cluster",
+        "representative_candidate_indices": representative_indices.tolist(),
         "medoid_selection_used": False,
         "trajectory_to_control_matching_used": False,
         "inverse_dynamics_used": False,
@@ -480,12 +502,12 @@ def build_fixed_anchor_bank(
         "safety_scoring_used": False,
         "adaptive_selection_used": False,
         "control_bank_scene_independent": True,
-        "trajectory_anchor_policy": "runtime_kinematic_rollout_from_fixed_control_centroid",
+        "trajectory_anchor_policy": "runtime_kinematic_rollout_from_fixed_expert_control_sequence",
         "source_control_min": physical_min.astype(float).tolist(),
         "source_control_max": physical_max.astype(float).tolist(),
     }
     metadata_text = json.dumps(metadata, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    bank_hash = _content_sha256((centers_controls, control_scale), metadata_text)
+    bank_hash = _content_sha256((anchors_controls, centers_controls, control_scale), metadata_text)
 
     output = Path(output_path).expanduser()
     output = output.resolve() if output.is_absolute() else (ROOT / output).resolve()
@@ -494,7 +516,7 @@ def build_fixed_anchor_bank(
     with temp.open("wb") as handle:
         np.savez_compressed(
             handle,
-            anchors_controls=centers_controls,
+            anchors_controls=anchors_controls,
             cluster_centers_controls=centers_controls,
             control_scale=control_scale,
             metadata_json=np.asarray(metadata_text),
@@ -514,6 +536,8 @@ def build_fixed_anchor_bank(
         "normalized_inertia": float(inertia),
         "source_split": "train", "control_source_key": control_key,
         "medoid_selection_used": False,
+        "prototype_type": "nearest_expert_to_cluster_centroid",
+        "representative_candidate_indices": representative_indices.tolist(),
         "trajectory_to_control_matching_used": False,
         "mode_valid_mask_used": False,
     }
