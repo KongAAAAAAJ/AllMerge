@@ -116,25 +116,18 @@ class ControlDiffusionPlanner(nn.Module):
         self.anchors_config = dict(anchors_config or {'strategy': 'dynamic'})
         anchor_strategy = self.anchors_config.get('strategy', 'dynamic')
         # A0_FIXED_CONTROL_KMEANS_V3
-        if anchor_strategy not in ('dynamic', 'adaptive', 'fixed'):
-            raise ValueError('Control anchor strategy must be dynamic, adaptive or fixed')
+        if anchor_strategy not in ('dynamic', 'adaptive', 'fixed', 'a0', 'a1', 'a2'):
+            raise ValueError('Control anchor strategy must be dynamic, a0/fixed, a1 or a2/adaptive')
         self.anchor_manager = None
-        # One source of truth: control.model.num_modes. Legacy num_selected
-        # entries in older YAML/checkpoints are overwritten so A1/A2 cannot
-        # silently retain a stale value when num_modes changes.
-        self.anchors_config['num_selected'] = int(self.scene_config.num_modes)
-        if anchor_strategy == 'dynamic':
-            # A1 and A2 share the same configurable candidate pool.
-            from highway_env.planner.anchor_scoring.manager import DynamicAnchorManager
-            self.anchor_manager = DynamicAnchorManager(
-                self.anchors_config, num_selected=self.scene_config.num_modes
-            )
-        elif anchor_strategy == 'adaptive':
+        if anchor_strategy in ('adaptive', 'fixed', 'a0', 'a1', 'a2'):
+            if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
+                raise ValueError('num_selected must equal model num_modes')
+        if anchor_strategy in ('adaptive', 'a2'):
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
             self.anchor_manager = AdaptiveAnchorManager(
                 self.anchors_config, num_selected=self.scene_config.num_modes
             )
-        elif anchor_strategy == 'fixed':
+        elif anchor_strategy in ('fixed', 'a0'):
             from highway_env.planner.fixed_anchor_manager import FixedAnchorManager
             self.anchor_manager = FixedAnchorManager(
                 self.anchors_config,
@@ -146,6 +139,18 @@ class ControlDiffusionPlanner(nn.Module):
             )
             # Persist the exact K-means control-bank identity in the planner checkpoint.
             self.anchors_config['bank_sha256'] = self.anchor_manager.bank_sha256
+        elif anchor_strategy == 'a1':
+            if self.scene_config.num_modes != 10:
+                raise ValueError('A1 currently defines exactly 10 fixed semantic anchor slots')
+            from highway_env.planner.a1_anchor_manager import A1AnchorManager
+            self.anchor_manager = A1AnchorManager(
+                self.anchors_config,
+                control_steps=self.ctrl_cfg.horizon_steps,
+                dt=self.ctrl_cfg.dt,
+                wheelbase_m=self.ctrl_cfg.wheelbase_m,
+                max_accel_mps2=self.ctrl_cfg.max_accel_mps2,
+                max_steer_rad=self.ctrl_cfg.max_steer_rad,
+            )
         self._validate_objectives()
 
     def _encode_scene(self, features):

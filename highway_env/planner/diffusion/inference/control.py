@@ -128,8 +128,52 @@ class ControlDiffusionRuntime:
         return prediction
 
     @torch.no_grad()
-    def infer(self, numpy_features, *, jtp_inputs=None):
-        features = self.adapter.to_torch(numpy_features)
+    def infer(self, numpy_features, *, jtp_inputs=None, a1_road_geometry=None):
+        anchor_manager = getattr(self.model, "anchor_manager", None)
+        anchor_kind = getattr(anchor_manager, "runtime_kind", None)
+        adapter_input = dict(numpy_features)
+        # Fixed/A1/A2 strategies construct their own online candidate bank.
+        # The shared tensor adapter keeps a stable schema, so supply inert
+        # placeholders only when the live environment did not emit legacy
+        # coarse anchors. The selected manager overwrites them before denoising.
+        if anchor_kind in ("a0", "a1", "a2"):
+            ego_raw = np.asarray(adapter_input["ego_state"])
+            batch_size = int(ego_raw.shape[0])
+            modes = int(self.model.scene_config.num_modes)
+            horizon = int(self.model.scene_config.horizon_steps)
+            adapter_input.setdefault(
+                "coarse_trajectories",
+                np.zeros((batch_size, modes, horizon, 2), dtype=np.float32),
+            )
+            adapter_input.setdefault(
+                "mode_valid_mask",
+                np.zeros((batch_size, modes), dtype=np.bool_),
+            )
+        features = self.adapter.to_torch(adapter_input)
+        if anchor_kind == "a1":
+            if not isinstance(a1_road_geometry, dict):
+                raise RuntimeError(
+                    "A1 is configured for online inference but live full-resolution road geometry "
+                    "was not supplied by the environment."
+                )
+            required = (
+                "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
+                "road_current_lane_slot", "road_target_lane_slot",
+                "road_lane_connections", "road_lane_meta",
+            )
+            missing = [key for key in required if key not in a1_road_geometry]
+            if missing:
+                raise KeyError(f"Online A1 road geometry is missing fields: {missing}")
+            batch_size = int(features["ego_state"].shape[0])
+            for key in required:
+                value = np.asarray(a1_road_geometry[key])
+                if value.shape[0] != batch_size:
+                    raise ValueError(
+                        f"Online A1 road geometry {key} has batch={value.shape[0]}, "
+                        f"expected {batch_size}"
+                    )
+                features[key] = torch.as_tensor(value, device=self.device)
+            features["_a1_online_runtime"] = True
         generator = None
         if self.deterministic_seed is not None:
             generator = torch.Generator(device=self.device)
@@ -221,4 +265,30 @@ class ControlDiffusionRuntime:
         result['trajectory_dense_time_s'] = (
             np.arange(1, int(self.model.ctrl_cfg.horizon_steps) + 1, dtype=np.float32)
             * float(self.model.ctrl_cfg.dt))
+        anchor_manager = getattr(self.model, "anchor_manager", None)
+        anchor_kind = getattr(anchor_manager, "runtime_kind", "dynamic")
+        result["anchor_runtime_kind"] = anchor_kind
+        if anchor_kind == "a0":
+            result["a0_bank_sha256"] = anchor_manager.bank_sha256
+        if anchor_kind == "a1":
+            result["a1_generation_latency_ms"] = np.asarray(
+                float(anchor_manager.last_latency_ms), dtype=np.float32
+            )
+            result["a1_valid_counts"] = np.asarray(
+                anchor_manager.last_valid_counts, dtype=np.int16
+            )
+        if anchor_kind == "a2":
+            result["a2_candidate_count"] = np.asarray(
+                int(anchor_manager.builder.num_candidates), dtype=np.int16
+            )
+            result["a2_selection_latency_ms"] = np.asarray(
+                float(anchor_manager.last_latency_ms), dtype=np.float32
+            )
+            result["a2_valid_candidate_counts"] = np.asarray(
+                anchor_manager.last_valid_counts, dtype=np.int16
+            )
+            result["a2_scores"] = anchor_manager.last_scores.detach().cpu().numpy()
+            result["a2_selected_indices"] = (
+                anchor_manager.last_selected_indices.detach().cpu().numpy()
+            )
         return result

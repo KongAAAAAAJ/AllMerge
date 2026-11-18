@@ -562,7 +562,7 @@ class MultiAgentAction(ActionType):
         planner_flag,
         target_lane_indices=None,
     ):
-        """Run Diffusion inference and optional control-space JTP projection."""
+        """Run Diffusion inference with optional online A1 anchors and JTP projection."""
         if features is None:
             return
 
@@ -653,7 +653,27 @@ class MultiAgentAction(ActionType):
             if jtp_enabled:
                 jtp_inputs = live
 
-        output = runtime.infer(features, jtp_inputs=jtp_inputs)
+        # A1 is rebuilt from the current road graph at every online planning
+        # cycle. The offline A1 dataset is never reused as a live trajectory.
+        a1_road_geometry = None
+        anchor_manager = getattr(getattr(runtime, "model", None), "anchor_manager", None)
+        if getattr(anchor_manager, "runtime_kind", None) == "a1":
+            feature_builder = getattr(self.env, "planner_feature_builder", None)
+            if feature_builder is None:
+                raise RuntimeError("Online A1 requires the live planner feature builder")
+            # Use the same lane sampling/preview settings recorded in the A1
+            # training manifest, rather than RoadGeometryExporter's defaults.
+            feature_builder.config["road_geometry"] = dict(
+                anchor_manager.road_geometry_config
+            )
+            a1_road_geometry = feature_builder.build_road_geometry_batch(
+                target_lane_indices
+            )
+            self.env.latest_planner_road_geometry = a1_road_geometry
+
+        output = runtime.infer(
+            features, jtp_inputs=jtp_inputs, a1_road_geometry=a1_road_geometry
+        )
         self.env.latest_diffusion_output = output
         self.env.latest_diffusion_jtp_diagnostics = output.get("jtp_diagnostics", {})
         self.env.latest_diffusion_jtp_status = str(output.get("jtp_status", "unknown"))

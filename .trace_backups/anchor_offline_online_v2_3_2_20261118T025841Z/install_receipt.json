@@ -1,0 +1,45 @@
+{
+  "patch_id": "TRACE_ANCHOR_OFFLINE_ONLINE_V2_3_2",
+  "installed_utc": "20261118T025841Z",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "written": [
+    "configs\\anchors\\a1.yaml",
+    "highway_env\\envs\\common\\action.py",
+    "highway_env\\planner\\a1_anchor_manager.py",
+    "highway_env\\planner\\anchor_scoring\\manager.py",
+    "highway_env\\planner\\diffusion\\inference\\control.py",
+    "highway_env\\planner\\diffusion\\inference\\runtime.py",
+    "highway_env\\planner\\diffusion\\models\\control.py",
+    "highway_env\\planner\\diffusion\\training\\control.py",
+    "highway_env\\planner\\fixed_anchor_manager.py",
+    "tests\\test_a1_online_runtime.py",
+    "docs\\anchor_offline_online_contract.md",
+    "highway_env\\planner\\anchor_scoring\\train.py"
+  ],
+  "three_way_merged": [
+    "configs\\anchors\\a1.yaml",
+    "highway_env\\envs\\common\\action.py",
+    "highway_env\\planner\\anchor_scoring\\manager.py",
+    "highway_env\\planner\\diffusion\\inference\\runtime.py",
+    "highway_env\\planner\\diffusion\\models\\control.py",
+    "highway_env\\planner\\diffusion\\training\\control.py",
+    "highway_env\\planner\\anchor_scoring\\train.py"
+  ],
+  "overlapping_local_hunks_replaced_by_TRACE": {
+    "configs\\anchors\\a1.yaml": [
+      "base lines 14-14"
+    ],
+    "highway_env\\planner\\anchor_scoring\\manager.py": [
+      "base lines 25-33"
+    ],
+    "highway_env\\planner\\diffusion\\models\\control.py": [
+      "base lines 122-125"
+    ],
+    "highway_env\\planner\\anchor_scoring\\train.py": [
+      "base lines 156-156"
+    ]
+  },
+  "already_matching": [],
+  "backup_dir": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\anchor_offline_online_v2_3_2_20261118T025841Z",
+  "validation": "compile + A1 CLI help + A0/A1/A2 runtime unit tests"
+}

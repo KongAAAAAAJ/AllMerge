@@ -1,6 +1,7 @@
 """A1/A2 runtime adapters over one shared candidate-pool implementation."""
 from __future__ import annotations
 
+import time
 import torch
 
 from highway_env.planner.adaptive_anchors import (
@@ -57,6 +58,7 @@ class DynamicAnchorManager:
 
 
 class AdaptiveAnchorManager:
+    runtime_kind = "a2"
     """A2: safety-ranked Top-R followed by the same joint diversity selection."""
 
     def __init__(self, config, *, device="cpu", num_selected=None):
@@ -87,24 +89,41 @@ class AdaptiveAnchorManager:
         from highway_env.planner.diffusion.config.experiment import resolve_repo_file
         checkpoint = resolve_repo_file(checkpoint)
         if not checkpoint.is_file():
-            raise FileNotFoundError(f"A2 safety scorer checkpoint missing: {checkpoint}")
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
-        if payload.get("architecture") != "TRACE_Adaptive_Anchor_Safety_Scorer_V1":
-            raise ValueError("Incompatible safety scorer checkpoint")
-        trained_generator = payload.get("candidate_generation", {})
-        if trained_generator != self.builder.resolved_config:
+            raise FileNotFoundError(f'A2 safety scorer checkpoint missing: {checkpoint}')
+        payload = torch.load(checkpoint, map_location='cpu', weights_only=True)
+        if payload.get('architecture') != 'TRACE_Adaptive_Anchor_Safety_Scorer_V1':
+            raise ValueError('Incompatible safety scorer checkpoint')
+        trained_generator = payload.get('candidate_generation') or {}
+        # Normalize sparse legacy YAML fragments and fully resolved checkpoint
+        # configs through the same builder before comparing candidate semantics.
+        trained_builder = AdaptiveCandidateBuilder(trained_generator)
+        trained_resolved = getattr(
+            trained_builder, "resolved_config",
+            getattr(getattr(trained_builder, "base", None), "config", trained_generator),
+        )
+        runtime_resolved = getattr(
+            self.builder, "resolved_config",
+            getattr(getattr(self.builder, "base", None), "config",
+                    self.config.get("candidate_generation") or {}),
+        )
+        if dict(trained_resolved) != dict(runtime_resolved):
             raise ValueError(
-                "A2 candidate generator differs from scorer training configuration. "
-                "Rebuild the candidate cache and retrain the scorer after changing pool settings."
+                "A2 candidate generator differs from scorer training configuration "
+                "after resolving defaults."
             )
-        self.scorer = AnchorSafetyScorer(payload.get("model_config")).eval()
-        self.scorer.load_state_dict(payload["model_state"], strict=True)
+        self.scorer = AnchorSafetyScorer(payload.get('model_config')).eval()
+        self.scorer.load_state_dict(payload['model_state'], strict=True)
         for param in self.scorer.parameters():
             param.requires_grad_(False)
         self.scorer.to(device)
+        self.last_latency_ms = 0.0
+        self.last_scores = None
+        self.last_selected_indices = None
+        self.last_valid_counts = None
 
     @torch.no_grad()
     def select(self, features):
+        started = time.perf_counter()
         device = features["ego_state"].device
         if next(self.scorer.parameters()).device != device:
             self.scorer.to(device)
@@ -130,4 +149,8 @@ class AdaptiveAnchorManager:
         selected["coarse_controls"] = controls[batch, index]
         selected["coarse_trajectories"] = xy[batch, index]
         selected["mode_valid_mask"] = mask[batch, index]
+        self.last_scores = scores.detach()
+        self.last_selected_indices = index.detach()
+        self.last_valid_counts = mask.sum(dim=1).detach().cpu().tolist()
+        self.last_latency_ms = (time.perf_counter() - started) * 1000.0
         return selected

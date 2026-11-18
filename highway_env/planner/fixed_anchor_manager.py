@@ -11,6 +11,7 @@ from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 
 
 class FixedAnchorManager:
+    runtime_kind = "a0"
     """Load a fixed [K,40,2] control-centroid bank and broadcast it per scene.
 
     The controls are fixed across scenes. Their paired 8-point coarse XY

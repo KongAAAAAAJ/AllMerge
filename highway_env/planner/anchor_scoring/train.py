@@ -168,28 +168,12 @@ def main(argv=None):
     cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError("Scorer config must be a mapping")
-    # Resolve K from the same diffusion config used by the planner. The scorer
-    # training metrics also report K-selected safe-anchor performance, so K
-    # must not be duplicated as a stale num_selected value in this YAML.
-    cfg["num_selected"] = _resolve_num_selected(cfg)
-
-    # Resolve the one shared A1/A2 candidate-pool definition before caching
-    # and checkpointing, so runtime selection can verify exact compatibility.
     candidate_builder = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
-    cfg["candidate_generation"] = candidate_builder.resolved_config
-    if cfg.get("top_r") is None:
-        fraction = float(cfg.get("top_r_fraction", 0.5555556))
-        if not 0.0 < fraction <= 1.0:
-            raise ValueError("top_r_fraction must be in (0,1]")
-        cfg["top_r"] = max(
-            int(cfg["num_selected"]),
-            int(round(candidate_builder.num_candidates * fraction)),
-        )
-    if int(cfg["top_r"]) > candidate_builder.num_candidates:
-        raise ValueError(
-            f"top_r={cfg['top_r']} exceeds candidate pool "
-            f"{candidate_builder.num_candidates}"
-        )
+    candidate_generation_resolved = dict(getattr(
+        candidate_builder, "resolved_config",
+        getattr(getattr(candidate_builder, "base", None), "config",
+                cfg.get("candidate_generation") or {}),
+    ))
     if args.dataset_root:
         cfg["dataset_root"] = args.dataset_root
     if args.max_samples is not None:
@@ -311,7 +295,7 @@ def main(argv=None):
         ckpt = {
             "architecture": "TRACE_Adaptive_Anchor_Safety_Scorer_V1",
             "model_config": model_cfg,
-            "candidate_generation": cfg.get("candidate_generation", {}),
+            "candidate_generation": candidate_generation_resolved,
             "model_state": model.state_dict(),
             "epoch": epoch,
             "temperature": float(cfg.get("temperature", 0.3)),

@@ -65,11 +65,14 @@ class DiffusionPlannerRuntime(TrajectoryDiffusionRuntime):
 
         super().__init__(runtime_config)
 
-    def infer(self, numpy_features, *, jtp_inputs=None):
+    def infer(self, numpy_features, *, jtp_inputs=None, a1_road_geometry=None):
         if hasattr(self, '_control_delegate'):
-            result = self._control_delegate.infer(numpy_features, jtp_inputs=jtp_inputs)
+            result = self._control_delegate.infer(
+                numpy_features, jtp_inputs=jtp_inputs,
+                a1_road_geometry=a1_road_geometry,
+            )
             self.last_latency_ms = self._control_delegate.last_latency_ms
             return result
-        if jtp_inputs is not None:
-            raise ValueError('JTP runtime inputs were supplied to trajectory-space Diffusion')
+        if jtp_inputs is not None or a1_road_geometry is not None:
+            raise ValueError('Control-space JTP/A1 runtime inputs were supplied to trajectory-space Diffusion')
         return super().infer(numpy_features)

@@ -95,6 +95,8 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         execution_config=cfg.get('execution'), loss_config=cfg.get('losses'),
                 anchors_config=cfg.get('anchors'),
             ).to(selected_device)
+    if getattr(model.anchor_manager, "runtime_kind", None) == "a1":
+        model.anchor_manager.validate_dataset_contract(root)
     # Explicitly exclude frozen K2 parameters from the optimizer.
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
     batch_size = int(tr.get('batch_size', 8))
