@@ -1,6 +1,6 @@
 # TRACE A2 safety-scoring-only training (no expert trajectory labels).
 # Uses raw episodes and the shared A1/A2 candidate generator for scene inputs.
-dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
+dataset_root: outputs/expert_dataset/smoke_actuator_constraints_v2
 output_dir: outputs/anchor_ablation/ckpt
 train_split: train
 val_split: val
