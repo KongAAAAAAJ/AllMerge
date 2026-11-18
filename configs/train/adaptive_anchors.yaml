@@ -1,17 +1,17 @@
 # TRACE A2 safety-scoring-only training (no expert trajectory labels).
 # Uses raw episodes and the shared A1/A2 candidate generator for scene inputs.
-dataset_root: outputs/expert_dataset/smoke_actuator_constraints_v2
+dataset_root: outputs/expert_dataset/expert_trucksim_50k
 output_dir: outputs/anchor_ablation/ckpt
 train_split: train
 val_split: val
 # Raw cache: candidate/teacher arrays are precomputed once and memory-mapped.
 batch_size: 16
-num_workers: 2
+num_workers: 4
 prefetch_factor: 2
 drop_last: false
 
 # Candidate pools and deterministic safety labels are generated once and reused.
-cache_dir: outputs/anchor_ablation/cache_v3
+cache_dir: outputs/anchor_ablation/cache_A2
 precompute_batch_size: 16
 precompute_device: auto
 max_samples: null

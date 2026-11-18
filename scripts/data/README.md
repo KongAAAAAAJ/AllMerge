@@ -2,9 +2,8 @@
 python scripts\data\collect_expert_dataset.py ^
   --config configs\data\expert_collection.yaml ^
   --dataset-name expert_trucksim_50k ^
-  --trucksim-model-id L0_MU08 ^
   --target-samples 50000 ^
-  --min-episodes 4 ^
+  --min-episodes 252 ^
   --duration 12 ^
   --max-episodes 30000 ^
   --no-resume
@@ -19,10 +18,10 @@ A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景
 训练 A2 命令：
 python scripts/data/train_a2_anchors.py ^
   --config configs/train/adaptive_anchors.yaml ^
-  --dataset-root outputs/expert_dataset/smoke_actuator_constraints_v2 ^
-  --max-epochs 2 --max-batches 2 --max-samples 64 ^
-  --output-dir outputs/anchor_ablation/ckpt/A2_smoke2 ^
-  --cache-dir outputs/anchor_ablation/cache_A2_smoke2
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --max-epochs 30 ^
+  --output-dir outputs/anchor_ablation/ckpt/A2_anchors ^
+  --cache-dir outputs/anchor_ablation/cache_A2
 
 评估A0 A1 A2命令：
 python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2
