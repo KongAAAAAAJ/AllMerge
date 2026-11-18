@@ -17,7 +17,7 @@ conditions:
   independent_dll_images: true
   copy_instances_beside_source_dll: true
 collection:
-  dataset_name: expert_trucksim_k2_raw_100k
+  dataset_name: expert_trucksim_k2_raw_100k_v2
   output_root: outputs/expert_dataset
   target_samples: 100000
   min_episodes: 0

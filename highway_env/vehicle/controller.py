@@ -1462,16 +1462,16 @@ class FOLLOWVehicle(ControlledVehicle):
     """A leader vehicle in a platoon or a group"""
 
     # Longitudinal policy parameters
-    ACC_MAX = 2.0  # [m/s2]
+    ACC_MAX = 2.5  # [m/s2]
     """Maximum acceleration."""
 
     DEFAULT_TARGET_SPEEDS = np.linspace(20, 30, 3)
     LANE_CHANGE_DELAY = 1.0  # [s]
 
-    COMFORT_ACC_MAX = 4.0  # [m/s2]
+    COMFORT_ACC_MAX = 2.5  # [m/s2]
     """Desired maximum acceleration."""
 
-    COMFORT_ACC_MIN = -5  # [m/s2]
+    COMFORT_ACC_MIN = -4.0  # [m/s2]
     """Desired maximum deceleration."""
 
     TTC_MIN = 2.5  # [s]
