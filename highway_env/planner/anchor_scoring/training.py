@@ -6,7 +6,6 @@ are precomputed once, then memory-mapped during training.
 """
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import random
@@ -145,26 +144,8 @@ def _save_history(path: Path, history):
         writer.writerows(history)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Train/evaluate TRACE adaptive safety scorer V3 (shared 108-candidate pool)")
-    parser.add_argument("--config", default="configs/train/adaptive_anchors.yaml")
-    parser.add_argument("--dataset-root", default=None)
-    parser.add_argument("--output-dir", default=None)
-    parser.add_argument("--cache-dir", default=None)
-    parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--max-batches", type=int, default=None)
-    parser.add_argument("--max-samples", type=int, default=None)
-    parser.add_argument("--precompute-batch-size", type=int, default=None)
-    parser.add_argument("--precompute-device", default=None)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--evaluate-only", action="store_true")
-    parser.add_argument("--prepare-cache-only", action="store_true")
-    parser.add_argument("--rebuild-cache", action="store_true")
-    parser.add_argument("--checkpoint", default=None,
-                        help="Warm-start model weights only; optimizer state is reset.")
-    parser.add_argument("--resume", default=None,
-                        help="Resume a V3 checkpoint including optimizer/history state.")
-    args = parser.parse_args(argv)
+def train(args):
+    """Train, resume, evaluate or prepare A2 caches from parsed entry arguments."""
 
     cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
@@ -333,7 +314,3 @@ def main(argv=None):
         yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
     print(f"[A2] best scorer: {output_dir / 'best.pt'}")
-
-
-if __name__ == "__main__":
-    main()

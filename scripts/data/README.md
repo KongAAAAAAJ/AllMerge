@@ -1,12 +1,12 @@
 采集专家数据命令：
 python scripts\data\collect_expert_dataset.py ^
   --config configs\data\expert_collection.yaml ^
-  --dataset-name smoke_actuator_constraints_v2 ^
+  --dataset-name expert_trucksim_50k ^
   --trucksim-model-id L0_MU08 ^
-  --target-samples 3000 ^
+  --target-samples 50000 ^
   --min-episodes 4 ^
   --duration 12 ^
-  --max-episodes 300 ^
+  --max-episodes 30000 ^
   --no-resume
 
 构建 A0 anchor 命令：
@@ -17,7 +17,7 @@ python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-r
 A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景在线生成，无需单独构建或保存锚点库。数量读取 diffusion.yaml 的 control.model.num_modes，生成参数位于 configs/anchors/a1.yaml。
 
 训练 A2 命令：
-python -m highway_env.planner.anchor_scoring.train ^
+python scripts/data/train_a2_anchors.py ^
   --config configs/train/adaptive_anchors.yaml ^
   --dataset-root outputs/expert_dataset/smoke_actuator_constraints_v2 ^
   --max-epochs 2 --max-batches 2 --max-samples 64 ^
