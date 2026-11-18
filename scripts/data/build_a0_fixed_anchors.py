@@ -52,50 +52,8 @@ def resolve_shards(dataset_root: Path, split: str = "train") -> list[Path]:
 
 
 def raw_training_episodes(root: Path):
-    manifest_path = root / 'reports/manifest.json'
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if not manifest.get('complete') or manifest.get('schema_version') != 'trace_expert_raw_k2_v2':
-        raise ValueError('Expected a completed trace_expert_raw_k2_v2 dataset')
-    if not np.isclose(float(manifest['trajectory']['dt_s']), 0.1):
-        raise ValueError('Raw A0 controls require a 0.1 s observation grid')
-    records = manifest['episode_files']
-    paths = sorted((root / 'episodes').glob('episode_*.npz'))
-    if len(paths) != len(records) or {p.name for p in paths} != {r['name'] for r in records}:
-        raise ValueError('Raw episode inventory differs from manifest')
-    if len({r['episode_index'] for r in records}) != len(records):
-        raise ValueError('Duplicate raw episode IDs')
-    # Match expert_dataset.split_shards: one final shard per episode, same sort,
-    # RandomState shuffle, reserved splits and largest-remainder allocation.
-    by_name = {r['name']: r for r in records}
-    paths.sort(key=lambda p: f"shard_{int(by_name[p.name]['episode_index']):06d}.npz")
-    ratios = np.asarray(manifest['split_ratios'], dtype=float)
-    if ratios.shape != (3,) or not np.isfinite(ratios).all() or (ratios < 0).any() or ratios.sum() <= 0:
-        raise ValueError('Invalid raw split ratios')
-    ratios /= ratios.sum()
-    active = [i for i, ratio in enumerate(ratios) if ratio > 0]
-    counts = np.zeros(3, dtype=int)
-    if len(paths) >= len(active):
-        counts[active] = 1
-        exact = (len(paths) - len(active)) * ratios
-        extras = np.floor(exact).astype(int)
-        counts += extras
-        order = sorted(active, key=lambda i: exact[i] - extras[i], reverse=True)
-        for i in order[:len(paths) - int(counts.sum())]:
-            counts[i] += 1
-    else:
-        counts[active[:len(paths)]] = 1
-    indices = np.arange(len(paths))
-    np.random.RandomState(int(manifest['split_seed'])).shuffle(indices)
-    selected = [paths[i] for i in indices[:counts[0]]]
-    if not selected:
-        raise ValueError('Raw dataset has no training episodes')
-    return selected, by_name, {
-        'source_manifest_sha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        'split_seed': int(manifest['split_seed']), 'split_ratios': ratios.tolist(),
-        'training_episode_files': [p.name for p in selected],
-        'split_counts': dict(zip(('train', 'val', 'test'), counts.astype(int).tolist())),
-        'split_policy': 'episode-level; matches one-episode-per-shard split_shards',
-    }
+    from data_pipeline.raw_expert_dataset import raw_episode_paths
+    return raw_episode_paths(root, 'train')
 
 
 def restore_expert_windows(histories, frames, ego_ids):

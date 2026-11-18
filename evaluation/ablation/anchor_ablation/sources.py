@@ -3,8 +3,9 @@ from pathlib import Path
 
 import torch
 import yaml
+from learning.config import load_yaml_config
 
-from highway_env.planner.diffusion.config.experiment import resolve_repo_file
+from highway_env.planner.diffusion.config.experiment import resolve_repo_file, load_mode_yaml
 
 
 class AnchorSource:
@@ -13,12 +14,14 @@ class AnchorSource:
         self.manager = manager
 
     def _prepare_anchors(self, features):
+        if getattr(self.manager, 'runtime_kind', None) == 'a1' and 'coarse_controls' not in features:
+            features = {**features, '_a1_online_runtime': True}
         return features if self.manager is None else self.manager.select(features)
 
 
 def _resolve_num_modes(diffusion_config: str) -> int:
     path = resolve_repo_file(diffusion_config)
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = load_yaml_config(path)
     value = (((raw.get("control") or {}).get("model") or {}).get("num_modes", 10))
     value = int(value)
     if value <= 0:
@@ -52,18 +55,18 @@ def build_sources(methods, cfg, *, bank_path=None, scorer_path=None,
             artifacts[method] = {'bank_path': str(manager.bank_path),
                                  'bank_sha256': manager.bank_sha256}
         elif method == 'A1':
-            from highway_env.planner.anchor_scoring.manager import DynamicAnchorManager
-            config = {
-                'strategy': 'dynamic', 'num_selected': num_modes,
-                'candidate_generation': candidate_generation,
-                'trajectory_weight': float(scorer_cfg.get('trajectory_weight', 1.0)),
-                'control_weight': float(scorer_cfg.get('control_weight', 1.0)),
-            }
-            manager = DynamicAnchorManager(config, num_selected=num_modes, device=device)
-            artifacts[method] = {
-                'source': 'shared online control-space candidate pool',
-                'candidate_pool_size': manager.builder.num_candidates,
-            }
+            from highway_env.planner.a1_anchor_manager import A1AnchorManager
+            diffusion = load_mode_yaml(diffusion_config)
+            dynamics = diffusion['control']
+            config = {**diffusion.get('anchors', {}), 'strategy': 'a1', 'num_selected': num_modes}
+            manager = A1AnchorManager(
+                config, num_selected=num_modes,
+                control_steps=dynamics['horizon_steps'], dt=dynamics['dt'],
+                wheelbase_m=dynamics['wheelbase_m'], max_accel_mps2=dynamics['max_accel_mps2'],
+                max_steer_rad=dynamics['max_steer_rad'])
+            artifacts[method] = {'source': 'shared offline/online A1AnchorBuilder',
+                                 'a1_config_path': manager.config_path,
+                                 'a1_parameters': manager.builder_config}
         else:
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
             path = resolve_repo_file(scorer_path or settings.get('a2_scorer') or

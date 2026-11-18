@@ -1,4 +1,4 @@
-"""A1/A2 runtime adapters over one shared candidate-pool implementation."""
+"""A2 safety-scoring adapter. A1 uses planner.a1_anchor_manager."""
 from __future__ import annotations
 
 import time
@@ -6,7 +6,6 @@ import torch
 
 from highway_env.planner.adaptive_anchors import (
     AdaptiveCandidateBuilder,
-    select_diverse_anchors,
 )
 from .model import AnchorSafetyScorer, select_anchors
 
@@ -14,47 +13,6 @@ from .model import AnchorSafetyScorer, select_anchors
 DEFAULT_CANDIDATE_CONFIG = {
     "config_path": "configs/anchors/control_candidate_pool.yaml"
 }
-
-
-class DynamicAnchorManager:
-    """A1: sample the shared candidate pool, then select K_a by diversity only."""
-
-    def __init__(self, config=None, *, device="cpu", num_selected=None):
-        self.config = dict(config or {})
-        generation = self.config.get("candidate_generation", DEFAULT_CANDIDATE_CONFIG)
-        self.builder = AdaptiveCandidateBuilder(generation)
-        self.num_selected = int(
-            num_selected if num_selected is not None
-            else self.config.get("num_selected", 10)
-        )
-        if not 1 <= self.num_selected <= self.builder.num_candidates:
-            raise ValueError(
-                f"A1 requires 1 <= num_selected <= {self.builder.num_candidates}"
-            )
-        self.trajectory_weight = float(self.config.get("trajectory_weight", 1.0))
-        self.control_weight = float(self.config.get("control_weight", 1.0))
-        self.device = torch.device(device)
-
-    @torch.no_grad()
-    def select(self, features):
-        device = features["ego_state"].device
-        pool = self.builder.build_batch(features)
-        controls = torch.as_tensor(pool["coarse_controls"], device=device)
-        xy = torch.as_tensor(pool["coarse_trajectories"], device=device)
-        valid = torch.as_tensor(pool["mode_valid_mask"], device=device)
-        index = select_diverse_anchors(
-            controls, xy, valid,
-            num_selected=self.num_selected,
-            trajectory_weight=self.trajectory_weight,
-            control_weight=self.control_weight,
-        )
-        batch = torch.arange(controls.shape[0], device=device)[:, None]
-        selected = {key: value for key, value in features.items()
-                    if not key.startswith("a2_candidate_")}
-        selected["coarse_controls"] = controls[batch, index]
-        selected["coarse_trajectories"] = xy[batch, index]
-        selected["mode_valid_mask"] = valid[batch, index]
-        return selected
 
 
 class AdaptiveAnchorManager:

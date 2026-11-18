@@ -7,10 +7,10 @@ anchor_sources:
   a0_rollout:
     dt: 0.1
     wheelbase_m: 5.5
-    max_accel_mps2: 2.5
-    max_steer_rad: 0.08
+    max_accel_mps2: 4.0
+    max_steer_rad: 0.1
   # a2_scorer defaults to output_dir/best.pt from --scorer-config.
-dataset_root: outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k
+dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
 split: test
 num_frames: 200          # 0 evaluates all complete synchronized frames
 max_samples: null
@@ -22,3 +22,5 @@ sample_seed: 2026
 figure_scenes: 3        # Distinct frames; rows in the anchor comparison figure
 figure_seed: 2027       # Independent of evaluation scores and inference seeds
 output_dir: outputs/anchor_ablation/evaluation
+
+

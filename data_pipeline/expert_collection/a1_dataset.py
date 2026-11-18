@@ -14,7 +14,6 @@ from data_pipeline.expert_collection.runner import PREANCHOR_REQUIRED, _validate
 from data_pipeline.expert_collection.config import resolve_path
 from data_pipeline.expert_dataset import split_shards
 
-MODE_SEMANTIC_IDS = (0, 0, 0, 1, 1, 1, 2, 2, 2, 3)
 FINAL_REQUIRED = PREANCHOR_REQUIRED + (
     "a1_coarse_controls", "a1_coarse_trajectories", "a1_dense_trajectories",
     "a1_valid_mask", "a1_invalid_reasons", "coarse_controls",
@@ -28,11 +27,12 @@ def _validate_final_shard(path: Path):
         if missing:
             raise ValueError(f"{path.name}: missing final TRACE fields {missing}")
         n = int(z["expert_trajectory_xy"].shape[0])
-        if z["coarse_controls"].shape != (n, 10, 40, 2):
-            raise ValueError(f"{path.name}: coarse_controls must be [N,10,40,2]")
-        if z["coarse_trajectories"].shape != (n, 10, 8, 2):
-            raise ValueError(f"{path.name}: coarse_trajectories must be [N,10,8,2]")
-        if z["mode_valid_mask"].shape != (n, 10) or not z["mode_valid_mask"].astype(bool).any(axis=1).all():
+        k = int(z["coarse_controls"].shape[1])
+        if k < 1 or z["coarse_controls"].shape != (n, k, 40, 2):
+            raise ValueError(f"{path.name}: coarse_controls must be [N,K,40,2]")
+        if z["coarse_trajectories"].shape != (n, k, 8, 2):
+            raise ValueError(f"{path.name}: coarse_trajectories must be [N,K,8,2]")
+        if z["mode_valid_mask"].shape != (n, k) or not z["mode_valid_mask"].astype(bool).any(axis=1).all():
             raise ValueError(f"{path.name}: invalid A1 mode_valid_mask")
         if not np.array_equal(z["mode_valid_mask"], z["a1_valid_mask"]):
             raise ValueError(f"{path.name}: mode_valid_mask and a1_valid_mask differ")
@@ -68,7 +68,7 @@ def _package_episode(preanchor_path: Path, final_path: Path, builder: A1AnchorBu
         raise RuntimeError(f"A1 builder produced no valid anchor for samples {bad[:10]}")
     mode = dist.argmin(axis=1).astype(np.int64)
     arrays["target_mode"] = mode
-    arrays["target_semantic"] = np.asarray(MODE_SEMANTIC_IDS, np.int64)[mode]
+    arrays["target_semantic"] = np.zeros(n, dtype=np.int64)  # No semantic identity in diversity-selected A1 anchors
     arrays["target_mode_geometry_valid"] = np.ones((n,), dtype=bool)
     arrays["target_mode_assignment_distance"] = dist[np.arange(n), mode].astype(np.float32)
 
@@ -116,7 +116,8 @@ def read_source(root):
     return manifest, paths
 
 
-def build_dataset(input_dir, output_dir, config_file, *, check_only=False):
+def build_dataset(input_dir, output_dir, config_file, *, check_only=False,
+                  diffusion_config="configs/train/diffusion.yaml"):
     src, dst, config_file = map(resolve_path, (input_dir, output_dir, config_file))
     if src == dst or src in dst.parents or dst in src.parents:
         raise ValueError("Raw source and final destination must be separate non-nested directories")
@@ -132,6 +133,12 @@ def build_dataset(input_dir, output_dir, config_file, *, check_only=False):
     if cfg["control_steps"] != 40 or not math.isclose(cfg["dt"], 0.1, abs_tol=1e-8):
         raise ValueError("A1 requires 40 controls at 0.1 s")
     cfg = dict(cfg)
+    from learning.config import load_yaml_config
+    diffusion = load_yaml_config(resolve_path(diffusion_config))
+    k = int(diffusion['control']['model'].get('num_modes', 10))
+    if k < 1:
+        raise ValueError('control.model.num_modes must be positive')
+    cfg['num_selected'] = k
     for key, value in zip(("ego_length_m", "ego_width_m"), manifest["vehicle_dimensions_m"]):
         if key in cfg and not math.isclose(float(cfg[key]), value, abs_tol=1e-6):
             raise ValueError(f"A1 {key} differs from captured vehicle geometry")
@@ -147,7 +154,7 @@ def build_dataset(input_dir, output_dir, config_file, *, check_only=False):
     manifest_hash = hashlib.sha256((src / "reports/manifest.json").read_bytes()).hexdigest()
     records = {x["name"]: x for x in manifest["episode_files"]}
     try:
-        valid_counts = np.zeros(10, dtype=np.int64); total = 0; inventory = []
+        valid_counts = np.zeros(k, dtype=np.int64); total = 0; inventory = []
         for path in paths:
             eid = int(records[path.name]["episode_index"])
             dest = stage / "shards" / f"shard_{eid:06d}.npz"
@@ -165,7 +172,7 @@ def build_dataset(input_dir, output_dir, config_file, *, check_only=False):
                  "pipeline": "offline_A1_enrichment_of_raw_expert_dataset", "anchor_generation": "offline_A1_Lattice",
                  "source_dataset": str(src), "source_manifest_sha256": hashlib.sha256((src / "reports/manifest.json").read_bytes()).hexdigest(),
                  "a1_anchor_config": str(config_file), "a1_anchor_parameters": cfg,
-                 "a1_anchor_fields": {"coarse_controls": [10,40,2], "coarse_trajectories": [10,8,2], "mode_valid_mask": [10]},
+                 "a1_anchor_fields": {"coarse_controls": [k,40,2], "coarse_trajectories": [k,8,2], "mode_valid_mask": [k]},
                  "valid_count_by_mode": valid_counts.tolist(), "valid_anchors_mean": float(valid_counts.sum()/total),
                  "shard_inventory": inventory, "splits": {k: len(v) for k,v in splits.items()}, "complete": True}
         _atomic_json(stage / "reports/manifest.json", final)
@@ -177,7 +184,7 @@ def build_dataset(input_dir, output_dir, config_file, *, check_only=False):
     finally:
         if stage.exists():
             shutil.rmtree(stage)
-    print(f"[A1 DONE] {total} samples, mean_valid={final['valid_anchors_mean']:.3f}/10, splits={final['splits']} -> {dst}", flush=True)
+    print(f"[A1 DONE] {total} samples, mean_valid={final['valid_anchors_mean']:.3f}/{k}, splits={final['splits']} -> {dst}", flush=True)
     return 0
 
 
@@ -186,6 +193,8 @@ def main(argv=None):
     p.add_argument("--input-dir", default="outputs/expert_dataset/expert_trucksim_k2_raw_100k", help="Raw dataset root (contains episodes/ and reports/manifest.json)")
     p.add_argument("--output-dir", default="outputs/expert_dataset/expert_trucksim_k2_anchor_pair_100k")
     p.add_argument("--config", default="configs/anchors/a1.yaml")
+    p.add_argument("--diffusion-config", default="configs/train/diffusion.yaml")
     p.add_argument("--check-only", action="store_true")
     args = p.parse_args(argv)
-    return build_dataset(args.input_dir, args.output_dir, args.config, check_only=args.check_only)
+    return build_dataset(args.input_dir, args.output_dir, args.config, check_only=args.check_only,
+                         diffusion_config=args.diffusion_config)

@@ -39,7 +39,8 @@ trajectory:
 control:
   # TRACE A2 is opt-in; A1 remains unchanged during expert data collection.
   anchors:
-    strategy: dynamic
+    strategy: a1
+    a1_config: configs/anchors/a1.yaml
     top_r: 20
     trajectory_weight: 1.0
     control_weight: 1.0
@@ -114,4 +115,3 @@ runtime:
 
 
 
- 

@@ -8,16 +8,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from data_pipeline.expert_dataset import AllMergeExpertDatasetConfig, AllMergeExpertShardDataset
+from data_pipeline.raw_expert_dataset import RawExpertDataset
 
 
 def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: int = 0,
                                 seed: int = 2026, max_samples: int | None = None):
     """Build a reproducible subset containing complete synchronized ego groups."""
-    ds = AllMergeExpertShardDataset(AllMergeExpertDatasetConfig(
-        dataset_root=Path(dataset_root), split=split, include_metadata=True,
-        include_diagnostics=True, max_samples=max_samples,
-    ))
+    ds = RawExpertDataset(dataset_root, split=split, max_samples=max_samples)
     by_shard = defaultdict(list)
     for global_i, (shard_idx, sample_i) in enumerate(ds._index):
         by_shard[int(shard_idx)].append((global_i, int(sample_i)))
@@ -80,6 +77,8 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
     subset = Subset(ds, selected_indices)
     return subset, {
         "split": split,
+        "input_format": "raw",
+        "episode_split": ds.split_manifest,
         "dataset_samples_in_split": len(ds),
         "complete_frames_available": len(complete),
         "selected_frames": len(chosen),

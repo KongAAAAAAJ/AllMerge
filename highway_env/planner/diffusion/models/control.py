@@ -118,6 +118,7 @@ class ControlDiffusionPlanner(nn.Module):
         # A0_FIXED_CONTROL_KMEANS_V3
         if anchor_strategy not in ('dynamic', 'adaptive', 'fixed', 'a0', 'a1', 'a2'):
             raise ValueError('Control anchor strategy must be dynamic, a0/fixed, a1 or a2/adaptive')
+        self.anchors_config["num_selected"] = int(self.scene_config.num_modes)
         self.anchor_manager = None
         if anchor_strategy in ('adaptive', 'fixed', 'a0', 'a1', 'a2'):
             if int(self.anchors_config.get('num_selected', self.scene_config.num_modes)) != self.scene_config.num_modes:
@@ -140,11 +141,9 @@ class ControlDiffusionPlanner(nn.Module):
             # Persist the exact K-means control-bank identity in the planner checkpoint.
             self.anchors_config['bank_sha256'] = self.anchor_manager.bank_sha256
         elif anchor_strategy == 'a1':
-            if self.scene_config.num_modes != 10:
-                raise ValueError('A1 currently defines exactly 10 fixed semantic anchor slots')
             from highway_env.planner.a1_anchor_manager import A1AnchorManager
             self.anchor_manager = A1AnchorManager(
-                self.anchors_config,
+                self.anchors_config, num_selected=self.scene_config.num_modes,
                 control_steps=self.ctrl_cfg.horizon_steps,
                 dt=self.ctrl_cfg.dt,
                 wheelbase_m=self.ctrl_cfg.wheelbase_m,
@@ -163,6 +162,9 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _prepare_anchors(self, features):
         """Dispatch dynamic, adaptive, or fixed anchors without semantic mode identities."""
+        if (getattr(self.anchor_manager, 'runtime_kind', None) == 'a1'
+                and 'coarse_controls' not in features):
+            features = {**features, '_a1_online_runtime': True}
         return features if self.anchor_manager is None else self.anchor_manager.select(features)
 
     def _sample_controls(self, features, *, generator=None, num_steps=None):

@@ -10,7 +10,6 @@ from pathlib import Path
 import time
 
 import numpy as np
-import numpy as np
 import torch
 import yaml
 
@@ -32,7 +31,6 @@ class A1AnchorManager:
     """Shared offline/online A1 adapter with a single ``select`` contract."""
 
     runtime_kind = "a1"
-    NUM_ANCHORS = 10
     CONTROL_STEPS = 40
     SPARSE_STEPS = 8
 
@@ -40,6 +38,7 @@ class A1AnchorManager:
         self,
         config=None,
         *,
+        num_selected: int | None = None,
         control_steps: int = 40,
         dt: float = 0.1,
         wheelbase_m: float = 5.5,
@@ -47,8 +46,10 @@ class A1AnchorManager:
         max_steer_rad: float = 0.08,
     ):
         self.config = dict(config or {})
-        if self.NUM_ANCHORS <= 0:
-            raise RuntimeError("Invalid A1 anchor count")
+        self.num_selected = int(num_selected if num_selected is not None else self.config.get("num_selected", 10))
+        if self.num_selected <= 0:
+            raise ValueError("A1 num_selected must be positive")
+        self.config["num_selected"] = self.num_selected
         if int(control_steps) != self.CONTROL_STEPS:
             raise ValueError(f"A1 requires {self.CONTROL_STEPS} control steps")
         self.control_steps = int(control_steps)
@@ -66,6 +67,7 @@ class A1AnchorManager:
         if not isinstance(a1_cfg, dict):
             raise ValueError("A1 config must contain an 'a1' mapping")
         self.builder_config = dict(a1_cfg)
+        self.builder_config["num_selected"] = self.num_selected
         if int(self.builder_config.get("control_steps", -1)) != self.CONTROL_STEPS:
             raise ValueError("A1 control_steps must equal the control-diffusion horizon (40)")
         if not np.isclose(float(self.builder_config.get("dt", -1)), self.dt, atol=1e-8):
@@ -149,14 +151,14 @@ class A1AnchorManager:
         controls = features["coarse_controls"]
         trajectories = features["coarse_trajectories"]
         valid = features["mode_valid_mask"]
-        if tuple(controls.shape[1:]) != (10, 40, 2):
-            raise ValueError(f"A1 offline controls must be [B,10,40,2], got {tuple(controls.shape)}")
-        if tuple(trajectories.shape[1:]) != (10, 8, 2):
+        if tuple(controls.shape[1:]) != (self.num_selected, 40, 2):
+            raise ValueError(f"A1 offline controls must be [B,{self.num_selected},40,2], got {tuple(controls.shape)}")
+        if tuple(trajectories.shape[1:]) != (self.num_selected, 8, 2):
             raise ValueError(
-                f"A1 offline trajectories must be [B,10,8,2], got {tuple(trajectories.shape)}"
+                f"A1 offline trajectories must be [B,{self.num_selected},8,2], got {tuple(trajectories.shape)}"
             )
-        if tuple(valid.shape[1:]) != (10,):
-            raise ValueError(f"A1 offline validity mask must be [B,10], got {tuple(valid.shape)}")
+        if tuple(valid.shape[1:]) != (self.num_selected,):
+            raise ValueError(f"A1 offline validity mask must be [B,{self.num_selected}], got {tuple(valid.shape)}")
         if not torch.as_tensor(valid).bool().any(dim=1).all():
             raise ValueError("A1 offline dataset contains a sample with no valid anchor")
         return features

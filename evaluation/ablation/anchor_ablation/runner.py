@@ -11,6 +11,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import torch
 import yaml
+from learning.config import load_yaml_config
 from torch.utils.data import Subset
 
 from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
@@ -67,7 +68,7 @@ def _resolve_num_modes(diffusion_config: str | Path) -> tuple[int, Path]:
     path = resolve_repo_file(diffusion_config)
     if not path.is_file():
         raise FileNotFoundError(f"Diffusion configuration not found: {path}")
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw = load_yaml_config(path)
     if not isinstance(raw, dict):
         raise ValueError(f"Diffusion configuration must be a YAML mapping: {path}")
     control = raw.get("control") or {}
@@ -110,7 +111,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
     """Load requested methods and validate shared architecture, K, and K2 weights."""
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
-    expected = {"A0": "fixed", "A1": "dynamic", "A2": "adaptive"}
+    expected = {"A0": "fixed", "A1": "a1", "A2": "adaptive"}
     models, payloads, checkpoint_info = {}, {}, {}
     reference_signature = None
     reference_k2_hash = None
@@ -227,23 +228,26 @@ def _world_to_local(world_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
 
 
 def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
-                                 num_frames: int, seed: int):
+                                 num_frames: int, seed: int, prepare_anchors, device="cpu"):
     """Use only synchronized frames where every A1 ego has K geometric anchors."""
     groups = defaultdict(list)
     for local_index in range(len(subset)):
         features, _targets, meta = subset[local_index]
-        if "coarse_trajectories" not in features:
+        batched = {key: value.unsqueeze(0).to(device) for key, value in features.items()}
+        with torch.no_grad():
+            prepared = prepare_anchors(batched)
+        if "coarse_trajectories" not in prepared:
             raise KeyError(
                 "A1 anchor filtering requires dataset feature 'coarse_trajectories'; "
-                "the current expert shard must contain paired dynamic anchors."
+                "the shared A1 builder must return paired anchors from raw geometry."
             )
-        xy = features["coarse_trajectories"]
+        xy = prepared["coarse_trajectories"][0]
         if isinstance(xy, torch.Tensor):
             xy = xy.detach().cpu().numpy()
         xy = np.asarray(xy, dtype=np.float64)
         if xy.shape != (expected_anchor_count, 8, 2):
             raise ValueError(
-                f"A1 stored anchors must be [{expected_anchor_count},8,2], got {xy.shape}"
+                f"A1 generated anchors must be [{expected_anchor_count},8,2], got {xy.shape}"
             )
         path_length = np.linalg.norm(np.diff(xy, axis=1), axis=-1).sum(axis=-1)
         valid = np.isfinite(xy).all(axis=(-1, -2)) & (path_length > 0.5)
@@ -256,7 +260,7 @@ def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
         raise RuntimeError(
             f"No synchronized frames contain {expected_anchor_count} geometrically instantiated "
             "A1 anchors for every ego. "
-            "Inspect/refill the paired dynamic-anchor data; unavailable zero-filled slots must not be marked valid."
+            "Inspect the raw geometry and shared A1 configuration; unavailable zero-filled slots must not be marked valid."
         )
     if num_frames > 0 and num_frames < len(complete_keys):
         rng = random.Random(int(seed))
@@ -582,43 +586,6 @@ def run(args=None):
             raise FileNotFoundError(f"JTP config not found: {jtp_path}")
         jtp_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
 
-    # If A1 participates, first identify all complete frames, then remove frames
-    # where any A1 ego has a geometrically unavailable anchor. Sampling occurs
-    # after this common-subset filter so the requested frame count is retained.
-    if "A1" in methods:
-        subset, data_manifest = build_complete_frame_subset(
-            dataset_root, split, num_frames=0, seed=sample_seed,
-            max_samples=cfg.get("max_samples"),
-        )
-        subset, a1_manifest = _filter_a1_and_sample_frames(
-            subset,
-            expected_anchor_count=num_modes,
-            num_frames=num_frames,
-            seed=sample_seed,
-        )
-        data_manifest.update(a1_manifest)
-    else:
-        subset, data_manifest = build_complete_frame_subset(
-            dataset_root, split, num_frames=num_frames, seed=sample_seed,
-            max_samples=cfg.get("max_samples"),
-        )
-    loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
-    first_batch = next(iter(loader))
-    first_meta = first_batch[2][0]
-    figure_meta = (
-        _meta_int(first_meta, "episode_index"),
-        _meta_int(first_meta, "frame_index"),
-        _meta_int(first_meta, "ego_index"),
-    )
-
-    figure_metas = []
-    if stage != 'feasibility':
-        figure_metas = select_figure_samples(
-            [meta for _, _, batch_metadata in loader for meta in batch_metadata],
-            count=figure_count, seed=figure_seed)
-        if len(figure_metas) < figure_count:
-            print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
-
     checkpoint_info, source_info = {}, {}
     scorer_path = None
     if stage == "anchors":
@@ -656,6 +623,32 @@ def run(args=None):
                 source_info[method]["fixed_anchor_metadata"] = getattr(
                     model.anchor_manager, "metadata", {}
                 )
+
+    subset, data_manifest = build_complete_frame_subset(
+        dataset_root, split, num_frames=0 if 'A1' in methods else num_frames,
+        seed=sample_seed, max_samples=cfg.get('max_samples'))
+    if 'A1' in methods:
+        subset, a1_manifest = _filter_a1_and_sample_frames(
+            subset, expected_anchor_count=num_modes, num_frames=num_frames, seed=sample_seed,
+            prepare_anchors=models['A1']._prepare_anchors, device=device)
+        data_manifest.update(a1_manifest)
+    data_manifest['anchor_generation'] = 'raw scenes; shared A1AnchorBuilder; common A1 geometry filter'
+    loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
+    first_batch = next(iter(loader))
+    first_meta = first_batch[2][0]
+    figure_meta = (
+        _meta_int(first_meta, "episode_index"),
+        _meta_int(first_meta, "frame_index"),
+        _meta_int(first_meta, "ego_index"),
+    )
+
+    figure_metas = []
+    if stage != 'feasibility':
+        figure_metas = select_figure_samples(
+            [meta for _, _, batch_metadata in loader for meta in batch_metadata],
+            count=figure_count, seed=figure_seed)
+        if len(figure_metas) < figure_count:
+            print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
 
     anchor_rows, planning_rows = [], []
     anchor_figures, planning_figures = {}, {}
