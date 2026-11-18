@@ -552,7 +552,7 @@ def run(args=None):
     parser.add_argument("--methods", nargs="+", choices=("A0", "A1", "A2"), default=None)
     parser.add_argument("--a0-bank", default=None)
     parser.add_argument("--a2-scorer", default=None)
-    parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml")
+    parser.add_argument("--scorer-config", default="configs/train/a2_scorer.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("train", "val", "test"), default=None)
     parser.add_argument("--num-frames", type=int, default=None,
@@ -686,7 +686,8 @@ def run(args=None):
             teacher_cfg, scorer_path = _teacher_config_from_a2(models["A2"])
         elif stage == "all":
             scorer_cfg_path = resolve_repo_file(parsed.scorer_config)
-            scorer_cfg = yaml.safe_load(scorer_cfg_path.read_text(encoding="utf-8"))
+            from highway_env.planner.anchor_scoring.config import load_scorer_config
+            scorer_cfg = load_scorer_config(scorer_cfg_path)
             teacher_cfg = scorer_cfg["teacher"]
         else:
             teacher_cfg = None

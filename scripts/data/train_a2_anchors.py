@@ -14,7 +14,7 @@ from highway_env.planner.anchor_scoring.training import train
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Train/evaluate A2 anchors from raw expert scenes")
-    parser.add_argument("--config", default="configs/train/adaptive_anchors.yaml")
+    parser.add_argument("--config", default="configs/train/a2_scorer.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--cache-dir", default=None)

@@ -34,3 +34,4 @@ __pycache__/
 !/tests/test_a0_raw_controls.py
 !/tests/test_trace_fuel_aware_evaluation.py
 !/tests/test_fixed_anchor_manager.py
+!/tests/test_anchor_config_layout.py

@@ -4,14 +4,10 @@
 output_space: control
 
 control:
-  # TRACE A2 is opt-in; A1 remains unchanged during expert data collection.
+  # Default A1 baseline. A0/A2 experiments override this block via extends.
   anchors:
     strategy: a1
     a1_config: configs/anchors/a1.yaml
-    top_r: 20
-    trajectory_weight: 1.0
-    control_weight: 1.0
-    scorer_checkpoint: outputs/trace_adaptive_anchors/best.pt
   model:
     reg_head_type: mlp
     num_modes: 10
@@ -29,7 +25,7 @@ control:
     loss_position: 1.0
   training:
     dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
-    output_dir: outputs/final_compare/control_v0
+    output_dir: outputs/anchor_ablation/diffusion_ckpt/A1
     train_split: train
     val_split: val
     batch_size: 64
@@ -75,7 +71,7 @@ runtime:
   jtp_config: configs/projection/jtp.yaml
   jtp_control_execution_enabled: false
   checkpoint:
-    control: outputs/fuel_ablation/F0/best.pt
+    control: outputs/anchor_ablation/diffusion_ckpt/A1/best.pt
   diffusion_spline_enabled: false
   diffusion_execution_enabled: false
 

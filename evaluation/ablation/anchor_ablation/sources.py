@@ -2,8 +2,8 @@
 from pathlib import Path
 
 import torch
-import yaml
 from learning.config import load_yaml_config
+from highway_env.planner.anchor_scoring.config import load_scorer_config
 
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file, load_mode_yaml
 
@@ -28,18 +28,14 @@ def _resolve_num_modes(diffusion_config: str) -> int:
 
 
 def build_sources(methods, cfg, *, bank_path=None, scorer_path=None,
-                  scorer_config='configs/train/adaptive_anchors.yaml',
+                  scorer_config='configs/train/a2_scorer.yaml',
                   diffusion_config='configs/train/diffusion.yaml', device='cpu'):
     """Build A0/A1/A2 sources with a single K=control.model.num_modes."""
     settings = cfg.get('anchor_sources', {})
     scorer_cfg_path = resolve_repo_file(scorer_config)
-    scorer_cfg = yaml.safe_load(scorer_cfg_path.read_text(encoding="utf-8"))
+    scorer_cfg = load_scorer_config(scorer_cfg_path)
     teacher = scorer_cfg['teacher']
     num_modes = _resolve_num_modes(diffusion_config)
-    candidate_generation = scorer_cfg.get(
-        'candidate_generation',
-        {'config_path': 'configs/anchors/control_candidate_pool.yaml'},
-    )
     sources, artifacts = {}, {}
     for method in methods:
         if method == 'A0':
@@ -78,7 +74,8 @@ def build_sources(methods, cfg, *, bank_path=None, scorer_path=None,
             config = {
                 'strategy': 'adaptive', 'num_selected': num_modes,
                 'scorer_checkpoint': str(path),
-                'candidate_generation': payload.get('candidate_generation', {}),
+                'candidate_generation': scorer_cfg.get(
+                    'candidate_generation', payload.get('candidate_generation', {})),
                 'top_r_fraction': float(scorer_cfg.get('top_r_fraction', 0.5555556)),
                 'top_r': scorer_cfg.get('top_r'),
                 'trajectory_weight': float(scorer_cfg.get('trajectory_weight', 1.0)),

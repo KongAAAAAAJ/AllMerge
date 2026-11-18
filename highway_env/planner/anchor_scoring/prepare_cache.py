@@ -1,20 +1,20 @@
 """Precompute deterministic A2 candidate pools and safety teacher labels.
 
 Run:
-  python -m highway_env.planner.anchor_scoring.prepare_cache --config configs/train/adaptive_anchors.yaml
+  python -m highway_env.planner.anchor_scoring.prepare_cache --config configs/train/a2_scorer.yaml
 """
 from __future__ import annotations
 
 import argparse
-import yaml
 
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 from .training_data import prepare_split_cache
+from .config import load_scorer_config
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Prepare TRACE A2 scorer candidate/label cache")
-    parser.add_argument("--config", default="configs/train/adaptive_anchors.yaml")
+    parser.add_argument("--config", default="configs/train/a2_scorer.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--splits", default="train,val")
@@ -24,9 +24,7 @@ def main(argv=None):
     parser.add_argument("--rebuild-cache", action="store_true")
     args = parser.parse_args(argv)
 
-    cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
-    if not isinstance(cfg, dict):
-        raise ValueError("Scorer config must be a mapping")
+    cfg = load_scorer_config(args.config)
     if args.dataset_root:
         cfg["dataset_root"] = args.dataset_root
     if args.max_samples is not None:

@@ -4,10 +4,10 @@ extends: ../diffusion.yaml
 control:
   anchors:
     strategy: fixed
-    bank_path: outputs/anchor_ablation/a0_fixed_control_anchors.npz
+    bank_path: outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
   training:
-    output_dir: outputs/anchor_ablation/A0_fixed
+    output_dir: outputs/anchor_ablation/diffusion_ckpt/A0
 
 runtime:
   checkpoint:
-    control: outputs/anchor_ablation/A0_fixed/best.pt
+    control: outputs/anchor_ablation/diffusion_ckpt/A0/best.pt

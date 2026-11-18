@@ -1,7 +1,7 @@
 # TRACE A2 safety-scoring-only training (no expert trajectory labels).
 # Uses raw episodes and the shared A1/A2 candidate generator for scene inputs.
 dataset_root: outputs/expert_dataset/expert_trucksim_50k
-output_dir: outputs/anchor_ablation/ckpt
+output_dir: outputs/anchor_ablation/ckpt/A2_anchors
 train_split: train
 val_split: val
 # Raw cache: candidate/teacher arrays are precomputed once and memory-mapped.
@@ -22,11 +22,9 @@ grad_clip: 1.0
 seed: 0
 diffusion_config: configs/train/diffusion.yaml
 model: {}
-candidate_generation:
-  config_path: configs/anchors/control_candidate_pool.yaml
-top_r_fraction: 0.5555556
-trajectory_weight: 1.0
-control_weight: 1.0
+# A2 generation and selection are shared with diffusion and evaluation.
+a2_config: configs/anchors/a2.yaml
+
 temperature: 0.3
 teacher:
   collision_weight: 1.0

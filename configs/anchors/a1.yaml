@@ -1,4 +1,8 @@
 a1:
+  candidate_generation:
+    config_path: configs/anchors/control_candidate_pool.yaml
+  trajectory_weight: 1.0
+  control_weight: 1.0
   control_steps: 40
   dt: 0.1
   wheelbase_m: 5.5

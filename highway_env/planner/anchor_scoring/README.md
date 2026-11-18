@@ -2,7 +2,12 @@
 
 The public entry is `scripts/data/train_a2_anchors.py`; training logic lives in
 `highway_env/planner/anchor_scoring/training.py`. Configuration remains in
-`configs/train/adaptive_anchors.yaml`.
+`configs/train/a2_scorer.yaml`.
+
+`configs/anchors/a2.yaml` owns candidate generation and Top-R/diversity selection
+settings shared by scorer training, diffusion and anchor evaluation. The scorer
+YAML only owns its data, optimizer and teacher settings. Diffusion A2 uses
+`configs/train/ablation/diffusion_a2_adaptive.yaml` and the resulting scorer checkpoint.
 
 Training accepts only completed `trace_expert_raw_k2_v2` datasets with
 `reports/manifest.json` and `episodes/episode_*.npz`. Episode splits use the
@@ -18,7 +23,7 @@ traffic and road features, not expert future trajectory labels.
 From the `all_merge` directory:
 
 ```powershell
-python scripts/data/train_a2_anchors.py --config configs/train/adaptive_anchors.yaml --max-epochs 1 --max-batches 2 --max-samples 64 --output-dir outputs/anchor_ablation/ckpt/A2_smoke --cache-dir outputs/anchor_ablation/cache_A2_smoke
+python scripts/data/train_a2_anchors.py --config configs/train/a2_scorer.yaml --max-epochs 1 --max-batches 2 --max-samples 64 --output-dir outputs/anchor_ablation/ckpt/A2_smoke --cache-dir outputs/anchor_ablation/cache_A2_smoke
 ```
 
 For full training, omit the three `--max-*` options and use separate output

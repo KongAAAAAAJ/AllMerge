@@ -10,14 +10,14 @@ python scripts\data\collect_expert_dataset.py ^
 
 构建 A0 anchor 命令：
 python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-rad 0.08 ^
---dataset-root outputs/expert_dataset/smoke_actuator_constraints_v2 ^
---output outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors_smoke2.npz
+--dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+--output outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
 
 A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景在线生成，无需单独构建或保存锚点库。数量读取 diffusion.yaml 的 control.model.num_modes，生成参数位于 configs/anchors/a1.yaml。
 
 训练 A2 命令：
 python scripts/data/train_a2_anchors.py ^
-  --config configs/train/adaptive_anchors.yaml ^
+  --config configs/train/a2_scorer.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
   --max-epochs 30 ^
   --output-dir outputs/anchor_ablation/ckpt/A2_anchors ^

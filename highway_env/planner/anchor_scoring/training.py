@@ -21,6 +21,7 @@ from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from .model import AnchorSafetyScorer, select_anchors
 from .training_data import build_cached_loader, prepare_split_cache
+from .config import load_scorer_config
 
 
 
@@ -147,9 +148,7 @@ def _save_history(path: Path, history):
 def train(args):
     """Train, resume, evaluate or prepare A2 caches from parsed entry arguments."""
 
-    cfg = yaml.safe_load(resolve_repo_file(args.config).read_text(encoding="utf-8"))
-    if not isinstance(cfg, dict):
-        raise ValueError("Scorer config must be a mapping")
+    cfg = load_scorer_config(args.config)
     candidate_builder = AdaptiveCandidateBuilder(cfg.get("candidate_generation"))
     cfg['num_selected'] = _resolve_num_selected(cfg)
     cfg['top_r'] = max(cfg['num_selected'], int(round(

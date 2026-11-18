@@ -1,17 +1,20 @@
-# Diffusion training configs
+Diffusion 训练命令 A0：
+python scripts/training/run_diffusion.py ^
+  --config configs/train/ablation/diffusion_a0_fixed.yaml ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --max-epochs 60 ^
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0
 
-`diffusion.yaml` contains shared settings. Experiment configs inherit it and
-override only differences; `extends` is relative to the child YAML file.
-Nested mappings merge; lists and scalar values are replaced. Dataset,
-checkpoint, and output paths remain project-root relative.
+Diffusion 训练命令 A1：
+python scripts/training/run_diffusion.py ^
+  --config configs/train/diffusion.yaml ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --max-epochs 60 ^
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1
 
-Run from `all_merge/`:
-
-```bash
-# Default dynamic anchors
-python scripts/training/run_diffusion.py --config configs/train/diffusion.yaml
-
-# A0 fixed anchors (requires the fixed bank)
-python scripts/data/build_a0_fixed_anchors.py
-python scripts/training/run_diffusion.py --config configs/train/ablation/diffusion_a0_fixed.yaml
-```
+Diffusion 训练命令 A2：
+python scripts/training/run_diffusion.py ^
+  --config configs/train/ablation/diffusion_a2_adaptive.yaml ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --max-epochs 60 ^
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A2

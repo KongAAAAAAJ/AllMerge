@@ -124,6 +124,7 @@ class ControlDiffusionPlanner(nn.Module):
             self.anchor_manager = AdaptiveAnchorManager(
                 self.anchors_config, num_selected=self.scene_config.num_modes
             )
+            self.anchors_config = dict(self.anchor_manager.config)
         elif anchor_strategy in ('fixed', 'a0'):
             from highway_env.planner.fixed_anchor_manager import FixedAnchorManager
             self.anchor_manager = FixedAnchorManager(

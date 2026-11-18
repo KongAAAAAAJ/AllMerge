@@ -41,6 +41,9 @@ def load_mode_yaml(path: str | Path) -> dict[str, Any]:
             data['execution'] = selected.get('execution', {'model': 'kinematic'})
             data['losses'] = selected.get('losses', {})
             data['anchors'] = selected.get('anchors', {'strategy': 'a1'})
+            if data['anchors'].get('strategy', 'a1') != 'a1':
+                # A0/A2 inherit common diffusion settings, not the default A1 generator.
+                data['anchors'].pop('a1_config', None)
     return data
 
 

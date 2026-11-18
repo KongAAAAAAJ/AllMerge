@@ -8,6 +8,7 @@ from highway_env.planner.adaptive_anchors import (
     AdaptiveCandidateBuilder,
 )
 from .model import AnchorSafetyScorer, select_anchors
+from .config import resolve_a2_config
 
 
 DEFAULT_CANDIDATE_CONFIG = {
@@ -20,9 +21,11 @@ class AdaptiveAnchorManager:
     """A2: safety-ranked Top-R followed by the same joint diversity selection."""
 
     def __init__(self, config, *, device="cpu", num_selected=None):
-        self.config = dict(config)
+        self.config = resolve_a2_config(config)
         generation = self.config.get("candidate_generation", DEFAULT_CANDIDATE_CONFIG)
         self.builder = AdaptiveCandidateBuilder(generation)
+        # Persist effective settings, so diffusion checkpoints do not depend on YAML changes.
+        self.config['candidate_generation'] = self.builder.resolved_config
         self.num_selected = int(
             num_selected if num_selected is not None
             else self.config.get("num_selected", 10)

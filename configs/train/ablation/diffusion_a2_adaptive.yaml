@@ -1,0 +1,14 @@
+# A2 anchors selected by the frozen safety scorer; all other settings are shared.
+extends: ../diffusion.yaml
+
+control:
+  anchors:
+    strategy: adaptive
+    a2_config: configs/anchors/a2.yaml
+    scorer_checkpoint: outputs/anchor_ablation/ckpt/A2_anchors/best.pt
+  training:
+    output_dir: outputs/anchor_ablation/diffusion_ckpt/A2
+
+runtime:
+  checkpoint:
+    control: outputs/anchor_ablation/diffusion_ckpt/A2/best.pt
