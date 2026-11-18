@@ -1,0 +1,65 @@
+{
+  "patch_id": "TRACE_ANCHOR_OFFLINE_ONLINE_V2_3_1",
+  "entries": [
+    {
+      "path": "configs/anchors/a1.yaml",
+      "had_original": true,
+      "backup_path": "original/configs/anchors/a1.yaml"
+    },
+    {
+      "path": "highway_env/envs/common/action.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/envs/common/action.py"
+    },
+    {
+      "path": "highway_env/planner/a1_anchor_manager.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/manager.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/anchor_scoring/manager.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/control.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/inference/control.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/inference/runtime.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/inference/runtime.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/models/control.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/models/control.py"
+    },
+    {
+      "path": "highway_env/planner/diffusion/training/control.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/diffusion/training/control.py"
+    },
+    {
+      "path": "highway_env/planner/fixed_anchor_manager.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/fixed_anchor_manager.py"
+    },
+    {
+      "path": "tests/test_a1_online_runtime.py",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "docs/anchor_offline_online_contract.md",
+      "had_original": false,
+      "backup_path": null
+    },
+    {
+      "path": "highway_env/planner/anchor_scoring/train.py",
+      "had_original": true,
+      "backup_path": "original/highway_env/planner/anchor_scoring/train.py"
+    }
+  ]
+}

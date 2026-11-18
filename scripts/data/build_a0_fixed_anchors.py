@@ -405,7 +405,6 @@ def build_fixed_anchor_bank(
     min_path_length_m: float = 0.5,
     max_accel_mps2: float = 2.5, max_steer_rad: float = 0.08,
     input_format: str = "auto",
-    raw_out_of_bounds: str = "error",
 ) -> dict:
     if num_anchors <= 0:
         raise ValueError("num_anchors must be positive")
@@ -423,24 +422,6 @@ def build_fixed_anchor_bank(
     if input_format == 'raw':
         candidates, audit = load_raw_expert_controls(root, max_samples=max_samples)
         control_key = audit['control_source_key']
-        within_limits = ((np.abs(candidates[..., 0]) <= max_accel_mps2 + 1e-4).all(axis=1)
-                         & (np.abs(candidates[..., 1]) <= max_steer_rad + 1e-5).all(axis=1))
-        outside = int((~within_limits).sum())
-        audit['out_of_bounds_windows'] = outside
-        audit['out_of_bounds_policy'] = raw_out_of_bounds
-        if outside:
-            if raw_out_of_bounds == 'error':
-                raise ValueError(
-                    f'{outside}/{len(candidates)} raw expert windows exceed acceleration '
-                    f'+/-{max_accel_mps2} m/s^2 or steering +/-{max_steer_rad} rad. '
-                    'Set limits to match your downstream model, or use '
-                    '--raw-out-of-bounds drop to exclude whole windows without clipping.')
-            if raw_out_of_bounds != 'drop':
-                raise ValueError('raw_out_of_bounds must be error or drop')
-            candidates = candidates[within_limits]
-            audit['num_valid_control_sequences'] = int(len(candidates))
-            audit['num_filtered_control_sequences'] = outside
-            print(f'[A0 RAW] excluded {outside} out-of-bounds windows; retained {len(candidates)}', flush=True)
         if len(candidates) < num_anchors:
             raise ValueError(f'Only {len(candidates)} valid expert windows for {num_anchors} anchors')
     elif input_format == 'shards':
@@ -558,8 +539,6 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Build A0 fixed anchors by direct control-sequence K-means")
     parser.add_argument("--dataset-root", default="outputs/expert_dataset/expert_trucksim_k2_raw_100k")
     parser.add_argument("--input-format", choices=("auto", "raw", "shards"), default="auto")
-    parser.add_argument("--raw-out-of-bounds", choices=("error", "drop"), default="error",
-                        help="Reject out-of-limit raw controls, or explicitly drop whole windows; never clip")
     parser.add_argument("--split", default="train", choices=("train",))
     parser.add_argument("--num-anchors", type=int, default=None,
                         help="Number of fixed anchors; defaults to control.model.num_modes.")
@@ -569,7 +548,7 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lloyd-refine", type=int, default=5)
-    parser.add_argument("--max-samples", type=int, default=0, help="Cap source scenes (shards) or recovered windows (raw), before limit filtering; 0 uses all TRAIN data")
+    parser.add_argument("--max-samples", type=int, default=0, help="Cap source scenes (shards) or recovered windows (raw), 0 uses all TRAIN data")
     parser.add_argument("--control-key", default="coarse_controls")
     parser.add_argument("--trajectory-key", default="coarse_trajectories")
     parser.add_argument("--min-path-length-m", type=float, default=0.5)
@@ -592,7 +571,6 @@ def main(argv=None) -> int:
     build_fixed_anchor_bank(
         args.dataset_root, args.output, split=args.split,
         num_anchors=num_anchors, seed=args.seed, input_format=args.input_format,
-        raw_out_of_bounds=args.raw_out_of_bounds,
         batch_size=args.batch_size, epochs=args.epochs,
         lloyd_refine=args.lloyd_refine, max_samples=args.max_samples,
         control_key=args.control_key, trajectory_key=args.trajectory_key,
