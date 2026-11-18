@@ -1,0 +1,36 @@
+{
+  "version": "TRACE_Anchor_Ablation_Online_V1_20261118",
+  "protocol": "seven-metric staged evaluation",
+  "backup_root": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\anchor_ablation_online_v1_7metrics_20261118T072120Z",
+  "replaced": [
+    "evaluation/ablation/anchor_ablation/runner.py",
+    "evaluation/ablation/anchor_ablation/paper_metrics.py",
+    "evaluation/ablation/anchor_ablation/paper_feasibility.py",
+    "evaluation/ablation/anchor_ablation/reporting.py",
+    "evaluation/ablation/anchor_ablation/visualization.py",
+    "evaluation/ablation/anchor_ablation/sources.py",
+    "evaluation/ablation/anchor_ablation/data.py",
+    "evaluation/ablation/anchor_ablation/__init__.py",
+    "evaluation/ablation/anchor_ablation/README.md",
+    "evaluation/ablation/run_anchor.py",
+    "evaluation/ablation/README.md",
+    "evaluation/ablation/jtp/data.py",
+    "configs/evaluation/anchor_ablation.yaml",
+    "tests/test_anchor_ablation_staged_online.py"
+  ],
+  "deleted": [
+    "evaluation/ablation/anchor_ablation/metrics.py",
+    "evaluation/ablation/anchor_ablation/feasibility.py"
+  ],
+  "seven_metrics": [
+    "anchor_minade_m",
+    "safe_ratio_pct",
+    "trajectory_diversity_m",
+    "control_diversity_normalized",
+    "planning_minade_m",
+    "preprojection_feasibility_pct",
+    "projection_correction_m"
+  ],
+  "anchor_pdf": "anchor_ablation.pdf",
+  "planning_pdf": "anchor_planning_ablation.pdf"
+}

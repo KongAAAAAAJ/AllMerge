@@ -111,7 +111,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
     """Load requested methods and validate shared architecture, K, and K2 weights."""
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
-    expected = {"A0": "fixed", "A1": "a1", "A2": "adaptive"}
+    expected = {"A0": ("fixed", "a0"), "A1": ("a1",), "A2": ("adaptive", "a2")}
     models, payloads, checkpoint_info = {}, {}, {}
     reference_signature = None
     reference_k2_hash = None
@@ -138,8 +138,10 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
                     "Retrain this planner checkpoint with the configured anchor count."
                 )
         strategy = _strategy(model)
-        if strategy != expected[method]:
-            raise ValueError(f"{method} checkpoint uses strategy={strategy!r}; expected {expected[method]!r}")
+        if strategy not in expected[method]:
+            raise ValueError(
+                f"{method} checkpoint uses strategy={strategy!r}; expected one of {expected[method]!r}"
+            )
         if getattr(model.vehicle_model, "kind", None) != "koopman_k2":
             raise ValueError(f"{method} checkpoint must use the TRACE Koopman K2 execution model")
         if any(key.startswith("denoiser.mode_embedding.") for key in payload["model_state"]):
@@ -228,49 +230,51 @@ def _world_to_local(world_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
 
 
 def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
-                                 num_frames: int, seed: int, prepare_anchors, device="cpu"):
-    """Use only synchronized frames where every A1 ego has K geometric anchors."""
+                                 num_frames: int, seed: int, prepare_anchors,
+                                 device="cpu", batch_size: int = 128, num_workers: int = 0):
+    """Keep synchronized frames whose every ego has K valid *online* A1 anchors.
+
+    A1 is regenerated in batches from raw road geometry. No prebuilt A1 tensor is
+    expected in the raw dataset. Progress is reported during the scan.
+    """
     groups = defaultdict(list)
-    for local_index in range(len(subset)):
-        features, _targets, meta = subset[local_index]
-        batched = {key: value.unsqueeze(0).to(device) for key, value in features.items()}
-        with torch.no_grad():
-            prepared = prepare_anchors(batched)
+    loader = make_loader(subset, batch_size=batch_size, num_workers=num_workers)
+    local_cursor = 0
+    total = len(subset)
+    for batch_index, (features_cpu, _targets, metadata) in enumerate(loader, start=1):
+        features = _features_to_device(features_cpu, device)
+        with torch.inference_mode():
+            prepared = prepare_anchors(features)
         if "coarse_trajectories" not in prepared:
-            raise KeyError(
-                "A1 anchor filtering requires dataset feature 'coarse_trajectories'; "
-                "the shared A1 builder must return paired anchors from raw geometry."
-            )
-        xy = prepared["coarse_trajectories"][0]
-        if isinstance(xy, torch.Tensor):
-            xy = xy.detach().cpu().numpy()
-        xy = np.asarray(xy, dtype=np.float64)
-        if xy.shape != (expected_anchor_count, 8, 2):
+            raise KeyError("Online A1 builder did not return coarse_trajectories")
+        xy = prepared["coarse_trajectories"]
+        if tuple(xy.shape[1:]) != (expected_anchor_count, 8, 2):
             raise ValueError(
-                f"A1 generated anchors must be [{expected_anchor_count},8,2], got {xy.shape}"
+                f"A1 online output must be [B,{expected_anchor_count},8,2], got {tuple(xy.shape)}"
             )
-        path_length = np.linalg.norm(np.diff(xy, axis=1), axis=-1).sum(axis=-1)
-        valid = np.isfinite(xy).all(axis=(-1, -2)) & (path_length > 0.5)
-        key = (_meta_int(meta, "episode_index"), _meta_int(meta, "frame_index"))
-        groups[key].append((local_index, bool(valid.sum() == expected_anchor_count)))
+        finite = torch.isfinite(xy).all(dim=(-1, -2))
+        path_length = torch.linalg.vector_norm(xy[:, :, 1:] - xy[:, :, :-1], dim=-1).sum(dim=-1)
+        valid_count = (finite & (path_length > 0.5)).sum(dim=1)
+        for offset, meta in enumerate(metadata):
+            key = (_meta_int(meta, "episode_index"), _meta_int(meta, "frame_index"))
+            groups[key].append((local_cursor + offset,
+                                bool(valid_count[offset].item() == expected_anchor_count)))
+        local_cursor += len(metadata)
+        if batch_index == 1 or batch_index % 20 == 0 or local_cursor >= total:
+            print(f"[A1 FILTER] batch={batch_index} samples={local_cursor}/{total}", flush=True)
 
     complete_keys = sorted(key for key, entries in groups.items() if all(ok for _, ok in entries))
     skipped_keys = sorted(key for key, entries in groups.items() if not all(ok for _, ok in entries))
     if not complete_keys:
         raise RuntimeError(
-            f"No synchronized frames contain {expected_anchor_count} geometrically instantiated "
-            "A1 anchors for every ego. "
-            "Inspect the raw geometry and shared A1 configuration; unavailable zero-filled slots must not be marked valid."
+            f"No synchronized frames contain {expected_anchor_count} geometrically valid online A1 anchors for every ego."
         )
     if num_frames > 0 and num_frames < len(complete_keys):
         rng = random.Random(int(seed))
         selected_keys = sorted(rng.sample(complete_keys, int(num_frames)))
     else:
         selected_keys = complete_keys
-
-    selected_local = [
-        index for key in selected_keys for index, _ in groups[key]
-    ]
+    selected_local = [index for key in selected_keys for index, _ in groups[key]]
     original_indices = [subset.indices[index] for index in selected_local]
     filtered = Subset(subset.dataset, original_indices)
     return filtered, {
@@ -281,6 +285,62 @@ def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
         "a1_common_subset_samples": len(filtered),
         "a1_skipped_frame_examples": skipped_keys[:20],
         "a1_mode_valid_mask_ignored_for_anchor_quality": True,
+        "a1_generation": "online A1AnchorManager/A1AnchorBuilder from raw road geometry",
+        "a1_geometry_rule": f"finite XY and travelled path length > 0.5 m; exactly {expected_anchor_count} anchors",
+    }
+
+
+def _select_raw_sample_subset(dataset, *, num_samples: int, seed: int, split: str):
+    """Select controlled-ego samples directly; anchor quality does not need synchronized groups."""
+    count = len(dataset)
+    if count <= 0:
+        raise RuntimeError("Selected raw expert split is empty")
+    if num_samples <= 0 or num_samples >= count:
+        indices = np.arange(count, dtype=np.int64)
+    else:
+        rng = np.random.default_rng(int(seed))
+        indices = np.sort(rng.choice(count, size=int(num_samples), replace=False).astype(np.int64))
+    subset = Subset(dataset, indices.tolist())
+    return subset, {
+        "split": str(split),
+        "episode_split": getattr(dataset, "split_manifest", {}),
+        "input_format": "current_anchor_independent_raw_expert_dataset",
+        "dataset_samples_in_split": count,
+        "selected_samples_before_a1_filter": int(len(indices)),
+        "selected_samples": int(len(indices)),
+        "sample_seed": int(seed),
+        "sampling": "uniform without replacement over controlled ego samples",
+    }
+
+
+def _filter_a1_valid_samples(subset, *, expected_anchor_count: int, prepare_anchors,
+                             device="cpu", batch_size: int = 128, num_workers: int = 0):
+    """For anchor-only evaluation, retain individually valid samples without frame grouping."""
+    loader = make_loader(subset, batch_size=batch_size, num_workers=num_workers)
+    kept_local = []
+    cursor = 0
+    total = len(subset)
+    for batch_index, (features_cpu, _targets, _metadata) in enumerate(loader, start=1):
+        features = _features_to_device(features_cpu, device)
+        with torch.inference_mode():
+            prepared = prepare_anchors(features)
+        xy = prepared["coarse_trajectories"]
+        if tuple(xy.shape[1:]) != (expected_anchor_count, 8, 2):
+            raise ValueError(f"A1 online output shape mismatch: {tuple(xy.shape)}")
+        finite = torch.isfinite(xy).all(dim=(-1, -2))
+        path_length = torch.linalg.vector_norm(xy[:, :, 1:] - xy[:, :, :-1], dim=-1).sum(dim=-1)
+        good = (finite & (path_length > 0.5)).sum(dim=1) == expected_anchor_count
+        kept_local.extend((cursor + i) for i, ok in enumerate(good.detach().cpu().tolist()) if ok)
+        cursor += int(xy.shape[0])
+        if batch_index == 1 or batch_index % 20 == 0 or cursor >= total:
+            print(f"[A1 ONLINE FILTER] batch={batch_index} samples={cursor}/{total} valid={len(kept_local)}", flush=True)
+    if not kept_local:
+        raise RuntimeError("No raw samples have K geometrically valid online A1 anchors")
+    original_indices = [subset.indices[i] for i in kept_local]
+    return Subset(subset.dataset, original_indices), {
+        "a1_filter_input_samples": total,
+        "a1_valid_samples": len(kept_local),
+        "a1_invalid_samples": total - len(kept_local),
         "a1_geometry_rule": f"finite XY and travelled path length > 0.5 m; exactly {expected_anchor_count} anchors",
     }
 
@@ -291,7 +351,7 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
     if hasattr(model, "eval"):
         model.eval()
     with torch.no_grad():
-        for features_cpu, targets_cpu, metadata in loader:
+        for batch_index, (features_cpu, targets_cpu, metadata) in enumerate(loader, start=1):
             features = _features_to_device(features_cpu, device)
             expert_xy = targets_cpu["trajectory"].to(device)
             prepared = model._prepare_anchors(features)
@@ -333,6 +393,9 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
                         "anchors_xy": xy[index].detach().cpu().numpy(),
                         "valid": valid[index].detach().cpu().numpy(),
                     }
+            if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(loader):
+                processed = min(batch_index * loader.batch_size, len(loader.dataset))
+                print(f"[ANCHOR METRICS] method={method} batch={batch_index}/{len(loader)} samples={processed}/{len(loader.dataset)}", flush=True)
     if not rows:
         raise RuntimeError(f"{method} anchor evaluation produced no samples")
     return rows, figure_payload
@@ -345,7 +408,7 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
     rows, figure_payload = [], None
     model.eval()
     with torch.no_grad():
-        for features_cpu, targets_cpu, metadata in loader:
+        for batch_index, (features_cpu, targets_cpu, metadata) in enumerate(loader, start=1):
             features = _features_to_device(features_cpu, device)
             context = _context_to_device(targets_cpu, device)
             expert_xy = targets_cpu["trajectory"].to(device)
@@ -433,6 +496,9 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                         "selected_raw_xy": raw_local_sampled,
                         "selected_projected_xy": projected_local,
                     }
+            if batch_index == 1 or batch_index % 10 == 0 or batch_index == len(loader):
+                processed = min(batch_index * loader.batch_size, len(loader.dataset))
+                print(f"[PLANNING METRICS] method={method} seed={seed} batch={batch_index}/{len(loader)} samples={processed}/{len(loader.dataset)}", flush=True)
     if not rows:
         raise RuntimeError(f"{method} diffusion feasibility evaluation produced no samples")
     return rows, figure_payload
@@ -486,11 +552,15 @@ def run(args=None):
     parser.add_argument("--methods", nargs="+", choices=("A0", "A1", "A2"), default=None)
     parser.add_argument("--a0-bank", default=None)
     parser.add_argument("--a2-scorer", default=None)
+    parser.add_argument("--a1-dataset-root", default=None,
+                        help="Completed A1/K2 dataset used to verify the online A1 configuration contract")
     parser.add_argument("--scorer-config", default="configs/train/adaptive_anchors.yaml")
     parser.add_argument("--dataset-root", default=None)
     parser.add_argument("--split", choices=("train", "val", "test"), default=None)
     parser.add_argument("--num-frames", type=int, default=None,
-                        help="0 evaluates all complete synchronized frames")
+                        help="Planning stage: number of complete synchronized frames; 0 means all")
+    parser.add_argument("--num-samples", type=int, default=None,
+                        help="Anchor stage: number of raw controlled-ego samples; 0 means all")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--seeds", default=None, help="Comma-separated diffusion inference seeds")
@@ -557,6 +627,15 @@ def run(args=None):
     dataset_root = resolve_repo_file(parsed.dataset_root or cfg["dataset_root"])
     split = parsed.split or cfg.get("split", "test")
     num_frames = int(parsed.num_frames if parsed.num_frames is not None else cfg.get("num_frames", 0))
+    # Preserve the old --num-frames smoke usage for anchor-only stage, but use
+    # explicit --num-samples in new commands.
+    anchor_num_samples = int(
+        parsed.num_samples if parsed.num_samples is not None
+        else (parsed.num_frames if parsed.num_frames is not None else cfg.get("num_samples", 5000))
+    )
+    a1_dataset_root = resolve_repo_file(
+        parsed.a1_dataset_root or cfg.get("a1_dataset_root", "outputs/anchor_ablation/ckpt/A1_anchors")
+    )
     batch_size = int(parsed.batch_size if parsed.batch_size is not None else cfg.get("batch_size", 16))
     workers = int(parsed.num_workers if parsed.num_workers is not None else cfg.get("num_workers", 0))
     seeds = _parse_seeds(parsed.seeds if parsed.seeds is not None else cfg.get("seeds", "0,1,2"))
@@ -598,6 +677,18 @@ def run(args=None):
             diffusion_config=str(diffusion_config_path),
             device=device,
         )
+        if "A1" in methods:
+            a1_manifest = models["A1"].manager.validate_dataset_contract(a1_dataset_root)
+            raw_manifest = dataset_root / "reports" / "manifest.json"
+            if not raw_manifest.is_file():
+                raise FileNotFoundError(f"Current raw dataset manifest missing: {raw_manifest}")
+            raw_hash = _sha256(raw_manifest)
+            source_hash = a1_manifest.get("source_manifest_sha256")
+            if source_hash and source_hash != raw_hash:
+                raise ValueError(
+                    "A1 anchor dataset was built from a different raw expert manifest: "
+                    f"A1 source={source_hash}, current raw={raw_hash}"
+                )
         for info in source_info.values():
             if info.get("scorer_path"):
                 info["scorer_sha256"] = _sha256(Path(info["scorer_path"]))
@@ -624,15 +715,36 @@ def run(args=None):
                     model.anchor_manager, "metadata", {}
                 )
 
-    subset, data_manifest = build_complete_frame_subset(
-        dataset_root, split, num_frames=0 if 'A1' in methods else num_frames,
-        seed=sample_seed, max_samples=cfg.get('max_samples'))
-    if 'A1' in methods:
-        subset, a1_manifest = _filter_a1_and_sample_frames(
-            subset, expected_anchor_count=num_modes, num_frames=num_frames, seed=sample_seed,
-            prepare_anchors=models['A1']._prepare_anchors, device=device)
-        data_manifest.update(a1_manifest)
-    data_manifest['anchor_generation'] = 'raw scenes; shared A1AnchorBuilder; common A1 geometry filter'
+    if stage == "anchors":
+        from data_pipeline.raw_expert_dataset import RawExpertDataset
+        raw_dataset = RawExpertDataset(dataset_root, split=split, max_samples=cfg.get("max_samples"))
+        subset, data_manifest = _select_raw_sample_subset(
+            raw_dataset, num_samples=anchor_num_samples, seed=sample_seed, split=split
+        )
+        print(
+            f"[ANCHOR DATA] raw controlled-ego samples={len(raw_dataset)} "
+            f"selected={len(subset)} split={split}", flush=True
+        )
+        if "A1" in methods:
+            subset, a1_filter_manifest = _filter_a1_valid_samples(
+                subset, expected_anchor_count=num_modes,
+                prepare_anchors=models["A1"]._prepare_anchors,
+                device=device, batch_size=batch_size, num_workers=workers,
+            )
+            data_manifest.update(a1_filter_manifest)
+        data_manifest["anchor_generation"] = "online A0/A1/A2 generation from current raw scene features"
+    else:
+        subset, data_manifest = build_complete_frame_subset(
+            dataset_root, split, num_frames=0 if 'A1' in methods else num_frames,
+            seed=sample_seed, max_samples=cfg.get('max_samples'))
+        if 'A1' in methods:
+            subset, a1_manifest = _filter_a1_and_sample_frames(
+                subset, expected_anchor_count=num_modes, num_frames=num_frames, seed=sample_seed,
+                prepare_anchors=models['A1']._prepare_anchors, device=device,
+                batch_size=batch_size, num_workers=workers)
+            data_manifest.update(a1_manifest)
+        data_manifest['anchor_generation'] = 'raw scenes; shared online A1AnchorBuilder; synchronized frame filter'
+
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
     first_batch = next(iter(loader))
     first_meta = first_batch[2][0]
@@ -644,9 +756,11 @@ def run(args=None):
 
     figure_metas = []
     if stage != 'feasibility':
+        all_metadata = []
+        for _, _, batch_metadata in loader:
+            all_metadata.extend(batch_metadata)
         figure_metas = select_figure_samples(
-            [meta for _, _, batch_metadata in loader for meta in batch_metadata],
-            count=figure_count, seed=figure_seed)
+            all_metadata, count=figure_count, seed=figure_seed)
         if len(figure_metas) < figure_count:
             print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
 
@@ -729,7 +843,11 @@ def run(args=None):
         "study": "TRACE Adaptive Anchor Ablation",
         "stage": stage,
         "selected_methods": methods,
-        "evaluation_protocol": "staged; use --stage all for the complete seven-metric paper result",
+        "evaluation_protocol": (
+            "staged: anchors computes four anchor-quality metrics on independent raw ego samples; "
+            "feasibility computes three diffusion/JTP metrics on complete synchronized frames; "
+            "all computes all seven metrics on complete synchronized frames"
+        ),
         "methods": {
             "A0": "Fixed anchors generated from the configured fixed control-anchor bank and kinematic rollout",
             "A1": "Dynamic control samples paired with expert data and kinematic propagation",
@@ -753,6 +871,7 @@ def run(args=None):
         "jtp": projector_info,
         "jtp_config": str(jtp_path) if jtp_path else None,
         "dataset": {"root": str(dataset_root), **data_manifest},
+        "a1_dataset_root": str(a1_dataset_root) if "A1" in methods else None,
         "split": split,
         "num_modes": num_modes,
         "diffusion_config": str(diffusion_config_path),

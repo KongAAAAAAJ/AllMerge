@@ -22,6 +22,8 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
     expected_by_key = {}
     expected_sets = defaultdict(set)
     sample_meta = {}
+    indexed_samples = 0
+    print(f"[DATA] indexing synchronized raw samples: {len(ds)} samples across {len(ds.shard_paths)} episode shards", flush=True)
     for shard_idx, shard_path in enumerate(ds.shard_paths):
         rows = by_shard.get(shard_idx, [])
         if not rows:
@@ -43,6 +45,7 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
                 expected_sets[key].add(expected)
                 expected_by_key[key] = max(expected_by_key.get(key, 0), expected)
                 groups[key].append(global_i)
+                indexed_samples += 1
                 sample_meta[global_i] = {
                     "episode_index": episode,
                     "frame_index": frame,
@@ -50,6 +53,8 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
                     "expected_ego_count": expected,
                     "seed": int(np.asarray(shard["seed"][sample_i]).item()) if "seed" in shard.files else -1,
                 }
+        if shard_idx == 0 or (shard_idx + 1) % 100 == 0 or shard_idx + 1 == len(ds.shard_paths):
+            print(f"[DATA] indexed shards={shard_idx + 1}/{len(ds.shard_paths)} samples={indexed_samples}/{len(ds)}", flush=True)
 
     complete = []
     incomplete = []

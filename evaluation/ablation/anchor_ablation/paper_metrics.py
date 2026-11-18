@@ -13,7 +13,7 @@ def geometry_valid_mask(strategy: str, features: Mapping, targets: Mapping | Non
     """Geometric availability mask; A1 traffic mode_valid_mask is intentionally ignored."""
     strategy = str(strategy).lower()
     finite = torch.isfinite(xy).all(dim=(-1, -2))
-    if strategy == "dynamic":
+    if strategy in ("dynamic", "a1"):
         path_length = torch.linalg.vector_norm(xy[:, :, 1:] - xy[:, :, :-1], dim=-1).sum(dim=-1)
         return finite & (path_length > 0.5)
     mask = features.get("mode_valid_mask")

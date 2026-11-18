@@ -10,25 +10,73 @@ from typing import Any
 import numpy as np
 import torch
 
-from evaluation.ablation.anchor_ablation.data import build_complete_frame_subset
+from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.diffusion.projection.types import RoadGeometry
 
 
 def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_seed: int):
-    """Use the Anchor ablation's exact completeness criterion, without shuffling trucks."""
-    subset, manifest = build_complete_frame_subset(
-        dataset_root, split, num_frames=num_frames, seed=sample_seed)
-    groups: dict[tuple[int, int], list[tuple[dict, dict, dict]]] = defaultdict(list)
-    for sample in subset:
-        features, targets, meta = sample
-        key = (int(meta['episode_index']), int(meta['frame_index']))
-        groups[key].append(sample)
-    for key, entries in groups.items():
-        entries.sort(key=lambda row: int(row[2]['ego_index']))
-        ids = [int(s[2]['ego_index']) for s in entries]
-        if len(ids) != len(set(ids)):
-            raise RuntimeError(f'Duplicate ego indices in synchronized frame {key}')
-    return [(key, groups[key]) for key in sorted(groups)], manifest
+    """Select complete synchronized frames directly from the current raw dataset."""
+    ds = RawExpertDataset(dataset_root, split=split)
+    by_shard = defaultdict(list)
+    for global_i, (shard_idx, sample_i) in enumerate(ds._index):
+        by_shard[int(shard_idx)].append((global_i, int(sample_i)))
+
+    groups: dict[tuple[int, int], list[int]] = defaultdict(list)
+    meta = {}
+    for shard_idx, shard_path in enumerate(ds.shard_paths):
+        rows = by_shard.get(shard_idx, [])
+        if not rows:
+            continue
+        with np.load(shard_path, allow_pickle=False) as shard:
+            for global_i, sample_i in rows:
+                episode = int(np.asarray(shard["episode_index"][sample_i]).item())
+                frame = int(np.asarray(shard["frame_index"][sample_i]).item())
+                ego = int(np.asarray(shard["ego_index"][sample_i]).item())
+                key = (episode, frame)
+                groups[key].append(global_i)
+                meta[global_i] = {
+                    "episode_index": episode,
+                    "frame_index": frame,
+                    "ego_index": ego,
+                }
+
+    complete = []
+    for key, indices in groups.items():
+        ego_ids = [meta[i]["ego_index"] for i in indices]
+        if len(ego_ids) == len(set(ego_ids)):
+            complete.append((key, sorted(indices, key=lambda i: meta[i]["ego_index"])))
+    if not complete:
+        raise RuntimeError(f"No complete synchronized frames found in split={split}")
+
+    complete.sort(key=lambda x: x[0])
+    if num_frames > 0 and num_frames < len(complete):
+        rng = np.random.default_rng(int(sample_seed))
+        selected = [complete[int(i)] for i in np.sort(
+            rng.choice(len(complete), size=int(num_frames), replace=False)
+        )]
+    else:
+        selected = complete
+
+    samples = []
+    selected_keys = []
+    for key, indices in selected:
+        entries = []
+        for index in indices:
+            entries.append(ds[index])
+        samples.append((key, entries))
+        selected_keys.append(key)
+
+    manifest = {
+        "split": split,
+        "input_format": "current_raw_trace_expert_dataset",
+        "dataset_samples_in_split": len(ds),
+        "complete_frames_available": len(complete),
+        "selected_frames": len(selected),
+        "selected_samples": sum(len(x[1]) for x in samples),
+        "sample_seed": int(sample_seed),
+        "selected_frame_keys": [list(x) for x in selected_keys],
+    }
+    return samples, manifest
 
 
 def collate_frame(entries: list[tuple[dict, dict, dict]], device):
