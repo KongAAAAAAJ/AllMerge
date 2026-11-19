@@ -20,9 +20,9 @@ A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景
 python scripts/data/train_a2_anchors.py ^
   --config configs/train/a2_scorer.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
-  --max-epochs 30 ^
-  --output-dir outputs/anchor_ablation/ckpt/A2_anchors ^
-  --cache-dir outputs/anchor_ablation/cache_A2
+  --max-epochs 2 ^
+  --output-dir outputs/anchor_ablation/ckpt/A2_anchors_smoke ^
+  --cache-dir outputs/anchor_ablation/cache_A2_smoke
 
 Anchor Ablation，评估A0 A1 A2命令：
 开环指标：
