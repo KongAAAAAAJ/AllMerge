@@ -71,9 +71,13 @@ class RawExpertDataset(Dataset):
     CONTEXT_KEYS = ('koopman_state_hist_si', 'koopman_control_hist_si', 'koopman_pose0_si',
                     'koopman_payload_kg', 'koopman_road_mu')
 
-    def __init__(self, root, split='test', max_samples=None):
+    CONTROLLED_EGO_INDICES = (0, 1, 2)
+
+    def __init__(self, root, split='test', max_samples=None, include_platoon_reference=False):
         self.shard_paths, records, self.split_manifest = raw_episode_paths(Path(root), split)
+        self.include_platoon_reference = bool(include_platoon_reference)
         self._index = []
+        self._frame_rows = []
         self._cached_index = None
         self._cached = None
         for file_index, path in enumerate(self.shard_paths):
@@ -94,6 +98,24 @@ class RawExpertDataset(Dataset):
                                    ('koopman_control_hist_si', (count,4,2))):
                     if data[key].shape != shape:
                         raise ValueError(f'{path.name}: {key} must have shape {shape}')
+                frame_rows = {}
+                if self.include_platoon_reference:
+                    for row, (frame, ego) in enumerate(zip(data['frame_index'], data['ego_index'])):
+                        frame = int(frame)
+                        ego = int(ego)
+                        if ego not in self.CONTROLLED_EGO_INDICES:
+                            raise ValueError(f'{path.name}: unexpected controlled ego_index={ego}')
+                        group = frame_rows.setdefault(frame, {})
+                        if ego in group:
+                            raise ValueError(f'{path.name}: duplicate ego={ego} at frame={frame}')
+                        group[ego] = row
+                    expected = set(self.CONTROLLED_EGO_INDICES)
+                    incomplete = {frame: sorted(set(rows)) for frame, rows in frame_rows.items()
+                                  if set(rows) != expected}
+                    if incomplete:
+                        raise ValueError(f'{path.name}: incomplete synchronized platoon frames: '
+                                         f'{dict(list(incomplete.items())[:5])}')
+            self._frame_rows.append(frame_rows)
             remaining = count if max_samples is None else max(0, min(count, max_samples-len(self._index)))
             self._index.extend((file_index, row) for row in range(remaining))
             if max_samples is not None and len(self._index) >= max_samples:
@@ -109,6 +131,37 @@ class RawExpertDataset(Dataset):
         state['_cached_index'] = None
         state['_cached'] = None
         return state
+
+    @staticmethod
+    def _partner_poses_in_ego_frame(ego_pose, partner_pose, partner_future):
+        ego_pose = np.asarray(ego_pose, dtype=np.float64)
+        partner_pose = np.asarray(partner_pose, dtype=np.float64)
+        partner_future = np.asarray(partner_future, dtype=np.float64)
+        if ego_pose.shape != (3,) or partner_pose.shape != (3,) or partner_future.shape != (40, 2):
+            raise ValueError('Platoon reference pose/trajectory shapes are invalid')
+        if not (np.isfinite(ego_pose).all() and np.isfinite(partner_pose).all()
+                and np.isfinite(partner_future).all()):
+            raise ValueError('Platoon reference contains NaN/Inf')
+
+        ce, se = np.cos(ego_pose[2]), np.sin(ego_pose[2])
+        cp, sp = np.cos(partner_pose[2]), np.sin(partner_pose[2])
+        partner_world = partner_future @ np.asarray([[cp, sp], [-sp, cp]]) + partner_pose[:2]
+        world_delta = partner_world - ego_pose[:2]
+        future_ego = world_delta @ np.asarray([[ce, -se], [se, ce]])
+        initial_delta = partner_pose[:2] - ego_pose[:2]
+        initial_ego = initial_delta @ np.asarray([[ce, -se], [se, ce]])
+        full_xy = np.concatenate((initial_ego[None], future_ego), axis=0)
+        delta = np.diff(full_xy, axis=0)
+        initial_heading = np.arctan2(np.sin(partner_pose[2] - ego_pose[2]),
+                                     np.cos(partner_pose[2] - ego_pose[2]))
+        future_heading = []
+        heading = initial_heading
+        for displacement in delta:
+            if np.linalg.norm(displacement) > 1e-3:
+                heading = float(np.arctan2(displacement[1], displacement[0]))
+            future_heading.append(heading)
+        heading = np.concatenate(([initial_heading], np.asarray(future_heading)))
+        return np.concatenate((full_xy, heading[:, None]), axis=-1).astype(np.float32)
 
     def __getitem__(self, index):
         file_index, row = self._index[index]
@@ -131,6 +184,23 @@ class RawExpertDataset(Dataset):
         targets = {'trajectory': tensor('expert_trajectory_xy').float(),
                    'trajectory_dense': tensor('future_trajectory_dense').float(),
                    **{key: tensor(key).float() for key in self.CONTEXT_KEYS}}
+        if self.include_platoon_reference:
+            frame = int(data['frame_index'][row])
+            ego_index = int(data['ego_index'][row])
+            ego_pose = np.asarray(data['koopman_pose0_si'][row], dtype=np.float32)
+            partner_indices = [value for value in self.CONTROLLED_EGO_INDICES if value != ego_index]
+            partner_rows = [self._frame_rows[file_index][frame][value] for value in partner_indices]
+            partner_poses = [
+                self._partner_poses_in_ego_frame(
+                    ego_pose,
+                    data['koopman_pose0_si'][partner_row],
+                    data['future_trajectory_dense'][partner_row],
+                )
+                for partner_row in partner_rows
+            ]
+            targets['platoon_reference_poses'] = torch.as_tensor(
+                np.stack(partner_poses, axis=0), dtype=torch.float32
+            )
         for key in ('dense_dt', 'trajectory_horizon_s'):
             if key in data:
                 targets[key] = tensor(key).float()

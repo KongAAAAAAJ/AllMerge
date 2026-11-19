@@ -1,9 +1,9 @@
 """TRACE control-space stochastic diffusion planner with shared mode selection.
 
-Control candidates are refined by DDIM and rolled out by a kinematic bicycle
-or frozen Koopman K2 execution model. Train and inference select the same valid
-goal-endpoint candidate. Expert XY, LTR, fuel, and progress losses supervise
-the chosen execution; no pseudo expert controls are used.
+Control candidates are refined by DDIM and rolled out by frozen Koopman K2.
+Training selects the same valid goal-endpoint candidate used at inference and
+optimizes expert trajectory, collision, TTC, road-boundary, LTR, fuel and
+progress objectives in execution space.
 
 Without clean control labels the objective is trajectory-trained iterative
 diffusion refinement, not standard DDPM noise-prediction supervision.
@@ -15,7 +15,6 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from highway_env.planner.diffusion.config.model import build_structured_diffusion_config
 from highway_env.planner.diffusion.models.schedule import TruncatedDDIMSchedule
@@ -25,6 +24,11 @@ from .blocks import CrossAttentionBlock, SinusoidalTimeEmbedding
 from highway_env.planner.diffusion.common.execution import VehicleExecution
 from highway_env.planner.diffusion.common.fuel import FuelParameters, vt_cpfm_from_states
 from highway_env.planner.diffusion.common.progress import centerline_progress
+from highway_env.planner.diffusion.common.safety_losses import (
+    background_constant_velocity_poses,
+    pairwise_vehicle_safety,
+    road_boundary_safety_loss,
+)
 
 
 @dataclass
@@ -38,15 +42,11 @@ class ControlSpaceConfig:
     inference_steps: int = 2           # Match truncated trajectory DDIM [8,0].
     inference_start_timestep: int = 8
     inference_noise_scale: float = 1.0
-    position_scale_m: float = 10.0
-    loss_position: float = 1.0         # Only supervised objective.
-
     def validate(self):
         if self.horizon_steps != 40 or abs(self.dt - 0.1) > 1e-9:
-            raise ValueError('Control-space D1 requires 40 steps at dt=0.1 s')
-        if min(self.wheelbase_m, self.max_accel_mps2,
-               self.max_steer_rad, self.position_scale_m, self.loss_position) <= 0:
-            raise ValueError('wheelbase, limits and trajectory loss scaling must be positive')
+            raise ValueError('TRACE control diffusion requires 40 steps at dt=0.1 s')
+        if min(self.wheelbase_m, self.max_accel_mps2, self.max_steer_rad) <= 0:
+            raise ValueError('wheelbase and control limits must be positive')
         if not 2 <= self.inference_steps <= self.inference_start_timestep + 1:
             raise ValueError('inference_steps must be in [2, inference_start_timestep+1]')
         if not 0 <= self.inference_start_timestep < self.num_train_timesteps:
@@ -148,8 +148,6 @@ class ControlDiffusionPlanner(nn.Module):
                 max_steer_rad=self.ctrl_cfg.max_steer_rad,
             )
             self.anchors_config.update(self.anchor_manager.config)
-        self._validate_objectives()
-
     def _encode_scene(self, features):
         device = features['ego_state'].device
         for attr in ('ego_scale', 'agent_scale', 'map_scale', 'target_point_scale'):
@@ -201,32 +199,38 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _validate_objectives(self):
         cfg = self.loss_config
-        if cfg.get('mode_selection') != 'goal_endpoint':
-            raise ValueError('Control diffusion training mode_selection must be goal_endpoint')
-        trajectory = cfg.get('trajectory', {})
-        if trajectory.get('type', 'legacy_smooth_l1') not in ('legacy_smooth_l1', 'paper_mse'):
-            raise ValueError('trajectory.type: legacy_smooth_l1 or paper_mse')
-        for name in ('trajectory', 'ltr', 'fuel', 'progress'):
-            weight = float(cfg.get(name, {}).get('weight',
-                self.ctrl_cfg.loss_position if name == 'trajectory' else 0.0))
+        if cfg['mode_selection'] != 'goal_endpoint':
+            raise ValueError('Control diffusion requires goal_endpoint mode selection')
+        required = ('trajectory', 'background_collision', 'intertruck_collision',
+                    'ttc', 'road_boundary', 'ltr', 'fuel', 'progress')
+        for name in required:
+            weight = float(cfg[name]['weight'])
             if weight < 0:
                 raise ValueError(f'{name}.weight must be nonnegative')
+        for name in ('trajectory', 'background_collision', 'intertruck_collision', 'ttc', 'road_boundary'):
+            if float(cfg[name]['weight']) <= 0:
+                raise ValueError(f'{name}.weight must be positive')
+        safety = cfg['safety']
+        for key in ('vehicle_length_m', 'vehicle_width_m', 'collision_margin_m',
+                    'softplus_temperature_m', 'collision_distance_scale_m',
+                    'ttc_distance_scale_m', 'road_distance_scale_m'):
+            if float(safety[key]) <= 0:
+                raise ValueError(f'safety.{key} must be positive')
+        if float(safety['ttc_threshold_s']) <= 0:
+            raise ValueError('safety.ttc_threshold_s must be positive')
         if self._weight('ltr') > 0:
             if self.vehicle_model.kind != 'koopman_k2':
-                raise ValueError('LTR penalty requires Koopman K2; kinematic model has no LTR')
-            limit = cfg.get('ltr', {}).get('limit')
-            if limit is None or not 0 < float(limit) < 1:
-                raise ValueError('LTR limit must be explicitly set in (0,1)')
+                raise ValueError('LTR penalty requires Koopman K2')
+            limit = float(cfg['ltr']['limit'])
+            if not 0 < limit < 1:
+                raise ValueError('LTR limit must be in (0,1)')
         if self._weight('fuel') > 0:
-            self._fuel_parameters()  # Fail fast on missing calibration.
-        if self._weight('progress') > 0:
-            minimum = cfg.get('progress', {}).get('minimum_progress_m')
-            if minimum is None or float(minimum) < 0:
-                raise ValueError('progress.minimum_progress_m must be >=0')
+            self._fuel_parameters()
+        if self._weight('progress') > 0 and float(cfg['progress']['minimum_progress_m']) < 0:
+            raise ValueError('progress.minimum_progress_m must be nonnegative')
 
     def _weight(self, name):
-        default = self.ctrl_cfg.loss_position if name == 'trajectory' else 0.0
-        return float(self.loss_config.get(name, {}).get('weight', default))
+        return float(self.loss_config[name]['weight'])
 
     def _fuel_parameters(self):
         values = self.loss_config.get('fuel', {}).get('parameters')
@@ -236,11 +240,6 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _all_predictions(self, controls, features, context=None):
         return self.vehicle_model(controls, features, context)
-
-    def _all_poses(self, controls, features, context=None):
-        # Legacy helper retained for external D1 callers.
-        result = self._all_predictions(controls, features, context)
-        return result['poses'], result['speeds']
 
     @staticmethod
     def _select_goal_endpoint_mode(poses_all, features):
@@ -261,71 +260,135 @@ class ControlDiffusionPlanner(nn.Module):
         selected = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
         return selected, scores
 
-    def forward_train(self, features, target_dense_xy, target_mode=None, *,
+    def forward_train(self, features, target_dense_xy, safety_targets, *,
                       generator=None, context=None):
-        """Train on the same goal-endpoint-selected mode used by inference.
+        """Train the selected DDIM control sequence against expert and safety objectives.
 
-        Target XY supplies trajectory supervision after selection only. The
-        choice of mode depends on observed target_point, predicted endpoint,
-        and mode_valid_mask; it never uses future expert XY as an oracle.
-        Auxiliary losses use the same selected mode as trajectory supervision.
+        The ego trajectory is predicted by frozen K2. Background vehicles use
+        constant-velocity references from agent_states. The other two controlled
+        trucks use synchronized expert trajectories supplied by RawExpertDataset.
         """
         cfg = self.ctrl_cfg
-        B = features['ego_state'].shape[0]
-        if target_dense_xy.shape != (B, cfg.horizon_steps, 2):
+        batch = features['ego_state'].shape[0]
+        if target_dense_xy.shape != (batch, cfg.horizon_steps, 2):
             raise ValueError('Expert trajectory_dense must be [B,40,2]')
+        if safety_targets['platoon_reference_poses'].shape != (batch, 2, cfg.horizon_steps + 1, 3):
+            raise ValueError('platoon_reference_poses must be [B,2,41,3]')
+
         features = self._prepare_anchors(features)
         controls_all = self._sample_controls(features, generator=generator)
         pred = self._all_predictions(controls_all, features, context)
         poses_all, speeds_all = pred['poses'], pred['speeds']
         predicted_xy = poses_all[:, :, 1:, :2]
         truth = target_dense_xy[:, None].expand_as(predicted_xy)
-        if self.loss_config.get('trajectory', {}).get('type', 'legacy_smooth_l1') == 'paper_mse':
-            # Paper: (1/H) sum_j ||p_j - p^GT_j||_2^2 in physical m^2.
-            errors = (predicted_xy - truth).square().sum(dim=-1).mean(dim=-1)
-        else:
-            # Bit-for-bit equivalent to the original D1 SmoothL1 regression.
-            errors = F.smooth_l1_loss(predicted_xy / cfg.position_scale_m,
-                truth / cfg.position_scale_m, reduction='none').mean(dim=(-2, -1))
+        errors = (predicted_xy - truth).square().sum(dim=-1).mean(dim=-1)
+
         selected, _ = self._select_goal_endpoint_mode(poses_all, features)
-        selected_error = errors.gather(1, selected[:, None]).squeeze(1)
-        batch_ix = torch.arange(B, device=controls_all.device)
+        batch_ix = torch.arange(batch, device=controls_all.device)
         selected_controls = controls_all[batch_ix, selected]
         selected_poses = poses_all[batch_ix, selected]
         selected_speeds = speeds_all[batch_ix, selected]
-        z = selected_error.new_zeros(())
-        ltr_loss, fuel_loss, progress_loss = z, z, z
+        trajectory_loss = errors.gather(1, selected[:, None]).squeeze(1).mean()
+
+        safety = self.loss_config['safety']
+        ego_dimensions = selected_poses.new_tensor(
+            [float(safety['vehicle_length_m']), float(safety['vehicle_width_m'])]
+        ).expand(batch, 2)
+
+        background_poses, background_dimensions, background_valid = background_constant_velocity_poses(
+            features['agent_states'], features['agent_valid_mask'], features['ego_state'],
+            cfg.horizon_steps, cfg.dt,
+        )
+        collision_args = {
+            'dt': cfg.dt,
+            'collision_margin_m': float(safety['collision_margin_m']),
+            'ttc_threshold_s': float(safety['ttc_threshold_s']),
+            'softplus_temperature_m': float(safety['softplus_temperature_m']),
+            'collision_distance_scale_m': float(safety['collision_distance_scale_m']),
+            'ttc_distance_scale_m': float(safety['ttc_distance_scale_m']),
+        }
+        background_stats = pairwise_vehicle_safety(
+            selected_poses, ego_dimensions,
+            background_poses, background_dimensions, background_valid,
+            **collision_args,
+        )
+
+        platoon_poses = safety_targets['platoon_reference_poses'].to(selected_poses)
+        platoon_dimensions = selected_poses.new_tensor(
+            [float(safety['vehicle_length_m']), float(safety['vehicle_width_m'])]
+        ).view(1, 1, 2).expand(batch, 2, 2)
+        platoon_valid = torch.ones((batch, 2), dtype=torch.bool, device=selected_poses.device)
+        platoon_stats = pairwise_vehicle_safety(
+            selected_poses, ego_dimensions,
+            platoon_poses, platoon_dimensions, platoon_valid,
+            **collision_args,
+        )
+
+        road_stats = road_boundary_safety_loss(
+            selected_poses, ego_dimensions,
+            features['road_lane_geometry'], features['road_lane_point_mask'],
+            features['road_lane_mask'], features['road_lane_connections'],
+            features['road_current_lane_slot'], features['road_target_lane_slot'],
+            softplus_temperature_m=float(safety['softplus_temperature_m']),
+            distance_scale_m=float(safety['road_distance_scale_m']),
+        )
+        background_collision_loss = background_stats['collision_loss']
+        intertruck_collision_loss = platoon_stats['collision_loss']
+        ttc_loss = 0.5 * (background_stats['ttc_loss'] + platoon_stats['ttc_loss'])
+        road_boundary_loss = road_stats['loss']
+
+        zero = trajectory_loss.new_zeros(())
+        ltr_loss, fuel_loss, progress_loss = zero, zero, zero
         fuel_total = None
         if self._weight('ltr') > 0:
             selected_ltr = pred['ltr'][batch_ix, selected, 1:]
             limit = float(self.loss_config['ltr']['limit'])
             ltr_loss = torch.relu(selected_ltr.abs() - limit).square().mean()
         if self._weight('fuel') > 0:
-            if context is None or 'koopman_payload_kg' not in context:
-                raise KeyError('Fuel loss needs physical koopman_payload_kg [B] in expert context')
-            payload = context['koopman_payload_kg'].to(selected_speeds).reshape(B)
-            if (payload < 0).any() or not torch.isfinite(payload).all():
-                raise ValueError('Invalid fuel payload_kg')
+            payload = context['koopman_payload_kg'].to(selected_speeds).reshape(batch)
             fuel_result = vt_cpfm_from_states(
                 selected_speeds, payload, self._fuel_parameters(), dt=cfg.dt)
             fuel_total = fuel_result['fuel_total']
             fuel_loss = fuel_total.mean()
         if self._weight('progress') > 0:
-            # Paper: road progress along the reference target lane (not ego x).
-            min_progress = float(self.loss_config['progress']['minimum_progress_m'])
+            minimum_progress = float(self.loss_config['progress']['minimum_progress_m'])
             delta_s = centerline_progress(selected_poses[:, -1], features['target_lane_polyline'])
-            progress_loss = torch.relu(min_progress - delta_s).square().mean()
-        trajectory_loss = selected_error.mean()
-        total = (self._weight('trajectory') * trajectory_loss +
-                 self._weight('ltr') * ltr_loss +
-                 self._weight('fuel') * fuel_loss +
-                 self._weight('progress') * progress_loss)
+            progress_loss = torch.relu(minimum_progress - delta_s).square().mean()
+
+        total = (
+            self._weight('trajectory') * trajectory_loss
+            + self._weight('background_collision') * background_collision_loss
+            + self._weight('intertruck_collision') * intertruck_collision_loss
+            + self._weight('ttc') * ttc_loss
+            + self._weight('road_boundary') * road_boundary_loss
+            + self._weight('ltr') * ltr_loss
+            + self._weight('fuel') * fuel_loss
+            + self._weight('progress') * progress_loss
+        )
         output = {
-            'loss': total, 'position_loss': trajectory_loss,
-            'trajectory_loss': trajectory_loss, 'ltr_loss': ltr_loss,
-            'fuel_loss': fuel_loss, 'progress_loss': progress_loss,
-            'controls': selected_controls, 'poses': selected_poses,
-            'speeds': selected_speeds, 'selected_mode': selected,
+            'loss': total,
+            'trajectory_loss': trajectory_loss,
+            'background_collision_loss': background_collision_loss,
+            'intertruck_collision_loss': intertruck_collision_loss,
+            'ttc_loss': ttc_loss,
+            'ttc_background_loss': background_stats['ttc_loss'],
+            'ttc_intertruck_loss': platoon_stats['ttc_loss'],
+            'road_boundary_loss': road_boundary_loss,
+            'ltr_loss': ltr_loss,
+            'fuel_loss': fuel_loss,
+            'progress_loss': progress_loss,
+            'background_collision_rate': background_stats['collision_rate'],
+            'intertruck_collision_rate': platoon_stats['collision_rate'],
+            'ttc_background_violation_rate': background_stats['ttc_violation_rate'],
+            'ttc_intertruck_violation_rate': platoon_stats['ttc_violation_rate'],
+            'road_violation_rate': road_stats['violation_rate'],
+            'background_min_gap_m': background_stats['min_gap'],
+            'intertruck_min_gap_m': platoon_stats['min_gap'],
+            'max_road_violation_m': road_stats['max_violation'],
+            'controls': selected_controls,
+            'poses': selected_poses,
+            'speeds': selected_speeds,
+            'selected_mode': selected,
         }
         if pred['ltr'] is not None:
             output['ltr'] = pred['ltr'][batch_ix, selected]
