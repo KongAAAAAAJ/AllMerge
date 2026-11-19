@@ -23,9 +23,16 @@ A1AnchorManager/A1AnchorBuilder interface.
 5. **Planning minADE (m) ↓**: minimum ADE among valid diffusion-generated
    8-point K2 execution trajectories.
 6. **CR (%) ↓**: percentage of selected planning trajectories with at least
-   one collision during the prediction horizon. Uncontrolled background
+   one body-rectangle overlap (zero safety margin; boundary contact excluded).
+   Controlled-truck dimensions come from the raw manifest (currently 8 x 2.6 m);
+   background vehicles use their observed dimensions. Uncontrolled background
    actors are extrapolated with constant velocity; synchronized controlled
    trucks are checked against their own raw K2 predictions.
+   All methods and Expert use the same per-frame prefix before the earliest
+   detected expert lane-end clipping. Earlier collisions are retained; samples
+   without valid future nodes are excluded from the CR denominator. CSV/JSON
+   record the valid future steps, cutoff, clipping reason and CR sample counts.
+   This clipping rule changes only CR, not minADE, DAC, TTC or Safe Ratio.
 7. **DAC (%) ↑**: mean percentage of future time steps for which the complete
    ego vehicle footprint remains inside the union of raw lane-edge polygons. The footprint uses the configured multi-circle vehicle envelope.
 8. **TTC (%) ↑**: percentage of selected planning trajectories whose minimum
@@ -41,8 +48,9 @@ there is no JTP constraint evaluation, iterative projection, projection
 correction or projected-trajectory fallback.
 
 The existing `--jtp-config` argument is retained for command compatibility.
-Its YAML is used only to read the vehicle footprint and execution time step
-for collision, TTC and drivable-area calculations. It does not invoke JTP.
+Its YAML supplies the execution time step and the multi-circle footprint for
+TTC and drivable-area calculations. CR uses body dimensions from the raw
+manifest instead of the multi-circle footprint. It does not invoke JTP.
 
 ## Staged entry points
 

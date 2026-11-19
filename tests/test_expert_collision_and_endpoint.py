@@ -102,7 +102,9 @@ def test_shared_cr_window_keeps_early_collisions_and_excludes_invalid_denominato
     loader = DataLoader(samples, batch_size=1, collate_fn=collate_anchor_batch)
     window = _cr_frame_windows(loader, .1)[(1, 2, 3)]
     assert window['cr_valid_future_steps'] == 19
-    assert window['cr_valid_until_s'] == 1.9 + 2.220446049250313e-16
+    assert np.isclose(window['cr_valid_until_s'], 1.9)
+    batched = DataLoader(samples, batch_size=3, collate_fn=collate_anchor_batch)
+    assert _cr_frame_windows(batched, .1)[(1, 2, 3)] == window
 
     paths = [np.zeros((41, 3)) for _ in range(3)]
     paths[1][:, 0] = 20.
@@ -127,6 +129,11 @@ def test_shared_cr_window_keeps_early_collisions_and_excludes_invalid_denominato
     summary = summarize([], rows, methods=['Expert'])[0]
     assert summary['collision_rate_pct'] == 100.
     assert summary['num_cr_evaluated_runs'] == 2 and summary['num_cr_excluded_runs'] == 1
+    for row, path in zip(rows, paths):
+        row.update(cr_valid_future_steps=0, external_collision_free=None, _raw_world_poses=path)
+    _apply_synchronized_intertruck(rows, _vehicle_config(), {'ttc_threshold_s': 1.})
+    summary = summarize([], rows, methods=['Expert'])[0]
+    assert summary['collision_rate_pct'] is None and summary['num_cr_excluded_runs'] == 3
 
 
 def _planner(network, route=()):
