@@ -186,9 +186,17 @@ def _road_features(width=8.0):
     maps[0, :, 0] = np.linspace(-10.0, 50.0, 32)
     maps[0, :, 4] = width
     maps[0, :, 6] = 1.0  # is_current_lane / recognized drivable lane
+    geometry = np.zeros((1, 32, 9), dtype=np.float32)
+    geometry[0, :, 2] = maps[0, :, 0]
+    geometry[0, :, 3] = width / 2
+    geometry[0, :, 4] = maps[0, :, 0]
+    geometry[0, :, 5] = -width / 2
     return {
         "map_polylines": maps,
         "map_valid_mask": np.asarray([True]),
+        "road_lane_geometry": geometry,
+        "road_lane_point_mask": np.ones((1, 32), dtype=bool),
+        "road_lane_mask": np.asarray([True]),
     }
 
 
@@ -267,8 +275,9 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
             return self
 
         def _prepare_anchors(self, features):
+            # Online A1 consumes raw geometry without returning it.
             return dict(
-                features,
+                {key: value for key, value in features.items() if not key.startswith('road_')},
                 coarse_trajectories=poses[:, :, 5::5, :2],
                 mode_valid_mask=torch.ones(2, 2, dtype=torch.bool),
             )
@@ -290,6 +299,7 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
         "map_valid_mask": torch.ones(1, dtype=torch.bool),
         "target_point": torch.zeros(2),
     }
+    features.update({key: torch.as_tensor(value) for key, value in _road_features().items()})
     targets = {
         "trajectory": torch.zeros(8, 2),
         "koopman_state_hist_si": torch.zeros(5, 5),

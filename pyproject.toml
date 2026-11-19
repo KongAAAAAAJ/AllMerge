@@ -7,6 +7,7 @@ name = "allmerge"
 version = "0.1.0"
 description = "Vehicle simulation, expert data collection, diffusion planning and Koopman prediction"
 requires-python = ">=3.10"
+dependencies = ["shapely>=2.0,<3"]
 readme = "README.md"
 
 [project.optional-dependencies]

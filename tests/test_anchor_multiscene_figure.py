@@ -47,6 +47,9 @@ def test_anchor_pass_collects_all_selected_scenes_and_preserves_sample_count():
         'map_polylines': torch.zeros(b, 1, 8, 10),
         'map_valid_mask': torch.ones(b, 1, dtype=torch.bool),
         'target_point': torch.zeros(b, 2),
+        'road_lane_geometry': torch.zeros(b, 1, 8, 9),
+        'road_lane_point_mask': torch.ones(b, 1, 8, dtype=torch.bool),
+        'road_lane_mask': torch.ones(b, 1, dtype=torch.bool),
     }
     metadata = [dict(episode_index=e, frame_index=0, ego_index=0) for e in range(b)]
     keys = select_figure_samples(metadata, count=3)

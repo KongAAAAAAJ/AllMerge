@@ -213,6 +213,7 @@ def _extract_features_numpy(features: Mapping, index: int) -> dict:
     names = (
         "ego_state", "agent_states", "agent_valid_mask",
         "map_polylines", "map_valid_mask", "target_point",
+        "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
     )
     missing = [key for key in names if key not in features]
     if missing:
@@ -352,7 +353,7 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
             xy = prepared["coarse_trajectories"]
             controls = prepared["coarse_controls"]
             valid = geometry_valid_mask(_strategy(model), prepared, targets_cpu, xy)
-            safety = anchor_safety_cost(prepared, xy, valid=valid, **teacher_cfg)
+            safety = anchor_safety_cost(features, xy, valid=valid, **teacher_cfg)
             metrics = compute_anchor_metrics(
                 xy=xy,
                 controls=controls,
@@ -382,7 +383,7 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
                 })
                 if key in figure_keys:
                     figure_payload[key] = {
-                        "features": _extract_features_numpy(prepared, index),
+                        "features": _extract_features_numpy(features, index),
                         "expert_xy": expert_xy[index].detach().cpu().numpy(),
                         "anchors_xy": xy[index].detach().cpu().numpy(),
                         "valid": valid[index].detach().cpu().numpy(),
@@ -491,7 +492,7 @@ def _planning_seed_pass(method, model, loader, device, seed,
                     _meta_int(meta, "frame_index"),
                     _meta_int(meta, "ego_index"),
                 )
-                features_np = _extract_features_numpy(prepared, index)
+                features_np = _extract_features_numpy(features, index)
                 pose0 = context["koopman_pose0_si"][index].detach().cpu().numpy()
                 raw_local = selected_poses[index].detach().cpu().numpy()
                 record = _trajectory_safety_record(
@@ -730,6 +731,14 @@ def run(args=None):
         models, checkpoint_info = _load_models(
             checkpoint_paths, device, expected_num_modes=num_modes
         )
+        if parsed.a2_scorer and "A2" in models:
+            from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
+            model = models["A2"]
+            model.anchors_config = dict(model.anchors_config, scorer_checkpoint=parsed.a2_scorer)
+            model.anchor_manager = AdaptiveAnchorManager(
+                model.anchors_config, device=device, num_selected=num_modes)
+            checkpoint_info["A2"]["scorer_override"] = str(resolve_repo_file(parsed.a2_scorer))
+            checkpoint_info["A2"]["diffusion_retrained"] = False
         if stage == "all" and "A2" in models:
             teacher_cfg, scorer_path = _teacher_config_from_a2(models["A2"])
         elif stage == "all":
@@ -906,6 +915,7 @@ def run(args=None):
 
     manifest = {
         "study": "TRACE Adaptive Anchor Ablation",
+        "road_definition": "raw lane-edge polygon union; internal boundaries removed",
         "stage": stage,
         "selected_methods": methods,
         "expert_reference": {
@@ -936,12 +946,12 @@ def run(args=None):
         "completed_metrics": completed_metrics,
         "definitions": {
             "anchor_minADE": f"Minimum average displacement error over {num_modes} geometrically instantiated anchors",
-            "safe_ratio": f"Hard-safe anchors divided by {num_modes}, using the common A2 safety teacher's constant-velocity collision and drivable-road corridor labels",
+            "safe_ratio": f"Hard-safe anchors divided by {num_modes}, using the common A2 safety teacher's constant-velocity collision and raw road-union center-point labels",
             "trajectory_diversity": "Mean pairwise pointwise XY distance across anchor trajectories, in metres",
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
             "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point K2 execution trajectories",
             "collision_rate": "Percentage of selected raw K2 trajectories with at least one collision against uncontrolled actors under constant-velocity prediction or synchronized controlled trucks using their raw K2 predictions",
-            "drivable_area_compliance": "Mean percentage of future time steps for which the full multi-circle ego footprint remains inside the union of recognized drivable-lane corridors",
+            "drivable_area_compliance": "Mean percentage of future time steps for which the full multi-circle ego footprint remains inside the union of raw lane-edge polygons (internal lane boundaries removed)",
             "ttc_compliance": "Percentage of selected raw K2 trajectories whose minimum predicted TTC to uncontrolled actors or synchronized controlled trucks is no less than the configured threshold",
         },
         "planning_safety": {

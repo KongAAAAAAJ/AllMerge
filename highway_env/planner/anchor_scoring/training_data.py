@@ -23,7 +23,7 @@ from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
 from .safety import anchor_safety_cost
 
 
-CACHE_VERSION = "TRACE_A2_RAW_SCORER_CACHE_V4"
+CACHE_VERSION = "TRACE_A2_RAW_SCORER_CACHE_V5"
 CANDIDATE_ALGORITHM_VERSION = "shared-control-candidate-pool-v3"
 FEATURE_KEYS = (*RawExpertDataset.FEATURE_KEYS, *RawExpertDataset.ROAD_KEYS)
 BOOL_FEATURE_KEYS = {'agent_valid_mask', 'map_valid_mask', 'road_lane_point_mask',
@@ -215,7 +215,7 @@ def prepare_split_cache(
                 safety_features = {
                     name: features[name].to(device)
                     for name in ("agent_states", "agent_valid_mask", "ego_state",
-                                 "map_polylines", "map_valid_mask")
+                                 "road_lane_geometry", "road_lane_point_mask", "road_lane_mask")
                 }
                 xy_tensor = torch.as_tensor(xy_np, dtype=torch.float32, device=device)
                 valid_tensor = torch.as_tensor(valid_np, dtype=torch.bool, device=device)

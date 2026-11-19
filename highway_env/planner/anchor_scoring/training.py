@@ -290,6 +290,7 @@ def train(args):
             "best_val_loss": min(best, float(val_metrics["loss"])),
             "history": history,
             "training_pipeline": "TRACE_A2_SCORER_TRAINING_V3_SHARED_POOL",
+            "road_definition": "raw lane-edge polygon union; center-point checks",
         }
         torch.save(ckpt, output_dir / "last.pt")
         if val_metrics["loss"] < best:

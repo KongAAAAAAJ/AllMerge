@@ -12,67 +12,16 @@ import math
 from typing import Mapping, Sequence
 
 import numpy as np
+from shapely.affinity import affine_transform
+
+from highway_env.planner.road_area import road_area, road_clearance
 
 
-def _resample_polyline(points: np.ndarray, widths: np.ndarray, count: int = 64):
-    points = np.asarray(points, dtype=np.float64)
-    widths = np.asarray(widths, dtype=np.float64).reshape(-1)
-    if points.ndim != 2 or points.shape[1] != 2 or len(points) < 2:
-        raise ValueError("Each valid drivable lane must contain at least two XY points")
-    if widths.shape != (len(points),):
-        raise ValueError("Lane widths must match the number of polyline points")
-    finite = np.isfinite(points).all(axis=1) & np.isfinite(widths) & (widths > 0)
-    points, widths = points[finite], widths[finite]
-    if len(points) < 2:
-        raise ValueError("Drivable lane has fewer than two finite points")
-    keep = np.ones(len(points), dtype=bool)
-    keep[1:] = np.linalg.norm(np.diff(points, axis=0), axis=1) > 1e-5
-    points, widths = points[keep], widths[keep]
-    if len(points) < 2:
-        raise ValueError("Drivable lane degenerates after duplicate-point removal")
-    arc = np.concatenate(([0.0], np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))))
-    if arc[-1] <= 1e-5:
-        raise ValueError("Drivable lane has zero arc length")
-    target = np.linspace(0.0, arc[-1], int(count))
-    xy = np.stack([np.interp(target, arc, points[:, d]) for d in range(2)], axis=-1)
-    width = np.interp(target, arc, widths)
-    if not np.isfinite(xy).all() or not np.isfinite(width).all() or np.any(width <= 0):
-        raise ValueError("Invalid drivable-lane coordinates or widths")
-    return xy, width
-
-
-def road_geometry_from_features(features: Mapping, pose0: np.ndarray, *, point_count: int = 64) -> dict:
-    """Build world-frame corridors from the map's recognized drivable lanes.
-
-    Map features are expressed in the initial ego frame. The lane-class flags
-    in channels 6:10 follow the A2 safety teacher's drivable-lane definition.
-    """
-    maps = np.asarray(features["map_polylines"], dtype=np.float64)
-    valid = np.asarray(features["map_valid_mask"], dtype=bool)
-    pose0 = np.asarray(pose0, dtype=np.float64).reshape(3)
-    if maps.ndim != 3 or maps.shape[-1] < 10 or valid.shape != (maps.shape[0],):
-        raise ValueError("Expected map_polylines [L,P,D>=10] and map_valid_mask [L]")
-    drivable = (np.max(maps[..., 6:10], axis=(-2, -1)) > 0.5) & valid
-    if not np.any(drivable):
-        raise ValueError("DAC evaluation requires at least one recognized drivable lane")
-
-    lanes, half_widths = [], []
+def road_geometry_from_features(features: Mapping, pose0: np.ndarray) -> dict:
+    """Build the world-frame road union from raw lane edges."""
     c, s = math.cos(float(pose0[2])), math.sin(float(pose0[2]))
-    for lane_id in np.flatnonzero(drivable):
-        local_xy = maps[lane_id, :, :2]
-        lane_width = np.maximum(maps[lane_id, :, 4], 0.1)
-        xy, width = _resample_polyline(local_xy, lane_width, point_count)
-        world = np.empty_like(xy)
-        world[:, 0] = pose0[0] + c * xy[:, 0] - s * xy[:, 1]
-        world[:, 1] = pose0[1] + s * xy[:, 0] + c * xy[:, 1]
-        lanes.append(world)
-        half_widths.append(width * 0.5)
-    widths = np.stack(half_widths)
-    return {
-        "centerlines_xy": np.stack(lanes),
-        "left_width_m": widths,
-        "right_width_m": widths,
-    }
+    return {"area": affine_transform(
+        road_area(features), [c, -s, s, c, float(pose0[0]), float(pose0[1])])}
 
 
 def local_to_world_poses(local_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
@@ -254,50 +203,12 @@ def drivable_area_compliance(
     poses = np.asarray(world_poses, dtype=np.float64)
     if poses.ndim != 2 or poses.shape[-1] != 3 or poses.shape[0] < 2:
         raise ValueError("world_poses must be [H+1,3]")
-    centerlines = np.asarray(road["centerlines_xy"], dtype=np.float64)
-    left_width = np.asarray(road["left_width_m"], dtype=np.float64)
-    right_width = np.asarray(road["right_width_m"], dtype=np.float64)
-    if centerlines.ndim != 3 or centerlines.shape[-1] != 2:
-        raise ValueError("road centerlines must be [L,P,2]")
-    if left_width.shape != centerlines.shape[:2] or right_width.shape != centerlines.shape[:2]:
-        raise ValueError("road corridor widths must be [L,P]")
-    if not np.isfinite(centerlines).all() or not np.isfinite(left_width).all() or not np.isfinite(right_width).all():
-        raise ValueError("Road geometry contains NaN/Inf")
-    if tolerance_m < 0:
-        raise ValueError("Drivable-area tolerance must be nonnegative")
-
     footprint = vehicle_cfg["geometry"]["footprint"]
     offsets = np.asarray(footprint["circle_offsets_m"], dtype=np.float64)
     radius = float(footprint["circle_radius_m"])
     centers = _circle_centers(poses[1:], offsets)  # Exclude the initial state: future horizon only.
 
-    starts = centerlines[:, :-1]
-    delta = centerlines[:, 1:] - starts
-    denom = np.sum(delta * delta, axis=-1)
-    if np.any(denom <= 1e-12):
-        raise ValueError("Road centerlines contain duplicate consecutive points")
-    rel = centers[:, :, None, None, :] - starts[None, None, :, :, :]
-    fraction = np.sum(rel * delta[None, None, :, :, :], axis=-1) / denom[None, None, :, :]
-    fraction = np.clip(fraction, 0.0, 1.0)
-    projection = starts[None, None, :, :, :] + fraction[..., None] * delta[None, None, :, :, :]
-    distance2 = np.sum((centers[:, :, None, None, :] - projection) ** 2, axis=-1)
-    flat_index = np.argmin(distance2.reshape(*centers.shape[:2], -1), axis=-1)
-    segment_count = centerlines.shape[1] - 1
-    lane_ids = flat_index // segment_count
-    segment_ids = flat_index % segment_count
-    gather = (np.arange(centers.shape[0])[:, None], np.arange(centers.shape[1])[None, :])
-    a = starts[lane_ids, segment_ids]
-    d = delta[lane_ids, segment_ids]
-    f = fraction[gather[0], gather[1], lane_ids, segment_ids]
-    nearest = a + f[..., None] * d
-    tangent = d / np.maximum(np.linalg.norm(d, axis=-1, keepdims=True), 1e-8)
-    offset = centers - nearest
-    signed = tangent[..., 0] * offset[..., 1] - tangent[..., 1] * offset[..., 0]
-    left = left_width[lane_ids, segment_ids] * (1.0 - f) + left_width[lane_ids, segment_ids + 1] * f
-    right = right_width[lane_ids, segment_ids] * (1.0 - f) + right_width[lane_ids, segment_ids + 1] * f
-    left_residual = signed + radius - left
-    right_residual = -signed + radius - right
-    circle_inside = (left_residual <= tolerance_m) & (right_residual <= tolerance_m)
+    circle_inside = road_clearance(road["area"], centers) + tolerance_m >= radius
     step_inside = circle_inside.all(axis=1)
     return float(step_inside.mean() * 100.0)
 

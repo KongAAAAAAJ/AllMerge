@@ -5,7 +5,10 @@ never used: all geometry is expressed in the observed initial ego frame.
 """
 from __future__ import annotations
 
+import numpy as np
 import torch
+
+from highway_env.planner.road_area import road_area, road_clearance
 
 
 def anchor_safety_cost(features, xy, valid=None, *, collision_weight=1.0,
@@ -17,8 +20,8 @@ def anchor_safety_cost(features, xy, valid=None, *, collision_weight=1.0,
     xy is [B,M,T,2] and describes ego-relative future positions at t=dt..Tdt.
     Agent velocity features are relative; ego velocity is added back for the
     constant-velocity prediction in the fixed initial ego coordinate frame.
-    Road compliance uses segment-wise distance to the union of known drivable
-    lane centerline corridors. Invalid roadway metadata raises an error.
+    Road compliance uses center-point distance to the union of raw lane polygons.
+    Internal lane boundaries do not restrict lane changes.
     """
     if xy.ndim != 4 or xy.shape[-1] != 2:
         raise ValueError('xy must be [B,M,T,2]')
@@ -58,25 +61,18 @@ def anchor_safety_cost(features, xy, valid=None, *, collision_weight=1.0,
     col = penetration.amax(dim=(2, 3))  # maximum predicted collision severity
     col_unsafe = penetration.amax(dim=(2, 3)) > 0
 
-    maps = features['map_polylines'].to(xy)
-    map_mask = features['map_valid_mask'].bool()
-    # Only recognized drivable lanes are included; target-lane flag may
-    # appear in addition to current/left/right flags.
-    roadway = (maps[..., 6:10].amax(dim=-2).amax(dim=-1) > 0.5) & map_mask
-    if not roadway.any(dim=1).all():
-        raise ValueError('A2 supervision requires at least one valid drivable map polyline')
-    segments_start = maps[:, None, None, :, :-1, :2]
-    segments_end = maps[:, None, None, :, 1:, :2]
-    delta = segments_end - segments_start
-    rel = xy[:, :, :, None, None, :] - segments_start
-    fraction = (rel * delta).sum(-1) / delta.square().sum(-1).clamp_min(1e-6)
-    nearest = segments_start + fraction.clamp(0, 1)[..., None] * delta
-    distance = (xy[:, :, :, None, None, :] - nearest).square().sum(-1).sqrt()
-    distance = distance.amin(dim=-1)
-    width = maps[:, None, None, :, 0, 4].clamp_min(0.1) / 2
-    excess = (distance - width).clamp_min(0)
-    excess = excess.masked_fill(~roadway[:, None, None, :], float('inf'))
-    road_violation = excess.amin(dim=-1)  # [B,M,T]
+    road_features = {
+        key: features[key].detach().cpu().numpy()
+        for key in ('road_lane_geometry', 'road_lane_point_mask', 'road_lane_mask')
+    }
+    positions = xy.detach().cpu().numpy()
+    violation = np.stack([
+        np.maximum(-road_clearance(
+            road_area({key: value[i] for key, value in road_features.items()}),
+            positions[i]), 0.0)
+        for i in range(B)
+    ])
+    road_violation = torch.as_tensor(violation, dtype=dtype, device=device)
     road = road_violation.square().mean(dim=-1)  # m^2
     road_unsafe = road_violation.amax(dim=-1) > 1e-4
     total = collision_weight * col + road_weight * road

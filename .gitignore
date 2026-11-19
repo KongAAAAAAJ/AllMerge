@@ -42,3 +42,5 @@ __pycache__/
 !/tests/test_expert_collision_and_endpoint.py
 !/tests/test_expert_collection_config.py
 !/tests/test_raw_expert_collection_contract.py
+
+!/tests/test_road_area.py

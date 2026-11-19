@@ -12,7 +12,7 @@ A1AnchorManager/A1AnchorBuilder interface.
    8-point expert trajectory.
 2. **Safe Ratio (%) ↑**: hard-safe anchors divided by K, using the common A2
    safety teacher's constant-velocity external-actor collision and
-   drivable-road corridor checks.
+   raw road-union center-point checks.
 3. **Trajectory Diversity (m) ↑**: mean pairwise pointwise XY distance among
    the K anchor trajectories.
 4. **Control Diversity (-) ↑**: mean pairwise pointwise control distance after
@@ -27,8 +27,7 @@ A1AnchorManager/A1AnchorBuilder interface.
    actors are extrapolated with constant velocity; synchronized controlled
    trucks are checked against their own raw K2 predictions.
 7. **DAC (%) ↑**: mean percentage of future time steps for which the complete
-   ego vehicle footprint remains inside the union of recognized drivable-lane
-   corridors. The footprint uses the configured multi-circle vehicle envelope.
+   ego vehicle footprint remains inside the union of raw lane-edge polygons. The footprint uses the configured multi-circle vehicle envelope.
 8. **TTC (%) ↑**: percentage of selected planning trajectories whose minimum
    predicted TTC to uncontrolled actors or synchronized controlled trucks
    is greater than or equal to the configured threshold. The default threshold
@@ -37,7 +36,7 @@ A1AnchorManager/A1AnchorBuilder interface.
 **Planning safety metrics are evaluated on the deployment-selected raw K2
 trajectory before JTP.** The raw K2 poses are in the ego-at-planning-time local
 frame and are transformed to the world frame only for synchronized
-inter-truck and road-corridor checks. JTP is not instantiated or invoked:
+inter-truck and road-union checks. JTP is not instantiated or invoked:
 there is no JTP constraint evaluation, iterative projection, projection
 correction or projected-trajectory fallback.
 
@@ -189,3 +188,11 @@ range in metres to both A1/A2 panels. Change individual inset positions/sizes
 with `ANCHOR_INSET_OVERRIDES = {(0, 'A1'): {'bounds': (0.03, 0.08, 0.50, 0.50)}}`.
 Set `enabled` to `False` globally or in an override to hide insets. Insets
 reuse the plotted trajectories and safety labels without additional evaluation.
+
+Road checks use the geometric union of raw `road_lane_geometry` left/right edges,
+with the raw lane and point masks. Internal lane boundaries do not count as road
+boundaries; disconnected areas and holes remain outside. DAC requires every
+vehicle footprint circle to fit inside this union. Anchor teacher road labels
+retain center-point checks and mean squared outside distance (hard threshold
+`1e-4 m`). Shapely 2.x is required. A2 cache V5 invalidates old road labels;
+rebuild caches and retrain the scorer before using the revised teacher.
