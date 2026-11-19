@@ -9,6 +9,7 @@ if __package__ in (None, ''):
 import argparse
 import csv
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,9 @@ METRIC_KEYS = (
     'road_violation_rate', 'background_min_gap_m',
     'intertruck_min_gap_m', 'max_road_violation_m',
 )
+
+
+SAFETY_ARCHITECTURE = 'TRACE_control_diffusion_safety_v1'
 
 
 def unpack(batch, device):
@@ -96,6 +100,53 @@ def _run_pass(model, loader, optimizer, device, max_batches=None, clip_norm=1.0)
     return {key: value / samples for key, value in totals.items()}
 
 
+
+def _restore_training_state(path, model, optimizer, cfg):
+    """Restore a complete checkpoint produced by TRACE Safety-aware Loss V1."""
+    saved = torch.load(path, map_location='cpu', weights_only=True)
+    if saved.get('architecture') != SAFETY_ARCHITECTURE:
+        raise ValueError(
+            'Resume requires a TRACE Safety-aware Diffusion Training V1 checkpoint'
+        )
+
+    for key, expected in (
+        ('model_config', cfg.get('model', {})),
+        ('control_config', cfg.get('control', {})),
+        ('execution_config', model.execution_config),
+        ('loss_config', model.loss_config),
+        ('anchors_config', model.anchors_config),
+        ('koopman_metadata', model.vehicle_model.koopman_metadata),
+    ):
+        if saved.get(key) != expected:
+            raise ValueError(
+                f'Resume checkpoint {key} differs from the current configuration; '
+                'restore the original Safety-aware experiment settings and K2 checkpoint'
+            )
+
+    history = saved['history']
+    epoch = saved['epoch']
+    if not isinstance(history, list) or not history or not isinstance(epoch, int) or epoch < 1:
+        raise ValueError('Safety-aware resume requires a completed epoch and training history')
+    if [row.get('epoch') for row in history] != list(range(1, epoch + 1)):
+        raise ValueError('Safety-aware resume history must contain every completed epoch in order')
+    if any(not np.isfinite(row['val_loss']) for row in history):
+        raise ValueError('Safety-aware resume history contains a non-finite validation loss')
+
+    best_val = float(saved['best_val_loss'])
+    best_epoch = int(saved['best_epoch'])
+    best_row = min(history, key=lambda row: row['val_loss'])
+    if best_epoch != int(best_row['epoch']) or not np.isclose(
+        best_val, float(best_row['val_loss']), rtol=1e-7, atol=1e-10
+    ):
+        raise ValueError('Safety-aware resume best-checkpoint metadata disagrees with history')
+    if 'optimizer_state' not in saved or 'model_state' not in saved:
+        raise ValueError('Safety-aware resume requires model_state and optimizer_state')
+
+    model.load_state_dict(saved['model_state'], strict=True)
+    optimizer.load_state_dict(saved['optimizer_state'])
+    return saved
+
+
 def _write_history(path, history):
     with path.open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(history[0]))
@@ -104,7 +155,7 @@ def _write_history(path, history):
 
 
 def train(cfg, *, root, output_dir, train_split=None, val_split=None,
-          max_steps=None, max_epochs=None, limit_samples=0, device=None):
+          max_steps=None, max_epochs=None, limit_samples=0, device=None, resume=None):
     if cfg.get('output_space') != 'control':
         raise ValueError('train_diffusion_control requires output_space: control')
     training_cfg = cfg['training']
@@ -138,6 +189,20 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         weight_decay=float(training_cfg.get('weight_decay', 1e-4)),
     )
 
+    resume_path = resolve_repo_file(resume) if resume else None
+    saved = _restore_training_state(resume_path, model, optimizer, cfg) if resume_path else None
+    history = list(saved['history']) if saved else []
+    start_epoch = int(saved['epoch']) + 1 if saved else 1
+    best = float(saved['best_val_loss']) if saved else float('inf')
+    best_epoch = int(saved['best_epoch']) if saved else 0
+
+    epochs = int(max_epochs if max_epochs is not None else training_cfg.get('max_epochs', 50))
+    if start_epoch > epochs:
+        raise ValueError(
+            f'Resume epoch {start_epoch - 1} already reaches max_epochs={epochs}; '
+            'max_epochs is the total epoch limit'
+        )
+
     batch_size = int(training_cfg.get('batch_size', 8))
     workers = int(training_cfg.get('num_workers', 0))
     train_loader = _make_loader(
@@ -160,19 +225,36 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         raise ValueError('Road geometry must use the 9-channel TRACE lane representation')
 
     output = Path(output_dir)
+    best_source = None
+    if saved and output.resolve() != resume_path.parent.resolve():
+        best_source = (
+            resume_path if best_epoch == int(saved['epoch'])
+            else resume_path.parent / 'best.pt'
+        )
+        if not best_source.is_file():
+            raise FileNotFoundError(
+                f'Original best checkpoint is required in the new output directory: {best_source}'
+            )
+
     output.mkdir(parents=True, exist_ok=True)
+    if best_source is not None:
+        shutil.copy2(best_source, output / 'best.pt')
+
     resolved = {**cfg, 'anchors': model.anchors_config}
     import yaml
     (output / 'resolved_config.yaml').write_text(
         yaml.safe_dump(resolved, allow_unicode=True, sort_keys=False), encoding='utf-8'
     )
+    if saved:
+        _write_history(output / 'loss.csv', history)
+        print(
+            f'[TRACE RESUME] checkpoint={resume_path} completed_epoch={start_epoch - 1} '
+            f'next_epoch={start_epoch} best_epoch={best_epoch} best_val={best:.6f}',
+            flush=True,
+        )
 
-    epochs = int(max_epochs if max_epochs is not None else training_cfg.get('max_epochs', 50))
-    best = float('inf')
-    best_epoch = 0
-    history = []
     batch_limit = int(max_steps) if max_steps else None
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         train_metrics = _run_pass(
             model, train_loader, optimizer, selected_device, batch_limit,
             float(training_cfg.get('grad_clip', 1.0)),
@@ -190,8 +272,9 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         if improved:
             best = val_metrics['loss']
             best_epoch = epoch
+
         checkpoint = {
-            'architecture': 'TRACE_control_diffusion_safety_v1',
+            'architecture': SAFETY_ARCHITECTURE,
             'model_config': cfg['model'],
             'control_config': cfg['control'],
             'execution_config': model.execution_config,
