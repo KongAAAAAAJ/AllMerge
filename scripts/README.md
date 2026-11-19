@@ -1,34 +1,19 @@
-# Scripts
+Diffusion model开环评估命令：
+python -m evaluation.eval_diffusion_open_loop ^
+  --checkpoint outputs\anchor_ablation\diffusion_ckpt\A2\best.pt ^
+  --num-samples 64 ^
+  --batch-size 32 ^
+  --seeds 0,1,2,3,4 ^
+  --output-dir outputs\evaluation\open_diffusion\A2
 
-## Unified TRACE expert collection
 
-There is one public expert-data collection entry point:
-
-```bash
-python scripts/data/collect_expert_dataset.py --check-only
-python scripts/data/collect_expert_dataset.py
-```
-
-The collection command writes only persistent anchor-independent raw episodes to
-`outputs/expert_dataset/expert_trucksim_k2_raw_100k/episodes/`, together with
-resume state and reports. These raw episodes are used directly by training
-and evaluation. A1 anchors are generated online from observed ego state and road
-geometry using `configs/anchors/a1.yaml`; K is `control.model.num_modes` in
-`configs/train/diffusion.yaml`. No paired A1 dataset or offline build is needed.
-
-```bash
-python scripts/diagnostics/validate_expert_dataset.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k
-```
-
-## Training and evaluation
-
-For the current TRACE control diffusion model, evaluate via
-`python -m evaluation.eval_diffusion_open_loop --checkpoint PATH_TO_CONTROL_PT`
-(10-Hz K2 open-loop accuracy), or
-`python -m evaluation.trace_planning.closed_loop --method TRACE --checkpoint PATH`
-(native TruckSim closed-loop paper metrics). See
-`evaluation/trace_planning/README.md` for complete instructions.
-
-`scripts/run_diffusion_open_loop_eval.sh` calls the updated control-space
-entry point. Trajectory-space and control-space Diffusion training both read
-the same final A1/K2 expert dataset configured in `configs/train/diffusion.yaml`.
+Diffusion model闭环评估命令：
+python -m evaluation.eval_diffusion_closed_loop ^
+  --checkpoint outputs\anchor_ablation\diffusion_ckpt\A0\best.pt ^
+  --methods "TRACE,Expert Planner" ^
+  --scenarios straight,curved,merge_in,merge_out ^
+  --episodes 10 ^
+  --copy-dlls ^
+  --open-loop-dir F0=outputs\evaluation\paper_open_F0 ^
+  --open-loop-dir F3=outputs\evaluation\paper_open_F3 ^
+  --output-dir outputs\evaluation\closed_diffusion\A0

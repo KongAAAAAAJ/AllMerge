@@ -72,18 +72,11 @@ def _mean(rows, key):
 
 def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
               methods: Sequence[str] = ("A0", "A1", "A2")):
-    """Summarize complete or staged results; unavailable-stage metrics remain None."""
+    """Summarize six metrics; projection is not run and its fields remain empty."""
     output = []
     for method in methods:
         anchors = [row for row in anchor_rows if row.get("method") == method]
         plans = [row for row in planning_rows if row.get("method") == method]
-        corrections = [
-            float(row["projection_correction_m"])
-            for row in plans
-            if bool(row.get("projection_success"))
-            and row.get("projection_correction_m") is not None
-            and math.isfinite(float(row["projection_correction_m"]))
-        ]
         row = {
             "method": method,
             "anchor_minade_m": _mean(anchors, "anchor_minade_m"),
@@ -95,17 +88,13 @@ def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
                 100.0 * float(np.mean([bool(x["preprojection_feasible"]) for x in plans]))
                 if plans else None
             ),
-            # Average correction over successful JTP projections. The success
-            # rate and failure count are retained separately to expose selection.
-            "projection_correction_m": float(np.mean(corrections)) if corrections else None,
-            "projection_success_rate_pct": (
-                100.0 * float(np.mean([bool(x["projection_success"]) for x in plans]))
-                if plans else None
-            ),
+            "projection_correction_m": None,
+            "projection_success_rate_pct": None,
             "num_anchor_scenes": len(anchors),
             "num_planning_runs": len(plans),
-            "num_projection_success": len(corrections),
-            "num_projection_failures": sum(not bool(x.get("projection_success")) for x in plans),
+            "num_projection_runs": 0,
+            "num_projection_success": 0,
+            "num_projection_failures": 0,
         }
         output.append(row)
     return output

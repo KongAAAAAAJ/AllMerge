@@ -1,8 +1,4 @@
-"""Unified YAML-controlled trajectory/control diffusion training entry point.
-
-Trajectory mode launches the unchanged original training script. Control mode
-launches trajectory-only control diffusion; no pseudo-control labels are used.
-"""
+"""Train or resume control-space diffusion from a YAML experiment config."""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +15,7 @@ def main(argv=None):
     parser.add_argument('--config', default='configs/train/diffusion.yaml')
     parser.add_argument('--dataset-root', default=None)
     parser.add_argument('--output-dir', default=None)
+    parser.add_argument('--resume', default=None, help='Resume model, optimizer and epoch history from last.pt')
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--max-epochs', type=int, default=None)
     parser.add_argument('--device', default=None)
@@ -35,7 +32,7 @@ def main(argv=None):
     print('[DIFFUSION MODE] control (40-step acceleration/steering; configurable dynamics and objectives)', flush=True)
     train(cfg, root=root, output_dir=output, max_steps=args.max_steps,
           max_epochs=args.max_epochs, limit_samples=args.limit_samples,
-          device=args.device)
+          device=args.device, resume=args.resume)
     return 0
 
 

@@ -391,9 +391,8 @@ class JointTrajectoryProjector:
         nominal = nominal_controls.detach().clone()
         controls = nominal.clone()
         with torch.enable_grad():
-            nominal_rollout = self._rollout(nominal, context)
-            tau_nominal = nominal_rollout["trajectory"].detach().clone()
             current = self._evaluate(controls, context, roads)
+            tau_nominal = current.rollout["trajectory"].detach().clone()
         history = [{"iteration": 0, **current.metrics, "status": "nominal"}]
         if current.metrics["projector_constraints_satisfied"]:
             return JTPResult(

@@ -35,3 +35,6 @@ __pycache__/
 !/tests/test_trace_fuel_aware_evaluation.py
 !/tests/test_fixed_anchor_manager.py
 !/tests/test_anchor_config_layout.py
+!/tests/test_diffusion_resume.py
+!/tests/test_anchor_ablation_staged_v3.py
+!/tests/test_joint_trajectory_projection.py

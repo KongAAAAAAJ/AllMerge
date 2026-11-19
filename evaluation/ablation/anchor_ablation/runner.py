@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import time
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -19,7 +20,7 @@ from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 from highway_env.planner.diffusion.projection import JointTrajectoryProjector
 
-from .data import build_complete_frame_subset, make_loader, select_figure_samples
+from .data import build_complete_frame_subset, make_loader, read_subset_metadata, select_figure_samples
 from .paper_feasibility import (
     external_collision_free,
     intertruck_group_collision_free,
@@ -112,7 +113,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
     expected = {"A0": ("fixed", "a0"), "A1": ("a1",), "A2": ("adaptive", "a2")}
-    models, payloads, checkpoint_info = {}, {}, {}
+    models, checkpoint_info = {}, {}
     reference_signature = None
     reference_k2_hash = None
     for method, checkpoint in checkpoints.items():
@@ -177,7 +178,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
             raise ValueError("Selected A0/A1/A2 checkpoints use different frozen K2 weights")
 
         model.to(device).eval()
-        models[method], payloads[method] = model, payload
+        models[method] = model
         checkpoint_info[method] = {
             "path": str(path),
             "sha256": _sha256(path),
@@ -187,7 +188,10 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
             "anchors_config": payload.get("anchors_config", {}),
             "num_modes": int(checkpoint_num_modes) if checkpoint_num_modes is not None else None,
         }
-    return models, payloads, checkpoint_info
+        # Inference needs the loaded model and provenance, not optimizer state
+        # or a second copy of all weights for every requested method.
+        del payload, k2_state
+    return models, checkpoint_info
 
 
 def _teacher_config_from_a2(model):
@@ -216,17 +220,6 @@ def _extract_features_numpy(features: Mapping, index: int) -> dict:
         key: features[key][index].detach().cpu().numpy().copy()
         for key in names
     }
-
-
-def _world_to_local(world_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
-    pose0 = np.asarray(pose0, dtype=np.float64).reshape(3)
-    world = np.asarray(world_poses, dtype=np.float64)
-    dx, dy = world[:, 0] - pose0[0], world[:, 1] - pose0[1]
-    c, s = np.cos(pose0[2]), np.sin(pose0[2])
-    x = c * dx + s * dy
-    y = -s * dx + c * dy
-    yaw = world[:, 2] - pose0[2]
-    return np.stack((x, y, yaw), axis=-1)
 
 
 def _filter_a1_and_sample_frames(subset, *, expected_anchor_count: int,
@@ -406,6 +399,8 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
     rows, figure_payload = [], None
+    started = last_progress = time.perf_counter()
+    print(f"[PLANNING METRICS] method={method} seed={seed} samples=0/{len(loader.dataset)}", flush=True)
     model.eval()
     with torch.no_grad():
         for batch_index, (features_cpu, targets_cpu, metadata) in enumerate(loader, start=1):
@@ -420,9 +415,9 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                 raise ValueError(f"Expected diffusion K2 poses [B,M,H+1,3], got {tuple(poses_all.shape)}")
 
             selected, _ = model._select_goal_endpoint_mode(poses_all, prepared)
-            batch_index = torch.arange(controls_all.shape[0], device=device)
-            selected_controls = controls_all[batch_index, selected]
-            selected_poses = poses_all[batch_index, selected]
+            sample_indices = torch.arange(controls_all.shape[0], device=device)
+            selected_controls = controls_all[sample_indices, selected]
+            selected_poses = poses_all[sample_indices, selected]
             candidate_xy = poses_all[:, :, 5::5, :2]
             if candidate_xy.shape[-2:] != (8, 2):
                 raise ValueError(
@@ -445,19 +440,10 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                 road = road_geometry_from_features(features_np, pose0)
                 nominal = selected_controls[index:index + 1].detach()
                 jtp_pre = projector.evaluate_preprojection(nominal, context_i, road)
-                jtp_result = projector.project(nominal, context_i, road)
 
                 raw_world = jtp_pre["trajectories"][0].detach().cpu().numpy()
-                projected_world = jtp_result.trajectories[0].detach().cpu().numpy()
                 raw_local = selected_poses[index].detach().cpu().numpy()
                 external_ok = external_collision_free(raw_local, features_np, jtp_cfg)
-                projection_success = bool(jtp_result.projector_constraints_satisfied)
-                correction = (
-                    float(np.linalg.norm(
-                        projected_world[1:, :2] - raw_world[1:, :2], axis=-1
-                    ).mean())
-                    if projection_success else float("nan")
-                )
                 jtp_metrics = jtp_pre["metrics"]
                 record = {
                     "method": method,
@@ -475,17 +461,24 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                     ),
                     "jtp_max_violation": float(jtp_metrics.get("max_violation", float("nan"))),
                     "jtp_violation_count_by_group": jtp_metrics.get("violation_count_by_group", {}),
-                    "projection_success": projection_success,
-                    "projection_status": str(jtp_result.status),
-                    "projection_correction_m": correction,
-                    "projection_iterations": int(jtp_result.iterations),
+                    "projection_success": None,
+                    "projection_status": "not_run",
+                    "projection_correction_m": None,
+                    "projection_iterations": None,
                     "_raw_world_poses": raw_world,
                 }
                 rows.append(record)
+                now = time.perf_counter()
+                if len(rows) == 1 or now - last_progress >= 10 or len(rows) == len(loader.dataset):
+                    elapsed = now - started
+                    remaining = elapsed / len(rows) * (len(loader.dataset) - len(rows))
+                    print(f"[PLANNING METRICS] method={method} seed={seed} "
+                          f"batch={batch_index}/{len(loader)} samples={len(rows)}/{len(loader.dataset)} "
+                          f"elapsed={elapsed:.1f}s eta={remaining:.1f}s", flush=True)
+                    last_progress = now
 
                 if figure_payload is None and key == figure_meta:
                     raw_local_sampled = raw_local[5::5, :2]
-                    projected_local = _world_to_local(projected_world, pose0)[5::5, :2]
                     figure_payload = {
                         "features": features_np,
                         "expert_xy": expert_xy[index].detach().cpu().numpy(),
@@ -494,11 +487,7 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                         "diffusion_candidates": candidate_xy[index].detach().cpu().numpy(),
                         "diffusion_valid": valid_modes[index].detach().cpu().numpy(),
                         "selected_raw_xy": raw_local_sampled,
-                        "selected_projected_xy": projected_local,
                     }
-            if batch_index == 1 or batch_index % 10 == 0 or batch_index == len(loader):
-                processed = min(batch_index * loader.batch_size, len(loader.dataset))
-                print(f"[PLANNING METRICS] method={method} seed={seed} batch={batch_index}/{len(loader)} samples={processed}/{len(loader.dataset)}", flush=True)
     if not rows:
         raise RuntimeError(f"{method} diffusion feasibility evaluation produced no samples")
     return rows, figure_payload
@@ -560,7 +549,8 @@ def run(args=None):
     parser.add_argument("--num-samples", type=int, default=None,
                         help="Anchor stage: number of raw controlled-ego samples; 0 means all")
     parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None,
+                        help="Data loading processes; default 0 avoids extra PyTorch/CUDA imports on Windows")
     parser.add_argument("--seeds", default=None, help="Comma-separated diffusion inference seeds")
     parser.add_argument("--sample-seed", type=int, default=None)
     parser.add_argument("--figure-scenes", type=int, default=None, help="Number of distinct frames in the anchor figure (default: 3)")
@@ -568,7 +558,7 @@ def run(args=None):
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--jtp-config", default=None,
-                        help="JTP configuration used for pre-projection feasibility and projection")
+                        help="Constraint thresholds for pre-projection feasibility; iterative projection is not run")
     parser.add_argument("--feasibility-config", default=None,
                         help="Deprecated alias for --jtp-config")
     parser.add_argument("--skip-feasibility", action="store_true",
@@ -679,7 +669,7 @@ def run(args=None):
                 info["scorer_sha256"] = _sha256(Path(info["scorer_path"]))
                 scorer_path = info["scorer_path"]
     else:
-        models, _payloads, checkpoint_info = _load_models(
+        models, checkpoint_info = _load_models(
             checkpoint_paths, device, expected_num_modes=num_modes
         )
         if stage == "all" and "A2" in models:
@@ -732,8 +722,8 @@ def run(args=None):
         data_manifest['anchor_generation'] = 'raw scenes; shared online A1AnchorBuilder; synchronized frame filter'
 
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
-    first_batch = next(iter(loader))
-    first_meta = first_batch[2][0]
+    all_metadata = read_subset_metadata(subset)
+    first_meta = all_metadata[0]
     figure_meta = (
         _meta_int(first_meta, "episode_index"),
         _meta_int(first_meta, "frame_index"),
@@ -742,9 +732,6 @@ def run(args=None):
 
     figure_metas = []
     if stage != 'feasibility':
-        all_metadata = []
-        for _, _, batch_metadata in loader:
-            all_metadata.extend(batch_metadata)
         figure_metas = select_figure_samples(
             all_metadata, count=figure_count, seed=figure_seed)
         if len(figure_metas) < figure_count:
@@ -772,6 +759,8 @@ def run(args=None):
             projector = JointTrajectoryProjector(model.vehicle_model, config=jtp_path)
             projector_info[method] = {
                 "config_path": str(jtp_path),
+                "evaluation_only": True,
+                "iterative_projection_enabled": False,
                 "constraint_families": ["stability", "road", "curvature", "control"],
                 "external_collision_evaluated_separately": True,
                 "intertruck_collision_evaluated_separately": True,
@@ -822,7 +811,6 @@ def run(args=None):
     if stage != "anchors":
         completed_metrics.extend([
             "planning_minade_m", "preprojection_feasibility_pct",
-            "projection_correction_m",
         ])
 
     manifest = {
@@ -831,8 +819,8 @@ def run(args=None):
         "selected_methods": methods,
         "evaluation_protocol": (
             "staged: anchors computes four anchor-quality metrics on independent raw ego samples; "
-            "feasibility computes three diffusion/JTP metrics on complete synchronized frames; "
-            "all computes all seven metrics on complete synchronized frames"
+            "feasibility computes planning minADE and pre-projection feasibility on complete synchronized frames; "
+            "all computes six metrics on complete synchronized frames; iterative JTP projection is disabled"
         ),
         "methods": {
             "A0": "Fixed anchors generated from the configured fixed control-anchor bank and kinematic rollout",
@@ -852,7 +840,7 @@ def run(args=None):
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
             "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point execution trajectories",
             "preprojection_feasibility": "JTP nominal constraints plus independent constant-velocity external-actor and synchronized inter-truck collision checks, before projection",
-            "projection_correction": "Mean pointwise XY displacement between raw and successfully JTP-projected execution trajectories; projection success/failure is reported separately",
+            "projection_correction": "Not evaluated: iterative JTP projection is disabled; the table retains Proj. Corr. as --",
         },
         "jtp": projector_info,
         "jtp_config": str(jtp_path) if jtp_path else None,
@@ -875,7 +863,7 @@ def run(args=None):
                                   for key in figure_metas],
         "anchor_figure_seed": figure_seed,
         "anchor_figure_selection": "Random distinct frames, prioritizing distinct episodes; independent of method scores",
-        "projection_failures_reported_separately": True,
+        "iterative_projection_enabled": False,
         "summary": summary,
         "device": str(device),
         "batch_size": batch_size,

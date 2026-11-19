@@ -1,11 +1,15 @@
-# TRACE evaluation
+Fuel Ablation评估命令：
+python evaluation/ablation/run_fuel_aware.py ^
+  --config configs/train/diffusion.yaml ^
+  --checkpoint F0=outputs\fuel_ablation\F0\best.pt ^
+  --checkpoint F3=outputs\fuel_ablation\F3\best.pt ^
+  --split test
 
-**Current entry point:** `python -m evaluation.eval_diffusion_open_loop` now
-loads a TRACE **control-space** Diffusion checkpoint and scores its frozen-K2
-40-step trajectories; it no longer loads W2 trajectory checkpoints. See
-[`trace_planning/README.md`](trace_planning/README.md) for open-loop and
-actual TruckSim closed-loop evaluation procedures.
 
-`evaluation/ablation/` retains the existing Anchor and Fuel experiments.
-All current evaluators read raw expert episodes and generate A1 anchors online.
-The retired W1/W2 trajectory-space evaluation and paired dataset loaders have been removed.
+JTP Ablation评估命令：
+python evaluation/ablation/run_jtp.py ^
+  --checkpoint outputs\fuel_ablation\F0\best.pt ^
+  --split test ^
+  --num-frames 100 ^
+  --seeds 0,1,2,3,4 ^
+  --output-dir outputs\jtp_ablation\formal_100x5_v2

@@ -1,9 +1,10 @@
 import json
+import pickle
 import numpy as np
 import pytest
 
 from data_pipeline.raw_expert_dataset import RawExpertDataset, raw_episode_paths
-from evaluation.ablation.anchor_ablation.data import build_complete_frame_subset, make_loader
+from evaluation.ablation.anchor_ablation.data import build_complete_frame_subset, make_loader, read_subset_metadata
 
 
 def create_raw(root):
@@ -61,3 +62,82 @@ def test_raw_only_rejects_old_shard_directory(tmp_path):
     (tmp_path/'shards').mkdir()
     with pytest.raises(FileNotFoundError):
         build_complete_frame_subset(tmp_path,'test')
+
+
+def test_worker_serialization_does_not_copy_episode_cache(tmp_path):
+    create_raw(tmp_path)
+    dataset = RawExpertDataset(tmp_path, 'test')
+    expected = dataset[0]
+    restored = pickle.loads(pickle.dumps(dataset))
+    assert dataset._cached is not None
+    assert restored._cached is None and restored._cached_index is None
+    actual = restored[0]
+    for key in expected[0]:
+        np.testing.assert_array_equal(actual[0][key], expected[0][key])
+    for key in expected[1]:
+        np.testing.assert_array_equal(actual[1][key], expected[1][key])
+    assert actual[2] == expected[2]
+
+
+def test_figure_metadata_preserves_nested_subset_order_without_scene_reads(tmp_path, monkeypatch):
+    from torch.utils.data import Subset
+    create_raw(tmp_path)
+    dataset = RawExpertDataset(tmp_path, 'test')
+    subset = Subset(Subset(dataset, [5, 0, 3, 2]), [2, 0, 1])
+    expected = [dataset[i][2] for i in [3, 5, 0]]
+    original_load = np.load
+    reads = []
+
+    class MetadataArchive:
+        def __init__(self, path, **kwargs):
+            self.archive = original_load(path, **kwargs)
+            self.files = self.archive.files
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.archive.close()
+
+        def __getitem__(self, key):
+            reads.append(key)
+            assert key in ('episode_index', 'frame_index', 'ego_index', 'seed')
+            return self.archive[key]
+
+    monkeypatch.setattr(np, 'load', MetadataArchive)
+    assert read_subset_metadata(subset) == expected
+    assert reads == ['episode_index', 'frame_index', 'ego_index', 'seed']
+
+
+def test_frame_index_reads_each_npz_field_once_and_keeps_complete_groups(tmp_path, monkeypatch):
+    from collections import Counter
+    from evaluation.ablation.anchor_ablation import data as evaluation_data
+    create_raw(tmp_path)
+    dataset = RawExpertDataset(tmp_path, 'test', max_samples=5)
+    monkeypatch.setattr(evaluation_data, 'RawExpertDataset', lambda *args, **kwargs: dataset)
+    original_load = np.load
+    reads = Counter()
+
+    class CountedArchive:
+        def __init__(self, path, **kwargs):
+            self.archive = original_load(path, **kwargs)
+            self.files = self.archive.files
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.archive.close()
+
+        def __getitem__(self, key):
+            reads[key] += 1
+            return self.archive[key]
+
+    monkeypatch.setattr(evaluation_data.np, 'load', CountedArchive)
+    subset, info = evaluation_data.build_complete_frame_subset(tmp_path, 'test')
+    assert len(subset) == 3
+    assert info['selected_frames'] == 1
+    assert info['incomplete_frames_skipped'] == 1
+    assert subset.indices == [0, 1, 2]
+    assert reads == Counter({key: 1 for key in (
+        'episode_index', 'frame_index', 'ego_index', 'agent_states', 'agent_valid_mask', 'seed')})

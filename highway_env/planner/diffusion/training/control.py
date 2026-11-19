@@ -14,6 +14,7 @@ import argparse
 import csv
 import json
 import random
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -76,8 +77,40 @@ def _run_pass(model, loader, optimizer, device, max_batches=None, clip_norm=1.0)
     return {key: value / samples for key, value in totals.items()}
 
 
+def _restore_training_state(path, model, optimizer, cfg):
+    """Restore a completed epoch, refusing changes to the trained experiment."""
+    saved = torch.load(path, map_location='cpu', weights_only=True)
+    for key, expected in (
+        ('model_config', cfg.get('model', {})),
+        ('control_config', cfg.get('control', {})),
+        ('execution_config', model.execution_config),
+        ('loss_config', model.loss_config),
+        ('anchors_config', model.anchors_config),
+    ):
+        if saved.get(key) != expected:
+            raise ValueError(f'Resume checkpoint {key} differs from the current configuration; '
+                             'restore the original experiment settings and anchor artifacts')
+    history = saved.get('history')
+    epoch = saved.get('epoch')
+    if ('optimizer_state' not in saved or not history or not isinstance(epoch, int)
+            or epoch < 1 or history[-1].get('epoch') != epoch):
+        raise ValueError('Full resume requires optimizer_state, epoch and matching training history')
+    if any(not np.isfinite(row.get('val_loss', float('nan'))) for row in history):
+        raise ValueError('Resume checkpoint history contains missing or invalid validation losses')
+    model.load_state_dict(saved['model_state'], strict=True)
+    optimizer.load_state_dict(saved['optimizer_state'])
+    return saved
+
+
+def _write_history(path, history):
+    with path.open('w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=list(history[0]))
+        writer.writeheader()
+        writer.writerows(history)
+
+
 def train(cfg, *, root, output_dir, train_split=None, val_split=None,
-          max_steps=None, max_epochs=None, limit_samples=0, device=None):
+          max_steps=None, max_epochs=None, limit_samples=0, device=None, resume=None):
     if cfg.get('output_space') != 'control':
         raise ValueError('train_diffusion_control requires output_space: control')
     tr = cfg['training']
@@ -96,6 +129,19 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
             ).to(selected_device)
     # Explicitly exclude frozen K2 parameters from the optimizer.
     trainable_parameters = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=float(tr.get('lr', 1e-4)),
+                                  weight_decay=float(tr.get('weight_decay', 1e-4)))
+    resume_path = resolve_repo_file(resume) if resume else None
+    saved = _restore_training_state(resume_path, model, optimizer, cfg) if resume_path else None
+    history = list(saved['history']) if saved else []
+    start_epoch = int(saved['epoch']) + 1 if saved else 1
+    best_row = min(history, key=lambda row: row['val_loss']) if history else None
+    best = float(best_row['val_loss']) if best_row else float('inf')
+    best_epoch = int(best_row['epoch']) if best_row else 0
+    epochs = int(max_epochs if max_epochs is not None else tr.get('max_epochs', 50))
+    if start_epoch > epochs:
+        raise ValueError(f'Resume epoch {start_epoch - 1} already reaches max_epochs={epochs}; '
+                         'max_epochs is the total epoch limit')
     batch_size = int(tr.get('batch_size', 8))
     workers = int(tr.get('num_workers', 0))
     train_loader = _make_loader(root, train_split or tr.get('train_split', 'train'),
@@ -111,26 +157,34 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
     missing = [key for key in required if key not in first_targets]
     if missing:
         raise KeyError(f'Selected raw dataset is incompatible with execution/loss config: missing {missing}')
-    optimizer = torch.optim.AdamW(trainable_parameters, lr=float(tr.get('lr', 1e-4)),
-                                  weight_decay=float(tr.get('weight_decay', 1e-4)))
     output = Path(output_dir)
+    best_source = None
+    if saved and output.resolve() != resume_path.parent.resolve():
+        best_source = resume_path if best_epoch == saved['epoch'] else resume_path.parent / 'best.pt'
+        if not best_source.is_file():
+            raise FileNotFoundError(f'Original best checkpoint is required in the new output directory: {best_source}')
     output.mkdir(parents=True, exist_ok=True)
+    if best_source is not None:
+        shutil.copy2(best_source, output / 'best.pt')
     (output / 'resolved_config.yaml').write_text(
         __import__('yaml').safe_dump({**cfg, 'anchors': model.anchors_config},
                                     allow_unicode=True, sort_keys=False), encoding='utf-8')
-    history = []
-    best = float('inf')
-    best_epoch = 0
-    epochs = int(max_epochs if max_epochs is not None else tr.get('max_epochs', 50))
+    if saved:
+        _write_history(output / 'loss.csv', history)
+        print(f'[TRACE RESUME] checkpoint={resume_path} completed_epoch={start_epoch - 1} '
+              f'next_epoch={start_epoch} best_epoch={best_epoch} best_val={best:.6f}', flush=True)
     limit = int(max_steps or 0)
     batch_limit = limit if limit > 0 else None
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         train_metrics = _run_pass(model, train_loader, optimizer, selected_device, batch_limit,
                                   float(tr.get('grad_clip', 1.0)))
         val_metrics = _run_pass(model, val_loader, None, selected_device, batch_limit)
         row = {'epoch': epoch, **{f'train_{k}': v for k, v in train_metrics.items()},
                **{f'val_{k}': v for k, v in val_metrics.items()}}
         history.append(row)
+        improved = val_metrics['loss'] < best
+        if improved:
+            best = val_metrics['loss']; best_epoch = epoch
         ckpt = {
             'architecture': ('TRACE_control_diffusion_D1_trajectory_only'
                              if model.vehicle_model.kind == 'kinematic' and not cfg.get('losses')
@@ -142,11 +196,12 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
             'koopman_metadata': model.vehicle_model.koopman_metadata,
             'model_state': model.state_dict(), 'optimizer_state': optimizer.state_dict(),
             'epoch': epoch, 'history': history,
+            'best_val_loss': best, 'best_epoch': best_epoch,
         }
         torch.save(ckpt, output / 'last.pt')
-        if val_metrics['loss'] < best:
-            best = val_metrics['loss']; best_epoch = epoch
+        if improved:
             torch.save(ckpt, output / 'best.pt')
+        _write_history(output / 'loss.csv', history)
         print(f'[TRACE CONTROL] epoch={epoch}/{epochs} '
               f'train_total={train_metrics["loss"]:.6f} '
               f'val_total={val_metrics["loss"]:.6f} '
@@ -156,9 +211,6 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
               f'prog={val_metrics["progress_loss"]:.6f}', flush=True)
         if int(tr.get('patience', 0)) > 0 and epoch - best_epoch >= int(tr['patience']):
             break
-    with (output / 'loss.csv').open('w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=list(history[0]))
-        writer.writeheader(); writer.writerows(history)
     print(f'[D1 DONE] best={output / "best.pt"}', flush=True)
     return output / 'best.pt'
 
@@ -183,6 +235,7 @@ def main(argv=None):
     parser.add_argument('--config', default='configs/train/diffusion.yaml')
     parser.add_argument('--dataset-root', default=None)
     parser.add_argument('--output-dir', default=None)
+    parser.add_argument('--resume', default=None, help='Resume model, optimizer and epoch history from last.pt')
     parser.add_argument('--train-split', default=None)
     parser.add_argument('--val-split', default=None)
     parser.add_argument('--max-steps', type=int, default=None)
@@ -197,7 +250,7 @@ def main(argv=None):
     train(cfg, root=root, output_dir=output, train_split=args.train_split,
           val_split=args.val_split, max_steps=args.max_steps,
           max_epochs=args.max_epochs, limit_samples=args.limit_samples,
-          device=args.device)
+          device=args.device, resume=args.resume)
 
 
 if __name__ == '__main__':

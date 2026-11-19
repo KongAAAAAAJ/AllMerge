@@ -227,16 +227,12 @@ def draw_diffusion_planning(path: Path, figure_payload: Mapping[str, dict], *,
             first_candidate = False
 
         raw = np.asarray(item["selected_raw_xy"])
-        projected = np.asarray(item["selected_projected_xy"])
         ax.plot(np.r_[0.0, raw[:, 0]], np.r_[0.0, raw[:, 1]],
                 color="#d62728", linewidth=2.0, linestyle=":",
-                label="Selected before JTP", zorder=7)
-        ax.plot(np.r_[0.0, projected[:, 0]], np.r_[0.0, projected[:, 1]],
-                color="#2ca02c", linewidth=2.0,
-                label="Selected after JTP", zorder=8)
+                label="Selected diffusion trajectory", zorder=7)
         ax.set_title(title)
 
     _finish_figure(
         fig, axes, path, sample_label,
-        "Anchor-conditioned diffusion planning and JTP correction",
+        "Anchor-conditioned diffusion planning before projection",
     )

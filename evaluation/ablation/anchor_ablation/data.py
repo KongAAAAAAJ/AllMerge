@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -28,18 +29,24 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
         rows = by_shard.get(shard_idx, [])
         if not rows:
             continue
+        started = time.perf_counter()
+        print(f"[DATA] reading episode={shard_path.name} ({shard_idx + 1}/{len(ds.shard_paths)})", flush=True)
         with np.load(shard_path, allow_pickle=False) as shard:
             required = ("episode_index", "frame_index", "ego_index", "agent_states", "agent_valid_mask")
             missing = [k for k in required if k not in shard.files]
             if missing:
                 raise KeyError(f"{shard_path} lacks synchronized frame metadata: {missing}")
+            # NpzFile does not cache decompressed arrays. Read each field once
+            # per episode instead of decompressing it again for every sample.
+            arrays = {key: np.asarray(shard[key]) for key in required}
+            seeds = np.asarray(shard['seed']) if 'seed' in shard.files else None
             for global_i, sample_i in rows:
-                episode = int(np.asarray(shard["episode_index"][sample_i]).item())
-                frame = int(np.asarray(shard["frame_index"][sample_i]).item())
-                ego_index = int(np.asarray(shard["ego_index"][sample_i]).item())
+                episode = int(np.asarray(arrays["episode_index"][sample_i]).item())
+                frame = int(np.asarray(arrays["frame_index"][sample_i]).item())
+                ego_index = int(np.asarray(arrays["ego_index"][sample_i]).item())
                 key = (episode, frame)
-                agents = np.asarray(shard["agent_states"][sample_i])
-                agent_valid = np.asarray(shard["agent_valid_mask"][sample_i], dtype=bool)
+                agents = arrays["agent_states"][sample_i]
+                agent_valid = np.asarray(arrays["agent_valid_mask"][sample_i], dtype=bool)
                 controlled = int(np.sum(agent_valid & (agents[..., 10] > 0.5)))
                 expected = controlled + 1
                 expected_sets[key].add(expected)
@@ -51,10 +58,11 @@ def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: i
                     "frame_index": frame,
                     "ego_index": ego_index,
                     "expected_ego_count": expected,
-                    "seed": int(np.asarray(shard["seed"][sample_i]).item()) if "seed" in shard.files else -1,
+                    "seed": int(np.asarray(seeds[sample_i]).item()) if seeds is not None else -1,
                 }
-        if shard_idx == 0 or (shard_idx + 1) % 100 == 0 or shard_idx + 1 == len(ds.shard_paths):
-            print(f"[DATA] indexed shards={shard_idx + 1}/{len(ds.shard_paths)} samples={indexed_samples}/{len(ds)}", flush=True)
+        elapsed = time.perf_counter() - started
+        print(f"[DATA] indexed shards={shard_idx + 1}/{len(ds.shard_paths)} "
+              f"samples={indexed_samples}/{len(ds)} elapsed={elapsed:.2f}s", flush=True)
 
     complete = []
     incomplete = []
@@ -119,9 +127,34 @@ def collate_anchor_batch(samples):
 
 
 def make_loader(subset, *, batch_size: int, num_workers: int = 0):
+    workers = int(num_workers)
+    worker_options = {'persistent_workers': True, 'prefetch_factor': 1} if workers > 0 else {}
     return DataLoader(subset, batch_size=int(batch_size), shuffle=False,
-                      num_workers=int(num_workers), pin_memory=torch.cuda.is_available(),
-                      collate_fn=collate_anchor_batch, persistent_workers=False)
+                      num_workers=workers, pin_memory=torch.cuda.is_available(),
+                      collate_fn=collate_anchor_batch, **worker_options)
+
+
+def read_subset_metadata(subset):
+    """Read IDs for figure selection without loading road geometry or targets."""
+    indices = list(range(len(subset)))
+    dataset = subset
+    while isinstance(dataset, Subset):
+        indices = [dataset.indices[i] for i in indices]
+        dataset = dataset.dataset
+    by_shard = defaultdict(list)
+    for position, index in enumerate(indices):
+        shard_index, row = dataset._index[index]
+        by_shard[shard_index].append((position, row))
+    metadata = [None] * len(indices)
+    for shard_index, rows in by_shard.items():
+        path = dataset.shard_paths[shard_index]
+        with np.load(path, allow_pickle=False) as archive:
+            keys = ('episode_index', 'frame_index', 'ego_index', 'seed')
+            arrays = {key: archive[key] for key in keys if key in archive.files}
+            for position, row in rows:
+                metadata[position] = {key: int(values[row]) for key, values in arrays.items()}
+                metadata[position].update(shard_path=str(path), shard_sample_index=int(row))
+    return metadata
 
 
 def select_figure_samples(metadata, *, count=3, seed=2027):

@@ -1,5 +1,5 @@
 # TRACE paper-aligned A0/A1/A2 Anchor Ablation evaluation.
-stage: all              # anchors | feasibility | all
+stage: all              # anchors: 4 metrics | feasibility: 2 metrics | all: 6 metrics; no iterative projection
 methods: [A0, A1, A2]   # Select one or several methods
 
 anchor_sources:
@@ -9,14 +9,14 @@ anchor_sources:
     wheelbase_m: 5.5
     max_accel_mps2: 4.0
     max_steer_rad: 0.5
-  a2_scorer: outputs/anchor_ablation/ckpt/A2/best.pt
+  a2_scorer: outputs/anchor_ablation/ckpt/A2_anchors/best.pt
 dataset_root: outputs/expert_dataset/expert_trucksim_50k
 split: test
-num_frames: 200          # feasibility/all: complete synchronized frames; 0 = all
-num_samples: 500        # anchors: raw controlled-ego samples; 0 = all
+num_frames: 20          # feasibility/all: 多少个场景帧
+num_samples: 500        # anchors: 多少个样本
 max_samples: null
 batch_size: 128
-num_workers: 4
+num_workers: 0           # Avoid spawning extra PyTorch/CUDA processes on Windows
 device: auto
 seeds: "0,1,2"
 sample_seed: 2026

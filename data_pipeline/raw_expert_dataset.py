@@ -102,6 +102,14 @@ class RawExpertDataset(Dataset):
     def __len__(self):
         return len(self._index)
 
+    def __getstate__(self):
+        # Windows workers should load their own episode, not receive a copy of
+        # the parent's potentially large decompressed scene/road cache.
+        state = self.__dict__.copy()
+        state['_cached_index'] = None
+        state['_cached'] = None
+        return state
+
     def __getitem__(self, index):
         file_index, row = self._index[index]
         if self._cached_index != file_index:
