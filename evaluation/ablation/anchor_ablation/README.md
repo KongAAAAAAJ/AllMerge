@@ -124,6 +124,17 @@ seeds. `planning_per_sample.csv` uses method `Expert` and an empty inference
 seed; the manifest documents the reference protocol. `anchors` alone omits
 this row because it does not evaluate synchronized planning safety.
 
+Controlled-truck collision flags are per vehicle: a collision between two
+trucks marks those two trucks, not every truck in the synchronized frame.
+TTC is also evaluated per truck. The existing 8 x 2.6 m collection/anchor
+settings and the existing JTP footprint are retained.
+
+New Polynomial expert predictions follow connected route lanes. Beyond a
+terminal lane, positions continue along its endpoint tangent instead of all
+being clamped to one endpoint. This prediction extension does not extend the
+simulator's drivable road. Previously stored clipped expert labels are not
+rewritten; existing-data retests still include those legacy label artifacts.
+
 ## Anchor figure selection
 
 When both A1 and A2 are evaluated, `figure_candidate_samples: 100` randomly

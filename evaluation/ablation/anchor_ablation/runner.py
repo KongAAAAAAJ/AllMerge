@@ -26,7 +26,7 @@ from .paper_safety import (
     external_collision_free,
     external_min_ttc_s,
     expert_local_poses,
-    intertruck_group_collision_free,
+    intertruck_collision_free,
     intertruck_group_min_ttc_s,
     local_to_world_poses,
     road_geometry_from_features,
@@ -528,7 +528,7 @@ def _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg):
     groups = defaultdict(list)
     for row in rows:
         key = (
-            row["seed"], row["episode_index"], row["frame_index"], row["dataset_seed"]
+            row["method"], row["seed"], row["episode_index"], row["frame_index"], row["dataset_seed"]
         )
         groups[key].append(row)
 
@@ -538,16 +538,16 @@ def _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg):
     ttc_threshold_s = float(planning_safety_cfg.get("ttc_threshold_s", 1.0))
     for group in groups.values():
         records = [{"raw_world_poses": item["_raw_world_poses"]} for item in group]
-        collision_free = intertruck_group_collision_free(records, vehicle_cfg)
+        collision_free = intertruck_collision_free(records, vehicle_cfg)
         intertruck_ttc = intertruck_group_min_ttc_s(
             records, vehicle_cfg,
             closing_speed_epsilon_mps=closing_speed_epsilon_mps,
         )
         for index, item in enumerate(group):
-            item["intertruck_collision_free"] = bool(collision_free)
+            item["intertruck_collision_free"] = bool(collision_free[index])
             item["intertruck_min_ttc_s"] = float(intertruck_ttc[index])
             item["collision"] = bool(
-                (not item["external_collision_free"]) or (not collision_free)
+                (not item["external_collision_free"]) or (not collision_free[index])
             )
             item["min_ttc_s"] = float(
                 min(item["external_min_ttc_s"], item["intertruck_min_ttc_s"])

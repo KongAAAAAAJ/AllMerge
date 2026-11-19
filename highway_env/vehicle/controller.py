@@ -1620,6 +1620,9 @@ class FOLLOWVehicle(ControlledVehicle):
             target_speed=33,
             timer=self.timer,
             target_lane_index=self.target_lane_index,
+            heading=self.heading,
+            length=self.LENGTH,
+            width=self.WIDTH,
         )
 
         bind_longitudinal_source(leader_v, self)

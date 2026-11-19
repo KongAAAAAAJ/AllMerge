@@ -106,7 +106,8 @@ def load_config(filename=DEFAULT_CONFIG):
     if not isinstance(name, str) or not name.strip() or any(x in name for x in ("/", "\\", ":")) or name in (".", ".."):
         raise ValueError("collection.dataset_name must be a plain directory name")
     collection["output_root"] = str(resolve_path(collection["output_root"]))
-    collection["resume"] = bool(collection["resume"])
+    if not isinstance(collection['resume'], bool):
+        raise ValueError('collection.resume must be a YAML boolean')
 
     dims = cfg.setdefault("vehicle_dimensions", {"length_m": 8.0, "width_m": 2.6})
     road = cfg.setdefault("road_geometry", {})

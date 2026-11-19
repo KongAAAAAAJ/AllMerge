@@ -39,3 +39,6 @@ __pycache__/
 !/tests/test_anchor_ablation_staged_v3.py
 !/tests/test_joint_trajectory_projection.py
 !/tests/test_anchor_multiscene_figure.py
+!/tests/test_expert_collision_and_endpoint.py
+!/tests/test_expert_collection_config.py
+!/tests/test_raw_expert_collection_contract.py

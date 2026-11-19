@@ -302,10 +302,11 @@ def drivable_area_compliance(
     return float(step_inside.mean() * 100.0)
 
 
-def intertruck_group_collision_free(records: Sequence[dict], vehicle_cfg: Mapping) -> bool:
-    """Check synchronized collisions between controlled trucks' raw K2 world trajectories."""
+def intertruck_collision_free(records: Sequence[dict], vehicle_cfg: Mapping) -> list[bool]:
+    """Per-vehicle flags: a colliding pair never marks an uninvolved truck."""
+    result = [True] * len(records)
     if len(records) <= 1:
-        return True
+        return result
     offsets, radius, margin, _ = _collision_parameters(vehicle_cfg)
     for i in range(len(records)):
         pi = np.asarray(records[i]["raw_world_poses"], dtype=np.float64)
@@ -317,8 +318,8 @@ def intertruck_group_collision_free(records: Sequence[dict], vehicle_cfg: Mappin
             cj = _circle_centers(pj, offsets)
             d2 = np.sum((ci[:, :, None, :] - cj[:, None, :, :]) ** 2, axis=-1)
             if np.any(d2 < (2.0 * radius + margin) ** 2):
-                return False
-    return True
+                result[i] = result[j] = False
+    return result
 
 
 def intertruck_group_min_ttc_s(

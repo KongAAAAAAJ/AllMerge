@@ -160,16 +160,57 @@ class PolyPlanner:
         return s_positions
 
     def _frenet_to_world(self, lane, s_positions, d_positions):
+        """Follow connected lanes; extend a terminal tangent instead of clipping.
+
+        The finite extent of a scenario lane is not a zero-speed target. A
+        forecast beyond a terminal segment remains moving along its tangent;
+        this does not add a road to the simulator or guarantee road compliance.
+        """
         points = []
         for s_value, d_value in zip(s_positions, d_positions):
-            s_clipped = float(np.clip(s_value, 0.0, lane.length))
-            points.append(
-                np.asarray(
-                    lane.position(s_clipped, float(d_value)),
-                    dtype=float,
-                )
-            )
+            current, index = lane, self.target_lane_index
+            distance = float(s_value)
+            while distance > float(current.length):
+                successor = self._next_prediction_lane(current, index)
+                if successor is None:
+                    break
+                if current.length <= 0:
+                    raise ValueError('Expert planning requires positive lane lengths')
+                distance -= float(current.length)
+                index, current = successor
+            boundary = float(np.clip(distance, 0.0, current.length))
+            point = np.asarray(current.position(boundary, float(d_value)), dtype=float)
+            if distance != boundary:
+                heading = float(current.heading_at(boundary))
+                point = point + (distance - boundary) * np.array([math.cos(heading), math.sin(heading)])
+            points.append(point)
         return np.asarray(points, dtype=float)
+
+    def _next_prediction_lane(self, lane, index):
+        """Choose a deterministic geometric continuation, respecting the route."""
+        network = self.road.network
+        edges = network.graph.get(index[1], {})
+        route = getattr(self.controlled_vehicle, 'route', None) or []
+        planned = next((entry for entry in route if entry[0] == index[1]), None)
+        if planned is not None:
+            edges = {planned[1]: edges[planned[1]]} if planned[1] in edges else {}
+        endpoint = np.asarray(lane.position(lane.length, 0.0))
+        heading = float(lane.heading_at(lane.length))
+        candidates = []
+        for target, lanes in edges.items():
+            for lane_id, successor in enumerate(lanes):
+                if planned is not None and planned[2] is not None and lane_id != planned[2]:
+                    continue
+                gap = float(np.linalg.norm(np.asarray(successor.position(0.0, 0.0)) - endpoint))
+                # Do not jump across an unmodelled gap or onto a parallel road.
+                if gap > 1e-3:
+                    continue
+                turn = abs(self._wrap_angle(float(successor.heading_at(0.0)) - heading))
+                candidates.append((turn, str(target), lane_id, target, successor))
+        if not candidates:
+            return None
+        _, _, lane_id, target, successor = min(candidates, key=lambda value: value[:3])
+        return (index[1], target, lane_id), successor
 
     def _world_path_kinematics(
             self,

@@ -14,7 +14,7 @@ from evaluation.ablation.anchor_ablation.paper_safety import (
     external_collision_free,
     external_min_ttc_s,
     expert_local_poses,
-    intertruck_group_collision_free,
+    intertruck_collision_free,
     intertruck_group_min_ttc_s,
     local_to_world_poses,
     road_geometry_from_features,
@@ -247,7 +247,7 @@ def test_intertruck_collision_and_ttc_use_synchronized_raw_k2_paths():
     second = np.zeros((41, 3), dtype=np.float64)
     second[:, 0] = 1.0
     records = [{"raw_world_poses": first}, {"raw_world_poses": second}]
-    assert not intertruck_group_collision_free(records, cfg)
+    assert intertruck_collision_free(records, cfg) == [False, False]
     ttc = intertruck_group_min_ttc_s(records, cfg)
     assert ttc == [0.0, 0.0]
 
