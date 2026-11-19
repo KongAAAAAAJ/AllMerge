@@ -275,6 +275,12 @@ class ControlDiffusionPlanner(nn.Module):
         if safety_targets['platoon_reference_poses'].shape != (batch, 2, cfg.horizon_steps + 1, 3):
             raise ValueError('platoon_reference_poses must be [B,2,41,3]')
 
+        road_safety_features = {
+            key: features[key] for key in (
+                'road_lane_geometry', 'road_lane_point_mask', 'road_lane_mask',
+                'road_lane_connections', 'road_current_lane_slot', 'road_target_lane_slot',
+            )
+        }
         features = self._prepare_anchors(features)
         controls_all = self._sample_controls(features, generator=generator)
         pred = self._all_predictions(controls_all, features, context)
@@ -326,9 +332,12 @@ class ControlDiffusionPlanner(nn.Module):
 
         road_stats = road_boundary_safety_loss(
             selected_poses, ego_dimensions,
-            features['road_lane_geometry'], features['road_lane_point_mask'],
-            features['road_lane_mask'], features['road_lane_connections'],
-            features['road_current_lane_slot'], features['road_target_lane_slot'],
+            road_safety_features['road_lane_geometry'],
+            road_safety_features['road_lane_point_mask'],
+            road_safety_features['road_lane_mask'],
+            road_safety_features['road_lane_connections'],
+            road_safety_features['road_current_lane_slot'],
+            road_safety_features['road_target_lane_slot'],
             softplus_temperature_m=float(safety['softplus_temperature_m']),
             distance_scale_m=float(safety['road_distance_scale_m']),
         )
