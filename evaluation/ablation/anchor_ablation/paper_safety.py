@@ -76,7 +76,7 @@ def road_geometry_from_features(features: Mapping, pose0: np.ndarray, *, point_c
 
 
 def local_to_world_poses(local_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
-    """Transform K2 ego-local [T,3] poses into the world frame."""
+    """Transform ego-local [T,3] poses into the world frame."""
     local = np.asarray(local_poses, dtype=np.float64)
     origin = np.asarray(pose0, dtype=np.float64).reshape(3)
     if local.ndim != 2 or local.shape[1] != 3 or not np.isfinite(local).all():
@@ -87,6 +87,26 @@ def local_to_world_poses(local_poses: np.ndarray, pose0: np.ndarray) -> np.ndarr
     world[:, 1] = origin[1] + s * local[:, 0] + c * local[:, 1]
     world[:, 2] = origin[2] + local[:, 2]
     return world
+
+
+def expert_local_poses(future_xy: np.ndarray) -> np.ndarray:
+    """Prepend the observed origin and estimate future yaw from path tangents.
+
+    Raw expert labels contain XY rather than body yaw. The initial local yaw
+    is zero; stationary future nodes retain the preceding tangent heading.
+    """
+    xy = np.asarray(future_xy, dtype=np.float64)
+    if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 1 or not np.isfinite(xy).all():
+        raise ValueError('Expert future trajectory must be finite [H,2] XY points')
+    poses = np.zeros((len(xy) + 1, 3), dtype=np.float64)
+    poses[1:, :2] = xy
+    tangent = np.gradient(poses[:, :2], axis=0)
+    for index in range(1, len(poses)):
+        if np.linalg.norm(tangent[index]) > 1e-8:
+            poses[index, 2] = math.atan2(tangent[index, 1], tangent[index, 0])
+        else:
+            poses[index, 2] = poses[index - 1, 2]
+    return poses
 
 
 def _circle_offsets(length: float, width: float, count: int = 3):
@@ -154,7 +174,7 @@ def _collision_parameters(vehicle_cfg: Mapping):
 
 
 def external_collision_free(local_poses: np.ndarray, features: Mapping, vehicle_cfg: Mapping) -> bool:
-    """Check raw K2 ego poses against uncontrolled actors under CV prediction."""
+    """Check evaluated ego poses against uncontrolled actors under CV prediction."""
     poses = np.asarray(local_poses, dtype=np.float64)
     ego = np.asarray(features["ego_state"], dtype=np.float64)
     agents = np.asarray(features["agent_states"], dtype=np.float64)
@@ -163,7 +183,7 @@ def external_collision_free(local_poses: np.ndarray, features: Mapping, vehicle_
     times = np.arange(len(poses), dtype=np.float64) * dt
     for idx in np.flatnonzero(valid):
         actor = agents[idx]
-        # Controlled trucks are checked from their synchronized raw K2 paths.
+        # Controlled trucks are checked from their synchronized evaluated paths.
         if actor.shape[0] > 10 and actor[10] > 0.5:
             continue
         actor_velocity = actor[2:4] + ego[:2]

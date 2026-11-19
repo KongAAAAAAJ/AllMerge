@@ -13,6 +13,7 @@ from evaluation.ablation.anchor_ablation.paper_safety import (
     drivable_area_compliance,
     external_collision_free,
     external_min_ttc_s,
+    expert_local_poses,
     intertruck_group_collision_free,
     intertruck_group_min_ttc_s,
     local_to_world_poses,
@@ -133,6 +134,51 @@ def test_reporting_writes_exact_eight_metric_table(tmp_path):
     assert r"\textbf{CR}" in table and r"\textbf{DAC}" in table and r"\textbf{TTC}" in table
     assert "Pre-proj." not in table and "Proj. Corr." not in table
     assert r"Fixed Anchors & 1.000 & 80.000 & 5.000 & 1.200 & 0.900 & 100.000 & 95.000 & 0.000 \\" in table
+
+
+def test_expert_heading_uses_path_tangent_and_stays_finite_at_stops():
+    poses = expert_local_poses(np.array([[1., 1.], [2., 2.], [2., 2.], [2., 2.]]))
+    np.testing.assert_array_equal(poses[0], [0., 0., 0.])
+    np.testing.assert_allclose(poses[1:, 2], np.pi / 4)
+    assert np.isfinite(expert_local_poses(np.zeros((40, 2)))).all()
+    with np.testing.assert_raises(ValueError):
+        expert_local_poses(np.array([[np.nan, 0.]]))
+
+
+def test_expert_reference_reuses_safety_checks_and_keeps_anchor_columns_empty(tmp_path):
+    from evaluation.ablation.anchor_ablation import runner
+    from evaluation.ablation.anchor_ablation.data import collate_anchor_batch
+
+    features = {key: torch.as_tensor(value) for key, value in _road_features(width=40.).items()}
+    features.update(ego_state=torch.zeros(14), agent_states=torch.zeros(1, 11),
+                    agent_valid_mask=torch.zeros(1, dtype=torch.bool), target_point=torch.zeros(2))
+    dense = torch.stack((torch.arange(1, 41, dtype=torch.float32), torch.zeros(40)), dim=-1)
+    samples = []
+    for ego in range(2):
+        samples.append((features, {'trajectory_dense': dense,
+                                  'koopman_pose0_si': torch.tensor([float(ego), 0., 0.])},
+                        {'episode_index': 3, 'frame_index': 7, 'ego_index': ego, 'seed': 12}))
+    loader = DataLoader(samples, batch_size=1, collate_fn=collate_anchor_batch)
+    rows = runner._expert_pass(loader, _vehicle_cfg(), {'ttc_threshold_s': 1.0})
+    assert len(rows) == 2
+    assert all(row['seed'] is None for row in rows)
+    assert all(row['planning_minade_m'] == 0.0 for row in rows)
+    assert all(row['external_collision_free'] for row in rows)
+    # Synchronized expert trucks one metre apart must collide, even when
+    # their samples arrive in separate batches and background traffic is absent.
+    assert all(not row['intertruck_collision_free'] and row['collision'] for row in rows)
+    assert all(not row['ttc_compliant'] and row['min_ttc_s'] == 0.0 for row in rows)
+    assert all(row['drivable_area_compliance_pct'] == 100.0 for row in rows)
+    assert all('_raw_world_poses' not in row for row in rows)
+    summary = summarize([], rows, methods=['Expert'])
+    expert = summary[0]
+    assert all(expert[key] is None for key in ('anchor_minade_m', 'safe_ratio_pct',
+                                               'trajectory_diversity_m', 'control_diversity_normalized'))
+    assert expert['collision_rate_pct'] == 100.0
+    assert expert['num_anchor_scenes'] == 0 and expert['num_planning_runs'] == 2
+    path = tmp_path / 'expert_table.tex'
+    write_latex_table(path, summary)
+    assert r'Expert trajectory & - & - & - & - & 0.000 & 100.000 & 100.000 & 0.000 \\' in path.read_text()
 
 
 def _road_features(width=8.0):

@@ -145,6 +145,9 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
             if method_count > 1:
                 assert fig.axes[0].get_shared_x_axes().joined(fig.axes[0], fig.axes[1])
             assert not fig.axes[0].get_shared_x_axes().joined(fig.axes[0], fig.axes[method_count])
+            labels = [text.get_text() for text in fig.texts]
+            assert labels.count('Longitudinal position (m)') == 1
+            assert labels.count('Lateral position (m)') == 1
             titles = ('Fixed Anchors', 'Dynamic Anchors', 'Ours')[:method_count]
             for index, ax in enumerate(fig.axes):
                 assert ax.get_title() == (f'Example {index // method_count + 1}'
@@ -155,6 +158,15 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
                 box = tags[0].get_bbox_patch()
                 assert 0 < box.get_facecolor()[3] < 1
                 assert box.get_linewidth() > 0
+                assert ax.get_xlabel() == ax.get_ylabel() == ''
+                for panel in [ax, *ax.child_axes]:
+                    assert 'Target' not in panel.get_legend_handles_labels()[1]
+                    expert = [line for line in panel.lines if line.get_label() == 'Expert trajectory']
+                    assert len(expert) == 1 and expert[0].get_linewidth() == 0.9
+                if index % method_count == 0:
+                    assert any(label.get_visible() for label in ax.get_xticklabels())
+                else:
+                    assert not ax.get_xticklabels()
         original_close(fig)
 
     with patch.object(plt, 'close', side_effect=check_close):
@@ -201,3 +213,42 @@ def test_unsafe_anchor_styles_follow_original_indices_after_validity_filtering(t
 
     with patch.object(visualization, '_finish_anchor_grid', side_effect=check_styles):
         draw_anchor_ablation(tmp_path / 'safety_styles.pdf', {m: item for m in ('A0', 'A1', 'A2')})
+
+
+def test_insets_share_row_limits_and_support_precise_position_overrides(tmp_path, monkeypatch):
+    from evaluation.ablation.anchor_ablation import visualization
+
+    x = np.linspace(5, 50, 8)
+    item = {
+        'features': {'map_polylines': np.zeros((1, 8, 10)),
+                     'map_valid_mask': np.ones(1, dtype=bool),
+                     'agent_states': np.zeros((1, 11)),
+                     'agent_valid_mask': np.zeros(1, dtype=bool)},
+        'expert_xy': np.column_stack((x, x * 0.1)),
+        'anchors_xy': np.stack([np.column_stack((x, x * slope)) for slope in (0.05, 0.2)]),
+        'valid': np.ones(2, dtype=bool), 'hard_safe': np.ones(2, dtype=bool),
+    }
+    monkeypatch.setattr(visualization, 'ANCHOR_INSET_ROW_LIMITS',
+                        {0: {'xlim': (12, 35), 'ylim': (-1, 8)}})
+    bounds = (0.04, 0.08, 0.52, 0.50)
+    monkeypatch.setattr(visualization, 'ANCHOR_INSET_OVERRIDES',
+                        {(0, 'A1'): {'bounds': bounds}, (1, 'A2'): {'enabled': False}})
+    original_close = plt.close
+
+    def check_close(fig):
+        if hasattr(fig, 'axes'):
+            first_a1, first_a2 = fig.axes[1].child_axes[0], fig.axes[2].child_axes[0]
+            assert first_a1.get_xlim() == first_a2.get_xlim() == (12, 35)
+            assert first_a1.get_ylim() == first_a2.get_ylim() == (-1, 8)
+            assert len(fig.axes[0].child_axes) == 0
+            assert len(fig.axes[4].child_axes) == 1
+            assert len(fig.axes[5].child_axes) == 0
+            parent = fig.axes[1].get_position()
+            child = first_a1.get_position()
+            actual = ((child.x0-parent.x0)/parent.width, (child.y0-parent.y0)/parent.height,
+                      child.width/parent.width, child.height/parent.height)
+            np.testing.assert_allclose(actual, bounds)
+        original_close(fig)
+
+    with patch.object(plt, 'close', side_effect=check_close):
+        draw_anchor_ablation(tmp_path / 'insets.pdf', [{m: item for m in ('A0', 'A1', 'A2')}] * 2)

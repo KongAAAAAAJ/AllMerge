@@ -108,6 +108,22 @@ rendering. The planning figure displays the selected unprojected raw K2 path.
 A1 is generated online from raw scenes; no precomputed A1 dataset is required.
 The default `num_workers: 0` avoids extra PyTorch/CUDA processes on Windows.
 
+`feasibility/all` also adds an **Expert trajectory** reference row to the table
+and CSV/JSON summaries. Its four anchor-quality entries are `-` in LaTeX. The
+planning minADE is zero by definition (expert reference against itself); CR,
+DAC and TTC use `future_trajectory_dense` directly, without diffusion or K2
+prediction. Because raw labels provide XY only, future headings for footprint
+checks are estimated from path tangents, retaining the last heading at stops.
+The observed initial local heading is zero.
+
+Expert checks use exactly the same evaluated synchronized scenes, vehicle
+footprint, road geometry, CV background prediction and safety thresholds as
+the model rows. Controlled trucks use their synchronized expert paths in this
+row. Each expert scene is evaluated once rather than repeated for inference
+seeds. `planning_per_sample.csv` uses method `Expert` and an empty inference
+seed; the manifest documents the reference protocol. `anchors` alone omits
+this row because it does not evaluate synchronized planning safety.
+
 ## Anchor figure selection
 
 When both A1 and A2 are evaluated, `figure_candidate_samples: 100` randomly
@@ -136,3 +152,29 @@ legend identifies the A0/A1 highlighting explicitly. Each subplot shows its
 method name in a rectangular label with a translucent method-specific fill.
 Style constants at the top of `visualization.py` control the unsafe-line color
 and opacity, label position in axes fractions, and label fill colors/opacity.
+
+The figure omits Target markers and uses thinner expert lines. Axis names are
+shared across the figure; each row keeps its own tick values in the first
+column because scene limits can differ. Row and column gaps are set in inches
+inside `_finish_anchor_grid`.
+
+A1/A2 panels include zoom insets with selection rectangles and connecting
+lines. Both columns in the same row always use identical zoom limits:
+
+```python
+ANCHOR_INSET_DEFAULTS = {
+    'enabled': True,
+    'bounds': (0.055, 0.15, 0.48, 0.48),  # left, bottom, width, height; axes fractions
+}
+ANCHOR_INSET_ROW_LIMITS = {
+    0: {'xlim': None, 'ylim': None},  # first row; None = automatic
+    1: {'xlim': None, 'ylim': None},
+    2: {'xlim': None, 'ylim': None},
+}
+```
+
+For example, set row `0` to `{'xlim': (40, 85), 'ylim': (-3, 12)}` to apply that
+range in metres to both A1/A2 panels. Change individual inset positions/sizes
+with `ANCHOR_INSET_OVERRIDES = {(0, 'A1'): {'bounds': (0.03, 0.08, 0.50, 0.50)}}`.
+Set `enabled` to `False` globally or in an override to hide insets. Insets
+reuse the plotted trajectories and safety labels without additional evaluation.

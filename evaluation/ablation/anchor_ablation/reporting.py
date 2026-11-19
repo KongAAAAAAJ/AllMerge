@@ -78,7 +78,7 @@ def _rate_pct(rows, key):
 
 def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
               methods: Sequence[str] = ("A0", "A1", "A2")):
-    """Summarize the four anchor-quality and four raw-K2 planning metrics."""
+    """Summarize model metrics and the optional raw expert trajectory reference."""
     output = []
     for method in methods:
         anchors = [row for row in anchor_rows if row.get("method") == method]
@@ -131,12 +131,16 @@ def write_latex_table(path: Path, summary: Sequence[dict]):
         r"\hline",
     ]
     keys = PAPER_METRIC_KEYS
-    for method, label in (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", r"\textbf{Ours}")):
+    for method, label in (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"),
+                          ("A2", r"\textbf{Ours}"), ("Expert", "Expert trajectory")):
         row = lookup.get(method)
         if row is None:
             continue
         values = []
         for key in keys:
+            if method == 'Expert' and key in PAPER_METRIC_KEYS[:4]:
+                values.append('-')
+                continue
             value = row.get(key)
             if value is None or not math.isfinite(float(value)):
                 values.append("--")

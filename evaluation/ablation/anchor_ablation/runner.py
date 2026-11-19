@@ -25,6 +25,7 @@ from .paper_safety import (
     drivable_area_compliance,
     external_collision_free,
     external_min_ttc_s,
+    expert_local_poses,
     intertruck_group_collision_free,
     intertruck_group_min_ttc_s,
     local_to_world_poses,
@@ -402,6 +403,54 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
     return rows, figure_payload
 
 
+def _trajectory_safety_record(method, seed, meta, features, local_poses, pose0,
+                              planning_minade, vehicle_cfg, planning_safety_cfg):
+    """Common geometry and safety protocol for model and expert trajectories."""
+    world = local_to_world_poses(local_poses, pose0)
+    road = road_geometry_from_features(features, pose0)
+    external_ok = external_collision_free(local_poses, features, vehicle_cfg)
+    external_ttc = external_min_ttc_s(
+        local_poses, features, vehicle_cfg,
+        closing_speed_epsilon_mps=float(planning_safety_cfg.get('closing_speed_epsilon_mps', 0.1)))
+    dac = drivable_area_compliance(
+        world, road, vehicle_cfg,
+        tolerance_m=float(planning_safety_cfg.get('drivable_area_tolerance_m', 1e-6)))
+    return {
+        'method': method, 'seed': seed,
+        **{key: _meta_int(meta, key) for key in ('episode_index', 'frame_index', 'ego_index')},
+        'dataset_seed': _meta_int(meta, 'seed', -1),
+        'planning_minade_m': float(planning_minade),
+        'external_collision_free': bool(external_ok), 'external_min_ttc_s': float(external_ttc),
+        'intertruck_collision_free': True, 'intertruck_min_ttc_s': float('inf'),
+        'collision': not bool(external_ok), 'drivable_area_compliance_pct': float(dac),
+        'min_ttc_s': float(external_ttc),
+        'ttc_compliant': bool(external_ttc >= float(planning_safety_cfg.get('ttc_threshold_s', 1.0))),
+        '_raw_world_poses': world,
+    }
+
+
+def _expert_pass(loader, vehicle_cfg, planning_safety_cfg):
+    """Evaluate each synchronized expert scene once, independently of seeds."""
+    rows = []
+    for batch_index, (features, targets, metadata) in enumerate(loader, start=1):
+        dense = targets['trajectory_dense'].detach().cpu().numpy()
+        if dense.shape[1:] != (40, 2):
+            raise ValueError('Expert reference requires 40 future XY nodes at 0.1 s')
+        for index, meta in enumerate(metadata):
+            poses = expert_local_poses(dense[index])
+            pose0 = targets['koopman_pose0_si'][index].detach().cpu().numpy()
+            rows.append(_trajectory_safety_record(
+                'Expert', None, meta, _extract_features_numpy(features, index), poses, pose0,
+                0.0, vehicle_cfg, planning_safety_cfg))
+        if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(loader):
+            print(f'[EXPERT METRICS] batch={batch_index}/{len(loader)} '
+                  f'samples={len(rows)}/{len(loader.dataset)}', flush=True)
+    if not rows:
+        raise RuntimeError('Expert reference evaluation produced no samples')
+    _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg)
+    return rows
+
+
 def _planning_seed_pass(method, model, loader, device, seed,
                         vehicle_cfg, planning_safety_cfg, figure_meta):
     """Evaluate planning metrics on the selected raw K2 trajectory, before JTP."""
@@ -411,11 +460,6 @@ def _planning_seed_pass(method, model, loader, device, seed,
     started = last_progress = time.perf_counter()
     print(f"[PLANNING METRICS] method={method} seed={seed} samples=0/{len(loader.dataset)}", flush=True)
     model.eval()
-    ttc_threshold_s = float(planning_safety_cfg.get("ttc_threshold_s", 1.0))
-    closing_speed_epsilon_mps = float(
-        planning_safety_cfg.get("closing_speed_epsilon_mps", 0.1)
-    )
-    road_tolerance_m = float(planning_safety_cfg.get("drivable_area_tolerance_m", 1e-6))
     with torch.no_grad():
         for batch_index, (features_cpu, targets_cpu, metadata) in enumerate(loader, start=1):
             features = _features_to_device(features_cpu, device)
@@ -450,35 +494,9 @@ def _planning_seed_pass(method, model, loader, device, seed,
                 features_np = _extract_features_numpy(prepared, index)
                 pose0 = context["koopman_pose0_si"][index].detach().cpu().numpy()
                 raw_local = selected_poses[index].detach().cpu().numpy()
-                raw_world = local_to_world_poses(raw_local, pose0)
-                road = road_geometry_from_features(features_np, pose0)
-
-                external_ok = external_collision_free(raw_local, features_np, vehicle_cfg)
-                external_ttc = external_min_ttc_s(
-                    raw_local, features_np, vehicle_cfg,
-                    closing_speed_epsilon_mps=closing_speed_epsilon_mps,
-                )
-                dac_pct = drivable_area_compliance(
-                    raw_world, road, vehicle_cfg, tolerance_m=road_tolerance_m
-                )
-                record = {
-                    "method": method,
-                    "seed": int(seed),
-                    "episode_index": key[0],
-                    "frame_index": key[1],
-                    "ego_index": key[2],
-                    "dataset_seed": _meta_int(meta, "seed", -1),
-                    "planning_minade_m": float(planning_minade[index].cpu()),
-                    "external_collision_free": bool(external_ok),
-                    "external_min_ttc_s": float(external_ttc),
-                    "intertruck_collision_free": True,
-                    "intertruck_min_ttc_s": float("inf"),
-                    "collision": not bool(external_ok),
-                    "drivable_area_compliance_pct": float(dac_pct),
-                    "min_ttc_s": float(external_ttc),
-                    "ttc_compliant": bool(external_ttc >= ttc_threshold_s),
-                    "_raw_world_poses": raw_world,
-                }
+                record = _trajectory_safety_record(
+                    method, int(seed), meta, features_np, raw_local, pose0,
+                    float(planning_minade[index].cpu()), vehicle_cfg, planning_safety_cfg)
                 rows.append(record)
                 now = time.perf_counter()
                 if len(rows) == 1 or now - last_progress >= 10 or len(rows) == len(loader.dataset):
@@ -506,7 +524,7 @@ def _planning_seed_pass(method, model, loader, device, seed,
 
 
 def _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg):
-    """Add synchronized controlled-truck collision and TTC results to each row."""
+    """Add synchronized controlled-truck collision/TTC for model or expert rows."""
     groups = defaultdict(list)
     for row in rows:
         key = (
@@ -825,7 +843,12 @@ def run(args=None):
                         )
                     planning_figures[method] = planning_figure
 
-    summary = summarize(anchor_rows, planning_rows, methods=methods)
+    summary_methods = list(methods)
+    if stage != 'anchors':
+        print('[ANCHOR ABLATION] expert trajectory reference', flush=True)
+        planning_rows.extend(_expert_pass(loader, vehicle_cfg, planning_safety_cfg))
+        summary_methods.append('Expert')
+    summary = summarize(anchor_rows, planning_rows, methods=summary_methods)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if stage != "feasibility":
@@ -885,6 +908,15 @@ def run(args=None):
         "study": "TRACE Adaptive Anchor Ablation",
         "stage": stage,
         "selected_methods": methods,
+        "expert_reference": {
+            "evaluated": stage != 'anchors',
+            "trajectory_source": "raw future_trajectory_dense; no K2 or diffusion inference",
+            "heading_source": "path tangent; observed initial local yaw is zero",
+            "planning_minade_definition": "zero by definition: expert reference compared with itself",
+            "seed_independent": True,
+            "sampling": "same synchronized scenes as model planning metrics; each scene evaluated once",
+            "safety_protocol": "same vehicle footprint, road, CV background and synchronized truck checks",
+        },
         "evaluation_protocol": (
             "staged: anchors computes four anchor-quality metrics on independent raw ego samples; "
             "feasibility computes planning minADE, collision rate, drivable-area compliance and TTC compliance "

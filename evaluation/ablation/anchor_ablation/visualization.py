@@ -9,11 +9,24 @@ import numpy as np
 EGO_LENGTH_M = 10.0
 EGO_WIDTH_M = 2.4
 VEHICLE_ALPHA = 0.35
+EXPERT_LINEWIDTH = 0.9
 UNSAFE_ANCHOR_COLOR = '#d62728'
 UNSAFE_ANCHOR_ALPHA = 0.45
 METHOD_LABEL_POSITION = (0.025, 0.94)  # Axes fractions: left, bottom.
 METHOD_LABEL_ALPHA = 0.55
 METHOD_LABEL_COLORS = {'A0': '#EAD8C4', 'A1': '#CCDDE8', 'A2': '#D4E5D5'}
+ANCHOR_INSET_DEFAULTS = {
+    'enabled': True,
+    'bounds': (0.055, 0.15, 0.48, 0.48),  # left, bottom, width, height; axes fractions
+}
+# Zero-based scene rows. None selects the shared A1/A2 trajectory range automatically.
+ANCHOR_INSET_ROW_LIMITS = {
+    0: {'xlim': None, 'ylim': None},
+    1: {'xlim': None, 'ylim': None},
+    2: {'xlim': None, 'ylim': None},
+}
+# Example: (0, 'A1'): {'bounds': (0.03, 0.08, 0.50, 0.50)}
+ANCHOR_INSET_OVERRIDES = {}
 _METHODS = (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", "Ours"))
 
 
@@ -56,16 +69,121 @@ def _draw_scene(ax, item):
 
     expert = np.asarray(item["expert_xy"])
     ax.plot(np.r_[0.0, expert[:, 0]], np.r_[0.0, expert[:, 1]],
-            color="#222222", linestyle="--", linewidth=1.8,
+            color="#222222", linestyle="--", linewidth=EXPERT_LINEWIDTH,
             label="Expert trajectory", zorder=5)
     _draw_vehicle(ax, 0.0, 0.0, 0.0, EGO_LENGTH_M, EGO_WIDTH_M,
                   "#f28e2b", label="Ego")
-    target = np.asarray(features["target_point"])
-    ax.scatter([target[0]], [target[1]], marker="*", s=55,
-               color="#d62728", label="Target", zorder=6)
     ax.set_xlabel("Longitudinal position (m)")
     ax.grid(True, linewidth=0.35, alpha=0.35)
     ax.set_aspect("equal", adjustable="box")
+
+
+def _draw_anchor_curves(ax, item, method):
+    import matplotlib.pyplot as plt
+
+    xy = np.asarray(item['anchors_xy'])
+    valid = np.asarray(item.get('valid', np.ones(len(xy), dtype=bool)), dtype=bool)
+    hard_safe = np.ones(len(xy), dtype=bool)
+    if method in ('A0', 'A1'):
+        if 'hard_safe' not in item:
+            raise ValueError(f'{method} figure requires per-anchor hard_safe labels')
+        hard_safe = np.asarray(item['hard_safe'], dtype=bool)
+        if hard_safe.shape != (len(xy),):
+            raise ValueError(f'{method} hard_safe labels must match the anchor count')
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    seen = set()
+    for index in np.flatnonzero(valid):
+        trajectory = xy[index]
+        unsafe = not hard_safe[index]
+        label = 'Unsafe anchors (A0/A1)' if unsafe else 'Anchor trajectories'
+        ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
+                color=UNSAFE_ANCHOR_COLOR if unsafe else colors[index % len(colors)],
+                linestyle='--' if unsafe else '-', linewidth=1.0,
+                alpha=UNSAFE_ANCHOR_ALPHA if unsafe else 0.68,
+                label=label if label not in seen else None)
+        seen.add(label)
+
+
+def _anchor_inset_limits(scene, row):
+    trajectories = []
+    for method in ('A1', 'A2'):
+        if method in scene:
+            item = scene[method]
+            xy = np.asarray(item['anchors_xy'])
+            valid = np.asarray(item.get('valid', np.ones(len(xy), dtype=bool)), dtype=bool)
+            trajectories.extend(xy[valid])
+            trajectories.append(np.asarray(item['expert_xy']))
+    if not trajectories:
+        return None
+    points = np.concatenate(trajectories)
+    points = points[np.isfinite(points).all(axis=1)]
+    if not len(points):
+        return None
+    settings = ANCHOR_INSET_ROW_LIMITS.get(row, {})
+    forward = max(float(points[:, 0].max()), 1.0)
+    xlim = settings.get('xlim') or (0.45 * forward, 0.85 * forward)
+    section = points[(points[:, 0] >= xlim[0]) & (points[:, 0] <= xlim[1])]
+    visible_y = [section[:, 1]]
+    # Include segment intersections with both window edges so coarse 8-point
+    # paths are not clipped between their sampled nodes.
+    for trajectory in trajectories:
+        start, end = trajectory[:-1], trajectory[1:]
+        dx = end[:, 0] - start[:, 0]
+        for boundary in xlim:
+            crosses = ((start[:, 0] - boundary) * (end[:, 0] - boundary) <= 0) & (np.abs(dx) > 1e-8)
+            visible_y.append(start[crosses, 1] + (boundary - start[crosses, 0])
+                             / dx[crosses] * (end[crosses, 1] - start[crosses, 1]))
+    visible_y = np.concatenate(visible_y)
+    visible_y = visible_y[np.isfinite(visible_y)]
+    if not len(visible_y):
+        visible_y = points[:, 1]
+    lo, hi = visible_y.min(), visible_y.max()
+    padding = max(0.8, 0.15 * float(hi - lo))
+    ylim = settings.get('ylim') or (float(lo - padding), float(hi + padding))
+    if xlim[1] <= xlim[0] or ylim[1] <= ylim[0]:
+        raise ValueError(f'Inset limits for row {row} must be increasing')
+    return xlim, ylim
+
+
+def _add_anchor_insets(grid, scenes, methods):
+    from matplotlib.patches import ConnectionPatch, Rectangle
+    from matplotlib.ticker import MaxNLocator
+
+    for row, scene in enumerate(scenes):
+        limits = _anchor_inset_limits(scene, row)
+        if limits is None:
+            continue
+        for col, (method, _) in enumerate(methods):
+            if method not in ('A1', 'A2'):
+                continue
+            settings = {**ANCHOR_INSET_DEFAULTS, **ANCHOR_INSET_OVERRIDES.get((row, method), {})}
+            if not settings['enabled']:
+                continue
+            ax = grid[row, col]
+            original_xlim, original_ylim = ax.get_xlim(), ax.get_ylim()
+            inset = ax.inset_axes(settings['bounds'], zorder=9)
+            _draw_scene(inset, scene[method])
+            _draw_anchor_curves(inset, scene[method], method)
+            inset.set_aspect('auto')
+            inset.set_xlim(limits[0])
+            inset.set_ylim(limits[1])
+            inset.set_xlabel('')
+            inset.set_ylabel('')
+            inset.tick_params(labelsize=6, length=2, pad=1)
+            inset.xaxis.set_major_locator(MaxNLocator(nbins=3))
+            inset.yaxis.set_major_locator(MaxNLocator(nbins=3))
+            for spine in inset.spines.values():
+                spine.set_linewidth(0.6)
+            (xlo, xhi), (ylo, yhi) = limits
+            style = {'edgecolor': '#777777', 'linewidth': 0.45, 'alpha': 0.45}
+            ax.add_patch(Rectangle((xlo, ylo), xhi-xlo, yhi-ylo, fill=False, **style))
+            for y, corner in ((ylo, (1, 0)), (yhi, (1, 1))):
+                ax.add_artist(ConnectionPatch(
+                    xyA=(xlo, y), coordsA=ax.transData, axesA=ax,
+                    xyB=corner, coordsB=inset.transAxes, axesB=inset,
+                    color='#777777', linewidth=0.45, alpha=0.45, zorder=8))
+            ax.set_xlim(original_xlim)
+            ax.set_ylim(original_ylim)
 
 
 def _method_items(payload: Mapping[str, dict]):
@@ -101,8 +219,8 @@ def _finish_anchor_grid(fig, grid, path, sample_label):
     """Size the canvas around equal-scale road panels, using physical inch gaps."""
     rows, cols = grid.shape
     panel_width = 4.05
-    column_gap = 0.22
-    row_gap = 0.78
+    column_gap = 0.12
+    row_gap = 0.44
     left, right, top, bottom = 0.58, 0.12, 0.35, 0.62
     fig.canvas.draw()  # Resolve shared limits before measuring each row's aspect.
     heights = []
@@ -120,12 +238,12 @@ def _finish_anchor_grid(fig, grid, path, sample_label):
             ax.set_position([(left + col * (panel_width + column_gap)) / width,
                              y_bottom / height, panel_width / width,
                              heights[row] / height])
-            ax.tick_params(labelsize=8, pad=2)
-            ax.xaxis.label.set_size(9)
-            ax.yaxis.label.set_size(9)
-            if ax.get_ylabel():
-                ax.set_ylabel('Lateral (m)', fontsize=9)
+            ax.tick_params(labelsize=8, pad=2, labelbottom=col == 0, labelleft=col == 0)
+            ax.set_xlabel('')
+            ax.set_ylabel('')
         y_top = y_bottom - row_gap
+    fig.supxlabel('Longitudinal position (m)', x=0.5, y=0.23 / height, fontsize=9, va='bottom')
+    fig.supylabel('Lateral position (m)', x=0.05 / width, fontsize=9)
     unique = {}
     for ax in grid.ravel():
         handles, labels = ax.get_legend_handles_labels()
@@ -171,27 +289,7 @@ def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
             ax = grid[row, col]
             item = scene[method]
             _draw_scene(ax, item)
-            xy = np.asarray(item["anchors_xy"])
-            valid = np.asarray(item.get("valid", np.ones(len(xy), dtype=bool)), dtype=bool)
-            hard_safe = np.ones(len(xy), dtype=bool)
-            if method in ('A0', 'A1'):
-                if 'hard_safe' not in item:
-                    raise ValueError(f'{method} figure requires per-anchor hard_safe labels')
-                hard_safe = np.asarray(item['hard_safe'], dtype=bool)
-                if hard_safe.shape != (len(xy),):
-                    raise ValueError(f'{method} hard_safe labels must match the anchor count')
-            colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-            seen = set()
-            for index in np.flatnonzero(valid):
-                trajectory = xy[index]
-                unsafe = not hard_safe[index]
-                legend_label = 'Unsafe anchors (A0/A1)' if unsafe else 'Anchor trajectories'
-                ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
-                        color=UNSAFE_ANCHOR_COLOR if unsafe else colors[index % len(colors)],
-                        linestyle='--' if unsafe else '-', linewidth=1.0,
-                        alpha=UNSAFE_ANCHOR_ALPHA if unsafe else 0.68,
-                        label=legend_label if legend_label not in seen else None)
-                seen.add(legend_label)
+            _draw_anchor_curves(ax, item, method)
             ax.text(*METHOD_LABEL_POSITION, title, transform=ax.transAxes,
                     ha='left', va='top', fontsize=9, zorder=10,
                     bbox={'boxstyle': 'square,pad=0.30',
@@ -199,9 +297,7 @@ def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
                           'edgecolor': '#555555', 'linewidth': 0.65})
             label = scene_labels[row] if scene_labels is not None else f'Scene {row + 1}'
             ax.set_title(label if col == 0 else '', fontsize=10)
-            ax.tick_params(labelbottom=True)
-            if col == 0:
-                ax.set_ylabel('Lateral position (m)')
+    _add_anchor_insets(grid, scenes, methods)
     _finish_anchor_grid(fig, grid, path, sample_label)
 
 
