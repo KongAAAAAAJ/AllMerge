@@ -1,36 +1,66 @@
-# TRACE Anchor Ablation (six metrics, no iterative projection)
+# TRACE Anchor Ablation (eight metrics, raw K2 safety evaluation)
 
-This version is rebuilt against the 2026-11-18 AllMerge project snapshot and
-uses the current anchor-independent raw expert dataset plus the current online
-A1AnchorManager/A1AnchorBuilder interface. It does not support legacy datasets.
+This evaluator compares A0 Fixed Anchors, A1 Dynamic Anchors and A2 Ours.
+It uses the current anchor-independent raw expert dataset and the online
+A1AnchorManager/A1AnchorBuilder interface.
 
 ## Paper metrics
 
-### Anchor quality stage (4 metrics)
-1. Anchor minADE (m): minimum ADE between K online anchors and the 8-point expert trajectory.
-2. Safe Ratio (%): hard-safe selected anchors divided by K, using the A2 safety teacher's constant-velocity external-actor collision and drivable-road boundary checks.
-3. Trajectory Diversity (m): mean pairwise pointwise XY distance among K anchors.
-4. Control Diversity (normalized): mean pairwise pointwise control distance normalized by [2.5 m/s^2, 0.08 rad].
+### Anchor quality (4 metrics)
 
-### Diffusion planning stage (2 metrics)
-5. Planning minADE (m): minimum ADE among valid diffusion-generated 8-point execution trajectories.
-6. Pre-projection Feasibility (%): JTP nominal constraints plus independent constant-velocity external-actor and synchronized inter-truck collision checks, before projection.
-The table retains `Proj. Corr.` as `--`. Iterative JTP projection is not run;
-correction and projection success rate are unavailable, and no attempts are
-counted as successes or failures. The JTP configuration still supplies the
-thresholds for pre-projection feasibility checks.
+1. **Anchor minADE (m) ↓**: minimum ADE between the K online anchors and the
+   8-point expert trajectory.
+2. **Safe Ratio (%) ↑**: hard-safe anchors divided by K, using the common A2
+   safety teacher's constant-velocity external-actor collision and
+   drivable-road corridor checks.
+3. **Trajectory Diversity (m) ↑**: mean pairwise pointwise XY distance among
+   the K anchor trajectories.
+4. **Control Diversity (-) ↑**: mean pairwise pointwise control distance after
+   channel normalization by `[2.5 m/s^2, 0.08 rad]`.
+
+### Diffusion planning performance (4 metrics)
+
+5. **Planning minADE (m) ↓**: minimum ADE among valid diffusion-generated
+   8-point K2 execution trajectories.
+6. **CR (%) ↓**: percentage of selected planning trajectories with at least
+   one collision during the prediction horizon. Uncontrolled background
+   actors are extrapolated with constant velocity; synchronized controlled
+   trucks are checked against their own raw K2 predictions.
+7. **DAC (%) ↑**: mean percentage of future time steps for which the complete
+   ego vehicle footprint remains inside the union of recognized drivable-lane
+   corridors. The footprint uses the configured multi-circle vehicle envelope.
+8. **TTC (%) ↑**: percentage of selected planning trajectories whose minimum
+   predicted TTC to uncontrolled actors or synchronized controlled trucks
+   is greater than or equal to the configured threshold. The default threshold
+   is 1.0 s and can be changed in `configs/evaluation/anchor_ablation.yaml`.
+
+**Planning safety metrics are evaluated on the deployment-selected raw K2
+trajectory before JTP.** The raw K2 poses are in the ego-at-planning-time local
+frame and are transformed to the world frame only for synchronized
+inter-truck and road-corridor checks. JTP is not instantiated or invoked:
+there is no JTP constraint evaluation, iterative projection, projection
+correction or projected-trajectory fallback.
+
+The existing `--jtp-config` argument is retained for command compatibility.
+Its YAML is used only to read the vehicle footprint and execution time step
+for collision, TTC and drivable-area calculations. It does not invoke JTP.
 
 ## Staged entry points
 
-`--stage anchors` computes the four anchor metrics using independent raw controlled-ego samples. It does not scan/group the entire dataset into synchronized frames. A1 is regenerated online from `ego_state` and raw road geometry. It generates `anchor_ablation.pdf` using the existing publication figure layout and style.
-
-`--stage feasibility` computes planning minADE and pre-projection feasibility using complete synchronized frames, because the inter-truck collision component requires synchronized ego groups. It generates `anchor_planning_ablation.pdf` showing anchors, diffusion candidates and the selected unprojected trajectory.
-
-`--stage all` computes all six metrics and both PDFs. It uses complete synchronized frames for a consistent planning/anchor joint comparison.
+- `--stage anchors` computes the four anchor-quality metrics using independent
+  raw controlled-ego samples. It does not group the full dataset into
+  synchronized frames. A1 is regenerated online from `ego_state` and raw
+  road geometry. It generates `anchor_ablation.pdf`.
+- `--stage feasibility` is retained as the legacy stage name. It computes the
+  four planning metrics using complete synchronized frames, because
+  inter-truck collision and TTC require synchronized controlled-vehicle
+  predictions. It generates `anchor_planning_ablation.pdf`.
+- `--stage all` computes all eight metrics and both PDFs using complete
+  synchronized frames.
 
 ## Smoke commands
 
-Anchor-only A0/A1 smoke (A2 scorer not required):
+Anchor-only A0/A1 smoke (A2 scorer is not required):
 
 ```bat
 python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --num-samples 500 --batch-size 128 --num-workers 0 --device auto
@@ -42,40 +72,38 @@ After A2 scorer training:
 python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2 --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --a0-bank outputs/anchor_ablation/ckpt/a0_fixed_control_anchors.npz --a2-scorer outputs/anchor_ablation/ckpt/A2_anchors/best.pt --num-samples 5000 --batch-size 128 --num-workers 0 --device auto
 ```
 
-## Planning-stage entry points
+Planning-only evaluation (legacy stage name `feasibility`):
 
 ```bat
 python evaluation/ablation/run_anchor.py --stage feasibility --methods A0 A1 A2 --checkpoint-a0 outputs/anchor_ablation/diffusion/A0/best.pt --checkpoint-a1 outputs/anchor_ablation/diffusion/A1/best.pt --checkpoint-a2 outputs/anchor_ablation/diffusion/A2/best.pt --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --num-frames 200 --batch-size 16 --num-workers 0 --seeds 0,1,2 --device auto
 ```
 
-Complete six-metric run (existing command arguments are unchanged):
+Complete eight-metric run (existing command arguments are unchanged):
 
 ```bat
 python evaluation/ablation/run_anchor.py --stage all --methods A0 A1 A2 --checkpoint-a0 outputs/anchor_ablation/diffusion/A0/best.pt --checkpoint-a1 outputs/anchor_ablation/diffusion/A1/best.pt --checkpoint-a2 outputs/anchor_ablation/diffusion/A2/best.pt --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --num-frames 200 --batch-size 16 --num-workers 0 --seeds 0,1,2 --device auto
 ```
 
-`--num-frames` controls synchronized frames in `feasibility/all`. `--num-samples`
-controls independent raw ego samples in `anchors`. For backwards convenience,
-`--num-frames` is accepted as an alias for `--num-samples` only in `anchors`.
+`--num-frames` controls synchronized frames in `feasibility/all`.
+`--num-samples` controls independent raw ego samples in `anchors`. For
+backwards convenience, `--num-frames` is accepted as an alias for
+`--num-samples` only in `anchors`.
 
 ## Outputs
 
 - `anchor_quality_per_sample.csv`
-- `planning_per_sample.csv` (feasibility/all)
-- `anchor_ablation_summary.csv` with the original seven metric columns (`projection_correction_m` always blank)
-- `anchor_ablation_table.tex`
-- `anchor_ablation.pdf` (anchors/all)
-- `anchor_planning_ablation.pdf` (feasibility/all)
+- `planning_per_sample.csv` (`feasibility/all`), including per-sample CR,
+  DAC, external/inter-truck TTC diagnostics and TTC compliance
+- `anchor_ablation_summary.csv` with the eight paper metrics plus sample-count
+  and TTC diagnostics
+- `anchor_ablation_table.tex` with four Anchor Quality and four Planning
+  Performance columns
+- `anchor_ablation.pdf` (`anchors/all`)
+- `anchor_planning_ablation.pdf` (`feasibility/all`)
 - `evaluation_manifest.json`, `evaluation_summary.json`
 
 Figures retain the existing PDF layout, Times New Roman typography and vehicle
-rendering. The planning figure no longer draws a projected trajectory.
+rendering. The planning figure displays the selected unprojected raw K2 path.
 
 A1 is generated online from raw scenes; no precomputed A1 dataset is required.
-
-Evaluation defaults to `num_workers: 0` to avoid extra PyTorch/CUDA processes
-and Windows pagefile exhaustion (WinError 1455). Existing commands still work;
-use `--num-workers 0` to override another configuration. If explicitly enabling
-workers, each worker prefetches one batch and is reused between metric passes.
-The planning stage reports sample progress, elapsed time and estimated remaining
-time. Sample counts, seeds and definitions of the six evaluated metrics are unchanged.
+The default `num_workers: 0` avoids extra PyTorch/CUDA processes on Windows.

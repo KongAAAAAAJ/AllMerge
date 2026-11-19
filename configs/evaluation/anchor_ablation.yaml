@@ -25,3 +25,9 @@ figure_seed: 2027       # Independent of evaluation scores and inference seeds
 output_dir: outputs/anchor_ablation/evaluation
 
 
+
+# Planning safety is evaluated on the selected raw K2 trajectory before JTP.
+planning_safety:
+  ttc_threshold_s: 1.0              # TTC compliance threshold; configurable
+  closing_speed_epsilon_mps: 0.1   # Ignore near-zero radial closing speeds
+  drivable_area_tolerance_m: 1.0e-6

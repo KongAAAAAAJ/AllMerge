@@ -1,0 +1,65 @@
+{
+  "package": "TRACE Anchor Ablation Metrics V2.2 (local worktree baseline)",
+  "installed_at": "2026-11-19T18:40:34",
+  "project_root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "backup_directory": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\anchor_ablation_metrics_v2_2_20261119_184034",
+  "operations": [
+    {
+      "action": "replace",
+      "path": "configs/evaluation/anchor_ablation.yaml",
+      "current_sha256": "ddcdc0ff251dda416e1ece03a84fe7a1ec02430cd32f713616424cf49977fd38",
+      "new_sha256": "46fd3aaf911377e3d869b9fe39ca37e1fcdee62f21f467dcd7529aa8f2d59fa0"
+    },
+    {
+      "action": "replace",
+      "path": "evaluation/ablation/anchor_ablation/README.md",
+      "current_sha256": "308b2636c6a45df61f6240787767d4beb5c58bf67b46a9caf2b3c1f9ad0ac914",
+      "new_sha256": "cc560600b2fbd6dad2d2aefd4fa17d7f34d1ba2d7496ce180bad1682633a6e69"
+    },
+    {
+      "action": "add",
+      "path": "evaluation/ablation/anchor_ablation/paper_safety.py",
+      "new_sha256": "b407774d8071a83c19071021e202ded6c9aa3253f41d5c681558633ee43dead1"
+    },
+    {
+      "action": "replace",
+      "path": "evaluation/ablation/anchor_ablation/reporting.py",
+      "current_sha256": "c294217aaddb1f233a1f5b6e8d61bfcc89f28042722de8efe2d7b95591c8ee55",
+      "new_sha256": "8e9eff006af0c167aaac75cb84dc2695a05757ab2ae66e7779d5fae973738523"
+    },
+    {
+      "action": "replace",
+      "path": "evaluation/ablation/anchor_ablation/runner.py",
+      "current_sha256": "a450b3658794bee06a7beebe317b881ba4d069ee40c41fad0d7f675801ac4e6a",
+      "new_sha256": "81f43cab6c2c4d005e2bf6c1aba5377b62d2ab993e715f521b206bc8a23b412a"
+    },
+    {
+      "action": "replace",
+      "path": "tests/test_anchor_ablation_staged_v3.py",
+      "current_sha256": "0e1e56eb80c0dba764dae17ab45aa733480a45175f67280d4e9dd664e31729cb",
+      "new_sha256": "9108903d879fba1806b126f62d1e3d4e3d0fe6085fa2b2c83e29794d6b8e03f8"
+    },
+    {
+      "action": "delete",
+      "path": "evaluation/ablation/anchor_ablation/paper_feasibility.py",
+      "current_sha256": "433f959fba422fd149da767c9014f7530b4a430b1157d112eb13d8b42b900119"
+    }
+  ],
+  "paper_metrics": [
+    "anchor_minade_m",
+    "safe_ratio_pct",
+    "trajectory_diversity_m",
+    "control_diversity_normalized",
+    "planning_minade_m",
+    "collision_rate_pct",
+    "drivable_area_compliance_pct",
+    "ttc_compliance_pct"
+  ],
+  "planning_safety_protocol": {
+    "trajectory_source": "selected raw K2 prediction before JTP",
+    "background_actor_prediction": "constant velocity",
+    "controlled_vehicle_prediction": "synchronized raw K2 prediction",
+    "jtp_projector_invoked": false,
+    "ttc_threshold_s": 1.0
+  }
+}

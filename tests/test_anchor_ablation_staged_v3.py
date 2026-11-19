@@ -2,16 +2,33 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, Subset
+from torch.utils.data import Dataset, Subset, DataLoader
 
 from evaluation.ablation.anchor_ablation.paper_metrics import (
     compute_anchor_metrics,
     compute_planning_minade,
     geometry_valid_mask,
 )
+from evaluation.ablation.anchor_ablation.paper_safety import (
+    drivable_area_compliance,
+    external_collision_free,
+    external_min_ttc_s,
+    intertruck_group_collision_free,
+    intertruck_group_min_ttc_s,
+    local_to_world_poses,
+    road_geometry_from_features,
+)
 from evaluation.ablation.anchor_ablation.reporting import summarize, write_latex_table
 from evaluation.ablation.anchor_ablation.runner import _filter_a1_and_sample_frames
-from highway_env.planner.diffusion.projection import JointTrajectoryProjector, RoadGeometry
+
+
+def _vehicle_cfg():
+    return {
+        "geometry": {"footprint": {"circle_offsets_m": [-3.0, 0.0, 3.0],
+                                   "circle_radius_m": 1.45}},
+        "execution": {"dt_s": 0.1},
+        "evaluation": {"collision_margin_m": 0.25},
+    }
 
 
 def test_a1_geometry_mask_ignores_traffic_mode_valid_mask():
@@ -86,150 +103,186 @@ def test_a1_common_filter_keeps_only_complete_geometric_frames():
     assert manifest["a1_full_anchor_frames_skipped"] == 1
 
 
-def test_reporting_keeps_projection_unavailable_without_counting_failures(tmp_path):
+def test_reporting_writes_exact_eight_metric_table(tmp_path):
     anchor_rows = [{
         "method": "A0", "anchor_minade_m": 1.0, "safe_ratio": 0.8,
         "trajectory_diversity_m": 5.0, "control_diversity_normalized": 1.2,
     }]
     planning_rows = [{
         "method": "A0", "planning_minade_m": 0.9,
-        "preprojection_feasible": True, "projection_success": None,
-        "projection_correction_m": None,
+        "collision": True, "drivable_area_compliance_pct": 95.0,
+        "ttc_compliant": False, "min_ttc_s": 0.8, "external_min_ttc_s": 1.2,
     }]
     summary = summarize(anchor_rows, planning_rows, methods=["A0"])
     row = summary[0]
     assert row["anchor_minade_m"] == 1.0
+    assert row["safe_ratio_pct"] == 80.0
     assert row["planning_minade_m"] == 0.9
-    assert row['preprojection_feasibility_pct'] == 100.0
-    assert row['projection_correction_m'] is None
-    assert row['projection_success_rate_pct'] is None
-    assert row['num_projection_runs'] == 0
-    assert row['num_projection_success'] == 0
-    assert row['num_projection_failures'] == 0
-    expected = {
-        "anchor_minade_m", "safe_ratio_pct", "trajectory_diversity_m",
-        "control_diversity_normalized", "planning_minade_m",
-        "preprojection_feasibility_pct", "projection_correction_m",
-    }
-    assert expected.issubset(row)
+    assert row["collision_rate_pct"] == 100.0
+    assert row["drivable_area_compliance_pct"] == 95.0
+    assert row["ttc_compliance_pct"] == 0.0
+    assert row["mean_min_ttc_s"] == 0.8
     partial = summarize(anchor_rows, [], methods=["A0"])[0]
-    assert partial["anchor_minade_m"] == 1.0
     assert partial["planning_minade_m"] is None
+    assert partial["collision_rate_pct"] is None
     path = tmp_path / "table.tex"
     write_latex_table(path, summary)
-    table = path.read_text()
+    table = path.read_text(encoding="utf-8")
     assert "Anchor Quality" in table and "Planning Performance" in table
-    assert "Control Div." in table and "Proj. Corr." in table
-    assert r'Fixed Anchors & 1.000 & 80.000 & 5.000 & 1.200 & 0.900 & 100.000 & -- \\' in table
+    assert "Control Div." in table
+    assert r"\textbf{CR}" in table and r"\textbf{DAC}" in table and r"\textbf{TTC}" in table
+    assert "Pre-proj." not in table and "Proj. Corr." not in table
+    assert r"Fixed Anchors & 1.000 & 80.000 & 5.000 & 1.200 & 0.900 & 100.000 & 95.000 & 0.000 \\" in table
 
 
-def test_jtp_preprojection_api_evaluates_without_projecting():
-    from pathlib import Path
-
-    project_root = Path(__file__).resolve().parents[1]
-    config = project_root / "configs" / "projection" / "jtp.yaml"
-
-    calls = []
-
-    def rollout(controls, context):
-        calls.append(controls.detach().clone())
-        n, horizon, _ = controls.shape
-        t = torch.arange(horizon + 1, device=controls.device, dtype=controls.dtype)
-        trajectory = torch.zeros(n, horizon + 1, 3, device=controls.device, dtype=controls.dtype)
-        trajectory[:, :, 0] = t[None]
-        states = torch.zeros(n, horizon + 1, 5, device=controls.device, dtype=controls.dtype)
-        states[:, :, 0] = 10.0
-        ltr = torch.zeros(n, horizon + 1, device=controls.device, dtype=controls.dtype)
-        return {"trajectory": trajectory, "states": states, "ltr": ltr}
-
-    projector = JointTrajectoryProjector(rollout, config=config)
-    context = {
-        "koopman_state_hist_si": torch.zeros(1, 5, 5),
-        "koopman_control_hist_si": torch.zeros(1, 4, 2),
-        "koopman_pose0_si": torch.zeros(1, 3),
-        "koopman_payload_kg": torch.tensor([10000.0]),
-        "koopman_road_mu": torch.tensor([0.8]),
+def _road_features(width=8.0):
+    maps = np.zeros((1, 32, 10), dtype=np.float32)
+    maps[0, :, 0] = np.linspace(-10.0, 50.0, 32)
+    maps[0, :, 4] = width
+    maps[0, :, 6] = 1.0  # is_current_lane / recognized drivable lane
+    return {
+        "map_polylines": maps,
+        "map_valid_mask": np.asarray([True]),
     }
-    center = torch.stack((torch.linspace(-5, 50, 32), torch.zeros(32)), dim=-1)
-    road = RoadGeometry(centerlines_xy=center, left_width_m=5.0, right_width_m=5.0)
-    nominal = torch.zeros(1, 40, 2)
-    result = projector.evaluate_preprojection(nominal, context, road)
-    assert result["projector_constraints_satisfied"]
-    assert result["trajectories"].shape == (1, 41, 3)
-    assert result["states"].shape == (1, 41, 5)
-    assert result["ltr"].shape == (1, 41)
-    calls.clear()
-    projected = projector.project(nominal, context, road)
-    assert projected.status == 'nominal_already_feasible'
-    assert len(calls) == 1
-    assert torch.equal(projected.trajectories, result['trajectories'])
-    assert torch.equal(projected.controls, nominal)
 
 
-def test_planning_pass_checks_constraints_and_collisions_without_projecting(monkeypatch):
+def test_drivable_area_compliance_uses_full_vehicle_footprint():
+    features = _road_features(width=8.0)
+    road = road_geometry_from_features(features, np.zeros(3))
+    poses_inside = np.zeros((41, 3), dtype=np.float64)
+    poses_inside[:, 0] = np.linspace(0.0, 40.0, 41)
+    assert drivable_area_compliance(
+        poses_inside, road, _vehicle_cfg()
+    ) == 100.0
+
+    poses_outside = poses_inside.copy()
+    poses_outside[:, 1] = 3.0
+    assert drivable_area_compliance(
+        poses_outside, road, _vehicle_cfg()
+    ) == 0.0
+
+
+def test_external_collision_and_ttc_use_constant_velocity_background_actor():
+    features = {
+        "ego_state": np.zeros(14, dtype=np.float64),
+        "agent_states": np.zeros((1, 11), dtype=np.float64),
+        "agent_valid_mask": np.asarray([True]),
+    }
+    features["ego_state"][0] = 10.0
+    features["agent_states"][0, 0] = 20.0
+    features["agent_states"][0, 2] = -10.0  # relative actor velocity; actor is stationary in world
+    features["agent_states"][0, 7] = 1.0
+    features["agent_states"][0, 8] = 4.0
+    features["agent_states"][0, 9] = 2.0
+
+    ego_poses = np.zeros((41, 3), dtype=np.float64)
+    ego_poses[:, 0] = np.arange(41, dtype=np.float64)  # 10 m/s at 0.1 s intervals
+    cfg = _vehicle_cfg()
+    assert not external_collision_free(ego_poses, features, cfg)
+    assert external_min_ttc_s(ego_poses, features, cfg) == 0.0
+
+    features["agent_valid_mask"][:] = False
+    assert np.isinf(external_min_ttc_s(ego_poses, features, cfg))
+    assert external_collision_free(ego_poses, features, cfg)
+
+
+def test_local_to_world_pose_transform():
+    local = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.2]])
+    pose0 = np.asarray([100.0, 20.0, np.pi / 2])
+    world = local_to_world_poses(local, pose0)
+    np.testing.assert_allclose(world[0], [100.0, 20.0, np.pi / 2])
+    np.testing.assert_allclose(world[1, :2], [100.0, 21.0], atol=1e-8)
+    np.testing.assert_allclose(world[1, 2], np.pi / 2 + 0.2)
+
+
+def test_intertruck_collision_and_ttc_use_synchronized_raw_k2_paths():
+    cfg = _vehicle_cfg()
+    first = np.zeros((41, 3), dtype=np.float64)
+    second = np.zeros((41, 3), dtype=np.float64)
+    second[:, 0] = 1.0
+    records = [{"raw_world_poses": first}, {"raw_world_poses": second}]
+    assert not intertruck_group_collision_free(records, cfg)
+    ttc = intertruck_group_min_ttc_s(records, cfg)
+    assert ttc == [0.0, 0.0]
+
+
+def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
     from evaluation.ablation.anchor_ablation import runner
     from evaluation.ablation.anchor_ablation.data import collate_anchor_batch
-    from torch.utils.data import DataLoader
 
     poses = torch.zeros(2, 2, 41, 3)
     poses[:, 0, 1:, 0] = 4.0
     poses[:, 1, 1:, 0] = 2.0
 
     class Model:
-        anchors_config = {'strategy': 'fixed'}
+        anchors_config = {"strategy": "fixed"}
 
         def eval(self):
             return self
 
         def _prepare_anchors(self, features):
-            return dict(features, coarse_trajectories=poses[:, :, 5::5, :2],
-                        mode_valid_mask=torch.ones(2, 2, dtype=torch.bool))
+            return dict(
+                features,
+                coarse_trajectories=poses[:, :, 5::5, :2],
+                mode_valid_mask=torch.ones(2, 2, dtype=torch.bool),
+            )
 
         def _sample_controls(self, features, generator):
             return torch.zeros(2, 2, 40, 2)
 
         def _all_predictions(self, controls, features, context):
-            return {'poses': poses}
+            return {"poses": poses}
 
         def _select_goal_endpoint_mode(self, prediction, features):
             return torch.zeros(2, dtype=torch.long), None
 
-    class ConstraintChecker:
-        calls = 0
+    features = {
+        "ego_state": torch.zeros(14),
+        "agent_states": torch.zeros(0, 11),
+        "agent_valid_mask": torch.zeros(0, dtype=torch.bool),
+        "map_polylines": torch.zeros(1, 2, 10),
+        "map_valid_mask": torch.ones(1, dtype=torch.bool),
+        "target_point": torch.zeros(2),
+    }
+    targets = {
+        "trajectory": torch.zeros(8, 2),
+        "koopman_state_hist_si": torch.zeros(5, 5),
+        "koopman_control_hist_si": torch.zeros(4, 2),
+        "koopman_pose0_si": torch.zeros(3),
+        "koopman_payload_kg": torch.tensor(10000.0),
+        "koopman_road_mu": torch.tensor(0.8),
+    }
+    loader = DataLoader(
+        [(features, targets, {"episode_index": 0, "frame_index": 1, "ego_index": i})
+         for i in range(2)],
+        batch_size=2,
+        collate_fn=collate_anchor_batch,
+    )
+    monkeypatch.setattr(runner, "road_geometry_from_features", lambda *args: {})
+    monkeypatch.setattr(runner, "external_collision_free", lambda *args: True)
+    monkeypatch.setattr(runner, "external_min_ttc_s", lambda *args, **kwargs: 2.0)
+    monkeypatch.setattr(runner, "drivable_area_compliance", lambda *args, **kwargs: 98.0)
 
-        def evaluate_preprojection(self, nominal, context, road):
-            self.calls += 1
-            return {'trajectories': poses[:1, 0],
-                    'projector_constraints_satisfied': self.calls == 1,
-                    'metrics': {'max_violation': 0.0 if self.calls == 1 else 1.0}}
-
-        def project(self, *args, **kwargs):
-            raise AssertionError('Anchor Ablation must never run iterative projection')
-
-    features = {'ego_state': torch.zeros(14), 'agent_states': torch.zeros(0, 11),
-                'agent_valid_mask': torch.zeros(0, dtype=torch.bool),
-                'map_polylines': torch.zeros(1, 2, 10),
-                'map_valid_mask': torch.ones(1, dtype=torch.bool), 'target_point': torch.zeros(2)}
-    targets = {'trajectory': torch.zeros(8, 2),
-               'koopman_state_hist_si': torch.zeros(5, 5),
-               'koopman_control_hist_si': torch.zeros(4, 2),
-               'koopman_pose0_si': torch.zeros(3),
-               'koopman_payload_kg': torch.tensor(10000.0), 'koopman_road_mu': torch.tensor(0.8)}
-    loader = DataLoader([(features, targets, {'episode_index': 0, 'frame_index': 1, 'ego_index': i})
-                         for i in range(2)], batch_size=2, collate_fn=collate_anchor_batch)
-    monkeypatch.setattr(runner, 'road_geometry_from_features', lambda *args: None)
-    cfg = {'geometry': {'footprint': {'circle_offsets_m': [0.0], 'circle_radius_m': 1.0}},
-           'execution': {'dt_s': 0.1}}
-    checker = ConstraintChecker()
+    cfg = _vehicle_cfg()
+    safety_cfg = {
+        "ttc_threshold_s": 1.0,
+        "closing_speed_epsilon_mps": 0.1,
+        "drivable_area_tolerance_m": 1e-6,
+    }
     rows, figure = runner._planning_seed_pass(
-        'A0', Model(), checker, loader, 'cpu', 0, cfg, (0, 1, 0))
-    assert checker.calls == 2
-    assert [r['planning_minade_m'] for r in rows] == [2.0, 2.0]
-    assert [r['preprojection_feasible'] for r in rows] == [True, False]
-    assert all(r['projection_status'] == 'not_run' for r in rows)
-    assert all(r['projection_success'] is None and r['projection_correction_m'] is None for r in rows)
-    assert 'selected_projected_xy' not in figure
-    np.testing.assert_array_equal(figure['selected_raw_xy'], poses[0, 0, 5::5, :2])
-    runner._apply_synchronized_intertruck(rows, cfg)
-    assert all(not r['preprojection_feasible'] for r in rows)
-    assert all(not r['intertruck_collision_feasible'] for r in rows)
+        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, (0, 1, 0)
+    )
+    assert [row["planning_minade_m"] for row in rows] == [2.0, 2.0]
+    assert all(row["external_collision_free"] for row in rows)
+    assert all(row["drivable_area_compliance_pct"] == 98.0 for row in rows)
+    assert all(row["ttc_compliant"] for row in rows)
+    assert "selected_projected_xy" not in figure
+    np.testing.assert_array_equal(figure["selected_raw_xy"], poses[0, 0, 5::5, :2])
+    assert not hasattr(runner, "JointTrajectoryProjector")
+
+    runner._apply_synchronized_intertruck(rows, cfg, safety_cfg)
+    # The two synchronized controlled trucks have identical raw K2 paths.
+    assert all(not row["intertruck_collision_free"] for row in rows)
+    assert all(row["collision"] for row in rows)
+    assert all(row["min_ttc_s"] == 0.0 for row in rows)
+    assert all(not row["ttc_compliant"] for row in rows)

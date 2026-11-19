@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import random
 import time
-from typing import Mapping, Sequence
+from typing import Mapping
 
 import numpy as np
 import torch
@@ -18,12 +18,15 @@ from torch.utils.data import Subset
 from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
 from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
-from highway_env.planner.diffusion.projection import JointTrajectoryProjector
 
 from .data import build_complete_frame_subset, make_loader, read_subset_metadata, select_figure_samples
-from .paper_feasibility import (
+from .paper_safety import (
+    drivable_area_compliance,
     external_collision_free,
+    external_min_ttc_s,
     intertruck_group_collision_free,
+    intertruck_group_min_ttc_s,
+    local_to_world_poses,
     road_geometry_from_features,
 )
 from .paper_metrics import (
@@ -95,12 +98,8 @@ def _features_to_device(features: dict, device: torch.device) -> dict:
 def _context_to_device(targets: dict, device: torch.device) -> dict:
     missing = [key for key in K2_CONTEXT if key not in targets]
     if missing:
-        raise KeyError(f"TRACE JTP evaluation requires synchronized K2 context fields: {missing}")
+        raise KeyError(f"TRACE raw-K2 safety evaluation requires synchronized K2 context fields: {missing}")
     return {key: targets[key].to(device, non_blocking=True) for key in K2_CONTEXT}
-
-
-def _slice_context(context: Mapping[str, torch.Tensor], index: int) -> dict:
-    return {key: value[index:index + 1] for key, value in context.items()}
 
 
 def _strategy(model) -> str:
@@ -394,14 +393,20 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
     return rows, figure_payload
 
 
-def _planning_seed_pass(method, model, projector, loader, device, seed,
-                        jtp_cfg, figure_meta):
+def _planning_seed_pass(method, model, loader, device, seed,
+                        vehicle_cfg, planning_safety_cfg, figure_meta):
+    """Evaluate planning metrics on the selected raw K2 trajectory, before JTP."""
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
     rows, figure_payload = [], None
     started = last_progress = time.perf_counter()
     print(f"[PLANNING METRICS] method={method} seed={seed} samples=0/{len(loader.dataset)}", flush=True)
     model.eval()
+    ttc_threshold_s = float(planning_safety_cfg.get("ttc_threshold_s", 1.0))
+    closing_speed_epsilon_mps = float(
+        planning_safety_cfg.get("closing_speed_epsilon_mps", 0.1)
+    )
+    road_tolerance_m = float(planning_safety_cfg.get("drivable_area_tolerance_m", 1e-6))
     with torch.no_grad():
         for batch_index, (features_cpu, targets_cpu, metadata) in enumerate(loader, start=1):
             features = _features_to_device(features_cpu, device)
@@ -416,7 +421,6 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
 
             selected, _ = model._select_goal_endpoint_mode(poses_all, prepared)
             sample_indices = torch.arange(controls_all.shape[0], device=device)
-            selected_controls = controls_all[sample_indices, selected]
             selected_poses = poses_all[sample_indices, selected]
             candidate_xy = poses_all[:, :, 5::5, :2]
             if candidate_xy.shape[-2:] != (8, 2):
@@ -435,16 +439,19 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                     _meta_int(meta, "ego_index"),
                 )
                 features_np = _extract_features_numpy(prepared, index)
-                context_i = _slice_context(context, index)
-                pose0 = context_i["koopman_pose0_si"][0].detach().cpu().numpy()
-                road = road_geometry_from_features(features_np, pose0)
-                nominal = selected_controls[index:index + 1].detach()
-                jtp_pre = projector.evaluate_preprojection(nominal, context_i, road)
-
-                raw_world = jtp_pre["trajectories"][0].detach().cpu().numpy()
+                pose0 = context["koopman_pose0_si"][index].detach().cpu().numpy()
                 raw_local = selected_poses[index].detach().cpu().numpy()
-                external_ok = external_collision_free(raw_local, features_np, jtp_cfg)
-                jtp_metrics = jtp_pre["metrics"]
+                raw_world = local_to_world_poses(raw_local, pose0)
+                road = road_geometry_from_features(features_np, pose0)
+
+                external_ok = external_collision_free(raw_local, features_np, vehicle_cfg)
+                external_ttc = external_min_ttc_s(
+                    raw_local, features_np, vehicle_cfg,
+                    closing_speed_epsilon_mps=closing_speed_epsilon_mps,
+                )
+                dac_pct = drivable_area_compliance(
+                    raw_world, road, vehicle_cfg, tolerance_m=road_tolerance_m
+                )
                 record = {
                     "method": method,
                     "seed": int(seed),
@@ -453,18 +460,14 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                     "ego_index": key[2],
                     "dataset_seed": _meta_int(meta, "seed", -1),
                     "planning_minade_m": float(planning_minade[index].cpu()),
-                    "jtp_constraints_feasible": bool(jtp_pre["projector_constraints_satisfied"]),
-                    "external_collision_feasible": bool(external_ok),
-                    "intertruck_collision_feasible": True,
-                    "preprojection_feasible": bool(
-                        jtp_pre["projector_constraints_satisfied"] and external_ok
-                    ),
-                    "jtp_max_violation": float(jtp_metrics.get("max_violation", float("nan"))),
-                    "jtp_violation_count_by_group": jtp_metrics.get("violation_count_by_group", {}),
-                    "projection_success": None,
-                    "projection_status": "not_run",
-                    "projection_correction_m": None,
-                    "projection_iterations": None,
+                    "external_collision_free": bool(external_ok),
+                    "external_min_ttc_s": float(external_ttc),
+                    "intertruck_collision_free": True,
+                    "intertruck_min_ttc_s": float("inf"),
+                    "collision": not bool(external_ok),
+                    "drivable_area_compliance_pct": float(dac_pct),
+                    "min_ttc_s": float(external_ttc),
+                    "ttc_compliant": bool(external_ttc >= ttc_threshold_s),
                     "_raw_world_poses": raw_world,
                 }
                 rows.append(record)
@@ -489,33 +492,42 @@ def _planning_seed_pass(method, model, projector, loader, device, seed,
                         "selected_raw_xy": raw_local_sampled,
                     }
     if not rows:
-        raise RuntimeError(f"{method} diffusion feasibility evaluation produced no samples")
+        raise RuntimeError(f"{method} diffusion planning-safety evaluation produced no samples")
     return rows, figure_payload
 
 
-def _apply_synchronized_intertruck(rows, jtp_cfg):
+def _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg):
+    """Add synchronized controlled-truck collision and TTC results to each row."""
     groups = defaultdict(list)
     for row in rows:
         key = (
             row["seed"], row["episode_index"], row["frame_index"], row["dataset_seed"]
         )
         groups[key].append(row)
-    for key, group in groups.items():
-        collision_free = (
-            intertruck_group_collision_free(
-                [{"raw_world_poses": item["_raw_world_poses"]} for item in group],
-                jtp_cfg,
-            )
-            if len(group) > 1 else True
+
+    closing_speed_epsilon_mps = float(
+        planning_safety_cfg.get("closing_speed_epsilon_mps", 0.1)
+    )
+    ttc_threshold_s = float(planning_safety_cfg.get("ttc_threshold_s", 1.0))
+    for group in groups.values():
+        records = [{"raw_world_poses": item["_raw_world_poses"]} for item in group]
+        collision_free = intertruck_group_collision_free(records, vehicle_cfg)
+        intertruck_ttc = intertruck_group_min_ttc_s(
+            records, vehicle_cfg,
+            closing_speed_epsilon_mps=closing_speed_epsilon_mps,
         )
-        for item in group:
-            item["intertruck_collision_feasible"] = bool(collision_free)
-            item["preprojection_feasible"] = bool(
-                item["jtp_constraints_feasible"]
-                and item["external_collision_feasible"]
-                and collision_free
+        for index, item in enumerate(group):
+            item["intertruck_collision_free"] = bool(collision_free)
+            item["intertruck_min_ttc_s"] = float(intertruck_ttc[index])
+            item["collision"] = bool(
+                (not item["external_collision_free"]) or (not collision_free)
             )
+            item["min_ttc_s"] = float(
+                min(item["external_min_ttc_s"], item["intertruck_min_ttc_s"])
+            )
+            item["ttc_compliant"] = bool(item["min_ttc_s"] >= ttc_threshold_s)
             item.pop("_raw_world_poses", None)
+
 
 
 def _parse_seeds(text: str) -> list[int]:
@@ -527,7 +539,7 @@ def _parse_seeds(text: str) -> list[int]:
 
 def run(args=None):
     parser = argparse.ArgumentParser(
-        description="TRACE A0/A1/A2 Adaptive Anchor Ablation (anchors / feasibility / all)"
+        description="TRACE A0/A1/A2 Adaptive Anchor Ablation (anchors / planning / all)"
     )
     parser.add_argument("--config", default="configs/evaluation/anchor_ablation.yaml")
     parser.add_argument(
@@ -537,7 +549,8 @@ def run(args=None):
     parser.add_argument("--checkpoint-a0")
     parser.add_argument("--checkpoint-a1")
     parser.add_argument("--checkpoint-a2")
-    parser.add_argument("--stage", choices=("anchors", "feasibility", "all"), default=None)
+    parser.add_argument("--stage", choices=("anchors", "feasibility", "all"), default=None,
+                        help="feasibility is the legacy stage name for the four planning metrics")
     parser.add_argument("--methods", nargs="+", choices=("A0", "A1", "A2"), default=None)
     parser.add_argument("--a0-bank", default=None)
     parser.add_argument("--a2-scorer", default=None)
@@ -558,7 +571,7 @@ def run(args=None):
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--jtp-config", default=None,
-                        help="Constraint thresholds for pre-projection feasibility; iterative projection is not run")
+                        help="Vehicle footprint and time-step config for raw-K2 CR/DAC/TTC; JTP is not invoked")
     parser.add_argument("--feasibility-config", default=None,
                         help="Deprecated alias for --jtp-config")
     parser.add_argument("--skip-feasibility", action="store_true",
@@ -641,14 +654,26 @@ def run(args=None):
     output_dir = base_output if parsed.output_dir else base_output / stage / "_".join(methods)
 
     jtp_path = None
-    jtp_cfg = None
+    vehicle_cfg = None
+    planning_safety_cfg = dict(cfg.get("planning_safety") or {})
+    planning_safety_cfg.setdefault("ttc_threshold_s", 1.0)
+    planning_safety_cfg.setdefault("closing_speed_epsilon_mps", 0.1)
+    planning_safety_cfg.setdefault("drivable_area_tolerance_m", 1e-6)
+    if float(planning_safety_cfg["ttc_threshold_s"]) <= 0:
+        parser.error("planning_safety.ttc_threshold_s must be positive")
+    if float(planning_safety_cfg["closing_speed_epsilon_mps"]) < 0:
+        parser.error("planning_safety.closing_speed_epsilon_mps must be nonnegative")
+    if float(planning_safety_cfg["drivable_area_tolerance_m"]) < 0:
+        parser.error("planning_safety.drivable_area_tolerance_m must be nonnegative")
     if stage != "anchors":
         jtp_path = resolve_repo_file(
             parsed.jtp_config or cfg.get("jtp_config", "configs/projection/jtp.yaml")
         )
         if not jtp_path.is_file():
-            raise FileNotFoundError(f"JTP config not found: {jtp_path}")
-        jtp_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
+            raise FileNotFoundError(f"Vehicle geometry config not found: {jtp_path}")
+        vehicle_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
+        if not isinstance(vehicle_cfg, dict):
+            raise ValueError("Vehicle geometry config must be a YAML mapping")
 
     if 'a1_dataset_root' in cfg:
         raise ValueError('a1_dataset_root is removed; A1 is generated online from dataset_root')
@@ -739,7 +764,7 @@ def run(args=None):
 
     anchor_rows, planning_rows = [], []
     anchor_figures, planning_figures = {}, {}
-    projector_info = {}
+    safety_info = {}
 
     for method in methods:
         model = models[method]
@@ -755,23 +780,21 @@ def run(args=None):
             anchor_figures[method] = anchor_figure
 
         if stage != "anchors":
-            print(f"[ANCHOR ABLATION] diffusion feasibility: {method}", flush=True)
-            projector = JointTrajectoryProjector(model.vehicle_model, config=jtp_path)
-            projector_info[method] = {
-                "config_path": str(jtp_path),
-                "evaluation_only": True,
-                "iterative_projection_enabled": False,
-                "constraint_families": ["stability", "road", "curvature", "control"],
-                "external_collision_evaluated_separately": True,
-                "intertruck_collision_evaluated_separately": True,
+            print(f"[ANCHOR ABLATION] raw-K2 planning safety metrics: {method}", flush=True)
+            safety_info[method] = {
+                "trajectory_source": "selected raw K2 prediction before JTP",
+                "background_actor_prediction": "constant velocity",
+                "controlled_vehicle_prediction": "synchronized raw K2 prediction",
+                "jtp_projector_invoked": False,
+                "vehicle_geometry_config": str(jtp_path),
             }
             for seed_index, seed in enumerate(seeds):
                 print(f"[ANCHOR ABLATION] planning method={method}, seed={seed}", flush=True)
                 method_rows, planning_figure = _planning_seed_pass(
-                    method, model, projector, loader, device, seed,
-                    jtp_cfg, figure_meta,
+                    method, model, loader, device, seed,
+                    vehicle_cfg, planning_safety_cfg, figure_meta,
                 )
-                _apply_synchronized_intertruck(method_rows, jtp_cfg)
+                _apply_synchronized_intertruck(method_rows, vehicle_cfg, planning_safety_cfg)
                 planning_rows.extend(method_rows)
                 if seed_index == 0:
                     if planning_figure is None:
@@ -810,7 +833,8 @@ def run(args=None):
         ])
     if stage != "anchors":
         completed_metrics.extend([
-            "planning_minade_m", "preprojection_feasibility_pct",
+            "planning_minade_m", "collision_rate_pct",
+            "drivable_area_compliance_pct", "ttc_compliance_pct",
         ])
 
     manifest = {
@@ -819,8 +843,9 @@ def run(args=None):
         "selected_methods": methods,
         "evaluation_protocol": (
             "staged: anchors computes four anchor-quality metrics on independent raw ego samples; "
-            "feasibility computes planning minADE and pre-projection feasibility on complete synchronized frames; "
-            "all computes six metrics on complete synchronized frames; iterative JTP projection is disabled"
+            "feasibility computes planning minADE, collision rate, drivable-area compliance and TTC compliance "
+            "on complete synchronized frames using the selected raw K2 trajectory before JTP; "
+            "all computes all eight paper metrics; the JTP projector is never invoked"
         ),
         "methods": {
             "A0": "Fixed anchors generated from the configured fixed control-anchor bank and kinematic rollout",
@@ -830,7 +855,7 @@ def run(args=None):
         "paper_metrics": [
             "anchor_minade_m", "safe_ratio_pct", "trajectory_diversity_m",
             "control_diversity_normalized", "planning_minade_m",
-            "preprojection_feasibility_pct", "projection_correction_m",
+            "collision_rate_pct", "drivable_area_compliance_pct", "ttc_compliance_pct",
         ],
         "completed_metrics": completed_metrics,
         "definitions": {
@@ -838,11 +863,21 @@ def run(args=None):
             "safe_ratio": f"Hard-safe anchors divided by {num_modes}, using the common A2 safety teacher's constant-velocity collision and drivable-road corridor labels",
             "trajectory_diversity": "Mean pairwise pointwise XY distance across anchor trajectories, in metres",
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
-            "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point execution trajectories",
-            "preprojection_feasibility": "JTP nominal constraints plus independent constant-velocity external-actor and synchronized inter-truck collision checks, before projection",
-            "projection_correction": "Not evaluated: iterative JTP projection is disabled; the table retains Proj. Corr. as --",
+            "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point K2 execution trajectories",
+            "collision_rate": "Percentage of selected raw K2 trajectories with at least one collision against uncontrolled actors under constant-velocity prediction or synchronized controlled trucks using their raw K2 predictions",
+            "drivable_area_compliance": "Mean percentage of future time steps for which the full multi-circle ego footprint remains inside the union of recognized drivable-lane corridors",
+            "ttc_compliance": "Percentage of selected raw K2 trajectories whose minimum predicted TTC to uncontrolled actors or synchronized controlled trucks is no less than the configured threshold",
         },
-        "jtp": projector_info,
+        "planning_safety": {
+            "trajectory_source": "selected raw K2 prediction before JTP",
+            "background_actor_prediction": "constant velocity",
+            "controlled_vehicle_prediction": "synchronized raw K2 prediction",
+            "ttc_threshold_s": float(planning_safety_cfg["ttc_threshold_s"]),
+            "closing_speed_epsilon_mps": float(planning_safety_cfg["closing_speed_epsilon_mps"]),
+            "drivable_area_tolerance_m": float(planning_safety_cfg["drivable_area_tolerance_m"]),
+            "jtp_projector_invoked": False,
+        },
+        "jtp": {"invoked": False, "role": "not used by Anchor Ablation evaluation"},
         "jtp_config": str(jtp_path) if jtp_path else None,
         "dataset": {"root": str(dataset_root), **data_manifest},
         "split": split,
@@ -864,6 +899,7 @@ def run(args=None):
         "anchor_figure_seed": figure_seed,
         "anchor_figure_selection": "Random distinct frames, prioritizing distinct episodes; independent of method scores",
         "iterative_projection_enabled": False,
+        "jtp_projector_invoked": False,
         "summary": summary,
         "device": str(device),
         "batch_size": batch_size,

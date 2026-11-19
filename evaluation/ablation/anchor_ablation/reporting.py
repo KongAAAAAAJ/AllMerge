@@ -15,8 +15,9 @@ PAPER_METRIC_KEYS = (
     "trajectory_diversity_m",
     "control_diversity_normalized",
     "planning_minade_m",
-    "preprojection_feasibility_pct",
-    "projection_correction_m",
+    "collision_rate_pct",
+    "drivable_area_compliance_pct",
+    "ttc_compliance_pct",
 )
 
 
@@ -70,9 +71,14 @@ def _mean(rows, key):
     return float(np.mean(values)) if values else None
 
 
+def _rate_pct(rows, key):
+    values = [row[key] for row in rows if key in row and row[key] is not None]
+    return 100.0 * float(np.mean([bool(value) for value in values])) if values else None
+
+
 def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
               methods: Sequence[str] = ("A0", "A1", "A2")):
-    """Summarize six metrics; projection is not run and its fields remain empty."""
+    """Summarize the four anchor-quality and four raw-K2 planning metrics."""
     output = []
     for method in methods:
         anchors = [row for row in anchor_rows if row.get("method") == method]
@@ -84,17 +90,18 @@ def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
             "trajectory_diversity_m": _mean(anchors, "trajectory_diversity_m"),
             "control_diversity_normalized": _mean(anchors, "control_diversity_normalized"),
             "planning_minade_m": _mean(plans, "planning_minade_m"),
-            "preprojection_feasibility_pct": (
-                100.0 * float(np.mean([bool(x["preprojection_feasible"]) for x in plans]))
-                if plans else None
-            ),
-            "projection_correction_m": None,
-            "projection_success_rate_pct": None,
+            "collision_rate_pct": _rate_pct(plans, "collision"),
+            "drivable_area_compliance_pct": _mean(plans, "drivable_area_compliance_pct"),
+            "ttc_compliance_pct": _rate_pct(plans, "ttc_compliant"),
+            # Diagnostics are retained in CSV/JSON, but are not paper-table columns.
+            "mean_min_ttc_s": _mean(plans, "min_ttc_s"),
+            "mean_external_min_ttc_s": _mean(plans, "external_min_ttc_s"),
             "num_anchor_scenes": len(anchors),
             "num_planning_runs": len(plans),
-            "num_projection_runs": 0,
-            "num_projection_success": 0,
-            "num_projection_failures": 0,
+            "num_collision_runs": sum(bool(x.get("collision")) for x in plans),
+            "num_ttc_noncompliant_runs": sum(
+                not bool(x.get("ttc_compliant")) for x in plans if "ttc_compliant" in x
+            ),
         }
         output.append(row)
     return output
@@ -108,12 +115,19 @@ def write_latex_table(path: Path, summary: Sequence[dict]):
         r"\caption{Adaptive Anchor Ablation Results}",
         r"\label{tab:anchor_ablation}",
         r"\renewcommand{\arraystretch}{1.15}",
-        r"\setlength{\tabcolsep}{5pt}",
-        r"\begin{tabular}{@{}lccccccc@{}}",
+        r"\setlength{\tabcolsep}{4.5pt}",
+        r"\begin{tabular}{@{}lcccccccc@{}}",
         r"\hline",
-        r" & \multicolumn{4}{c}{\textbf{Anchor Quality}} & \multicolumn{3}{c}{\textbf{Planning Performance}} \\",
-        r"\cline{2-5} \cline{6-8}",
-        r"\textbf{Method} & \shortstack{\textbf{minADE}\\(m)$\downarrow$} & \shortstack{\textbf{Safe Ratio}\\(\%)$\uparrow$} & \shortstack{\textbf{Trajectory Div.}\\(m)} & \shortstack{\textbf{Control Div.}\\($-$)} & \shortstack{\textbf{minADE}\\(m)$\downarrow$} & \shortstack{\textbf{Pre-proj. Feas.}\\(\%)$\uparrow$} & \shortstack{\textbf{Proj. Corr.}\\(m)$\downarrow$} \\",
+        r" & \multicolumn{4}{c}{\textbf{Anchor Quality}} & \multicolumn{4}{c}{\textbf{Planning Performance}} \\",
+        r"\cline{2-5} \cline{6-9}",
+        r"\textbf{Method} & \shortstack{\textbf{minADE}\\(m)$\downarrow$} & "
+        r"\shortstack{\textbf{Safe Ratio}\\(\%)$\uparrow$} & "
+        r"\shortstack{\textbf{Trajectory Div.}\\(m)$\uparrow$} & "
+        r"\shortstack{\textbf{Control Div.}\\($-$)$\uparrow$} & "
+        r"\shortstack{\textbf{minADE}\\(m)$\downarrow$} & "
+        r"\shortstack{\textbf{CR}\\(\%)$\downarrow$} & "
+        r"\shortstack{\textbf{DAC}\\(\%)$\uparrow$} & "
+        r"\shortstack{\textbf{TTC}\\(\%)$\uparrow$} \\",
         r"\hline",
     ]
     keys = PAPER_METRIC_KEYS
