@@ -99,6 +99,10 @@ def summarize(anchor_rows: Sequence[dict], planning_rows: Sequence[dict],
             "num_anchor_scenes": len(anchors),
             "num_planning_runs": len(plans),
             "num_collision_runs": sum(bool(x.get("collision")) for x in plans),
+            "num_cr_evaluated_runs": sum(x['collision'] is not None for x in plans),
+            "num_cr_excluded_runs": sum(x['collision'] is None for x in plans),
+            "num_cr_truncated_runs": sum(
+                x.get('cr_truncation_reason') == 'expert_terminal_clipping' for x in plans),
             "num_ttc_noncompliant_runs": sum(
                 not bool(x.get("ttc_compliant")) for x in plans if "ttc_compliant" in x
             ),

@@ -2,7 +2,9 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from evaluation.ablation.anchor_ablation.paper_safety import intertruck_collision_free
+from evaluation.ablation.anchor_ablation.paper_safety import (
+    expert_cr_valid_pose_count, external_collision_free, intertruck_collision_free,
+)
 from evaluation.ablation.anchor_ablation.runner import _apply_synchronized_intertruck
 from highway_env.road.lane import CircularLane, StraightLane
 from highway_env.road.road import Road, RoadNetwork
@@ -12,7 +14,7 @@ from highway_env.vehicle.planner import PolyPlanner
 def _vehicle_config():
     return {'geometry': {'footprint': {'circle_offsets_m': [-3., -1.5, 0., 1.5, 3.],
                                      'circle_radius_m': 1.45}},
-            'execution': {'dt_s': 0.1}}
+            'execution': {'dt_s': 0.1}, 'body_dimensions_m': [8., 2.6]}
 
 
 def test_collision_marks_only_involved_trucks():
@@ -23,6 +25,7 @@ def test_collision_marks_only_involved_trucks():
     assert intertruck_collision_free(records, _vehicle_config()) == [False, False, True]
     rows = [dict(method='Expert', seed=None, episode_index=1, frame_index=2,
                  dataset_seed=3, ego_index=i, external_collision_free=True,
+                 cr_valid_future_steps=40,
                  external_min_ttc_s=float('inf'), _raw_world_poses=path)
             for i, path in enumerate(paths)]
     _apply_synchronized_intertruck(rows, _vehicle_config(), {'ttc_threshold_s': 1.0})
@@ -38,6 +41,92 @@ def test_spatially_overlapping_paths_do_not_collide_at_different_times():
     second[:, 0] += 15.
     assert intertruck_collision_free([{'raw_world_poses': p} for p in (first, second)],
                                      _vehicle_config()) == [True, True]
+
+
+def test_cr_uses_zero_margin_body_rectangles_including_rotated_vehicles():
+    paths = [np.zeros((41, 3)) for _ in range(2)]
+    records = [{'raw_world_poses': p} for p in paths]
+    for x in (8.2, 8.0):  # circle/margin overlap or boundary contact, not body overlap
+        paths[1][:, 0] = x
+        assert intertruck_collision_free(records, _vehicle_config()) == [True, True]
+    paths[1][:, 0] = 7.9
+    assert intertruck_collision_free(records, _vehicle_config()) == [False, False]
+    paths[1][:] = [0., 5., np.pi / 2]
+    assert intertruck_collision_free(records, _vehicle_config()) == [False, False]
+    paths[1][:, 1] = 5.4
+    assert intertruck_collision_free(records, _vehicle_config()) == [True, True]
+
+    features = dict(ego_state=np.zeros(14), agent_states=np.zeros((1, 11)),
+                    agent_valid_mask=np.ones(1, dtype=bool))
+    features['agent_states'][0] = [6.6, 0., 0., 0., 0., 0., 0., 1., 5., 2., 0.]
+    assert external_collision_free(paths[0], features, _vehicle_config())
+    features['agent_states'][0, 0] = 6.4
+    assert not external_collision_free(paths[0], features, _vehicle_config())
+
+
+def _terminal_features():
+    geometry = np.zeros((1, 2, 9))
+    geometry[0, :, 0] = [0., 50.]
+    geometry[0, :, 7] = 4.
+    return dict(ego_state=np.zeros(14), road_lane_geometry=geometry,
+                road_lane_point_mask=np.ones((1, 2), dtype=bool),
+                road_lane_mask=np.ones(1, dtype=bool),
+                road_lane_meta=np.array([[25., 50., 0., 0., 50., 50., 0.]]))
+
+
+def test_terminal_clipping_does_not_remove_preview_ends_or_normal_stops():
+    features = _terminal_features()
+    xy = np.column_stack((np.minimum(np.arange(1, 41) * 2.5, 50.), np.zeros(40)))
+    assert expert_cr_valid_pose_count(xy, features, .1) == 20
+    features['road_lane_meta'][0, 1] = 100.  # end of preview, not actual lane
+    assert expert_cr_valid_pose_count(xy, features, .1) == 41
+    features['road_lane_meta'][0, 1] = 50.
+    xy[:, 0] = np.minimum(np.arange(1, 41) * 2.5, 30.)
+    assert expert_cr_valid_pose_count(xy, features, .1) == 41  # stop inside road
+    xy[:, 0] = 50.
+    xy[0, 0] = 49.95
+    assert expert_cr_valid_pose_count(xy, features, .1) == 41  # slow stop at end
+
+
+def test_shared_cr_window_keeps_early_collisions_and_excludes_invalid_denominator():
+    import torch
+    from torch.utils.data import DataLoader
+    from evaluation.ablation.anchor_ablation.data import collate_anchor_batch
+    from evaluation.ablation.anchor_ablation.reporting import summarize
+    from evaluation.ablation.anchor_ablation.runner import _cr_frame_windows
+
+    features = {k: torch.as_tensor(v) for k, v in _terminal_features().items()}
+    dense = torch.column_stack((torch.arange(1, 41).clamp(max=20) * 2.5, torch.zeros(40)))
+    samples = [(features, {'trajectory_dense': dense if ego == 0 else torch.zeros((40, 2))},
+                dict(episode_index=1, frame_index=2, ego_index=ego, seed=3)) for ego in range(3)]
+    loader = DataLoader(samples, batch_size=1, collate_fn=collate_anchor_batch)
+    window = _cr_frame_windows(loader, .1)[(1, 2, 3)]
+    assert window['cr_valid_future_steps'] == 19
+    assert window['cr_valid_until_s'] == 1.9 + 2.220446049250313e-16
+
+    paths = [np.zeros((41, 3)) for _ in range(3)]
+    paths[1][:, 0] = 20.
+    paths[1][20:, 0] = 1.  # only overlaps after common cutoff
+    paths[2][:, 0] = 100.
+    for method in ('A0', 'A1', 'A2', 'Expert'):
+        rows = [dict(method=method, seed=0, episode_index=1, frame_index=2,
+                     dataset_seed=3, ego_index=i, external_collision_free=True,
+                     external_min_ttc_s=float('inf'), _raw_world_poses=path, **window)
+                for i, path in enumerate(paths)]
+        _apply_synchronized_intertruck(rows, _vehicle_config(), {'ttc_threshold_s': 1.})
+        assert [r['collision'] for r in rows] == [False, False, False]
+        assert [r['ttc_compliant'] for r in rows] == [False, False, True]  # full TTC horizon retained
+    paths[1][10, 0] = 1.
+    rows = [dict(method='Expert', seed=None, episode_index=1, frame_index=2,
+                 dataset_seed=3, ego_index=i, external_collision_free=True,
+                 external_min_ttc_s=float('inf'), _raw_world_poses=path, **window)
+            for i, path in enumerate(paths)]
+    _apply_synchronized_intertruck(rows, _vehicle_config(), {'ttc_threshold_s': 1.})
+    assert [r['collision'] for r in rows] == [True, True, False]
+    rows[2].update(collision=None, cr_valid_future_steps=0)
+    summary = summarize([], rows, methods=['Expert'])[0]
+    assert summary['collision_rate_pct'] == 100.
+    assert summary['num_cr_evaluated_runs'] == 2 and summary['num_cr_excluded_runs'] == 1
 
 
 def _planner(network, route=()):

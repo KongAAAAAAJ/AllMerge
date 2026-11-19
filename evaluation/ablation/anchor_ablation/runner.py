@@ -25,6 +25,7 @@ from .paper_safety import (
     drivable_area_compliance,
     external_collision_free,
     external_min_ttc_s,
+    expert_cr_valid_pose_count,
     expert_local_poses,
     intertruck_collision_free,
     intertruck_group_min_ttc_s,
@@ -404,12 +405,41 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
     return rows, figure_payload
 
 
+def _cr_frame_windows(loader, dt):
+    """Compute one shared CR prefix per frame from raw labels, before model inference."""
+    windows = {}
+    names = ('ego_state', 'road_lane_geometry', 'road_lane_point_mask',
+             'road_lane_mask', 'road_lane_meta')
+    for features, targets, metadata in loader:
+        dense = targets['trajectory_dense'].numpy()
+        for index, meta in enumerate(metadata):
+            key = tuple(_meta_int(meta, name) for name in ('episode_index', 'frame_index', 'seed'))
+            window = windows.setdefault(key, {
+                'cr_valid_future_steps': len(dense[index]),
+                'cr_valid_until_s': len(dense[index]) * dt,
+                'cr_truncation_reason': None,
+            })
+            count = expert_cr_valid_pose_count(
+                dense[index], {name: features[name][index].numpy() for name in names}, dt)
+            steps = max(0, count - 1)
+            if count < len(dense[index]) + 1 and steps <= window['cr_valid_future_steps']:
+                window.update(cr_valid_future_steps=steps,
+                              cr_valid_until_s=steps * dt if steps else None,
+                              cr_truncation_reason='expert_terminal_clipping')
+    print(f"[CR WINDOW] frames={len(windows)} "
+          f"truncated={sum(w['cr_truncation_reason'] is not None for w in windows.values())}", flush=True)
+    return windows
+
+
 def _trajectory_safety_record(method, seed, meta, features, local_poses, pose0,
-                              planning_minade, vehicle_cfg, planning_safety_cfg):
+                              planning_minade, vehicle_cfg, planning_safety_cfg, cr_windows):
     """Common geometry and safety protocol for model and expert trajectories."""
     world = local_to_world_poses(local_poses, pose0)
     road = road_geometry_from_features(features, pose0)
-    external_ok = external_collision_free(local_poses, features, vehicle_cfg)
+    window = cr_windows[tuple(_meta_int(meta, name) for name in ('episode_index', 'frame_index', 'seed'))]
+    steps = window['cr_valid_future_steps']
+    external_ok = (external_collision_free(local_poses[:steps + 1], features, vehicle_cfg)
+                   if steps else None)
     external_ttc = external_min_ttc_s(
         local_poses, features, vehicle_cfg,
         closing_speed_epsilon_mps=float(planning_safety_cfg.get('closing_speed_epsilon_mps', 0.1)))
@@ -420,17 +450,18 @@ def _trajectory_safety_record(method, seed, meta, features, local_poses, pose0,
         'method': method, 'seed': seed,
         **{key: _meta_int(meta, key) for key in ('episode_index', 'frame_index', 'ego_index')},
         'dataset_seed': _meta_int(meta, 'seed', -1),
+        **window,
         'planning_minade_m': float(planning_minade),
-        'external_collision_free': bool(external_ok), 'external_min_ttc_s': float(external_ttc),
+        'external_collision_free': external_ok, 'external_min_ttc_s': float(external_ttc),
         'intertruck_collision_free': True, 'intertruck_min_ttc_s': float('inf'),
-        'collision': not bool(external_ok), 'drivable_area_compliance_pct': float(dac),
+        'collision': not external_ok if steps else None, 'drivable_area_compliance_pct': float(dac),
         'min_ttc_s': float(external_ttc),
         'ttc_compliant': bool(external_ttc >= float(planning_safety_cfg.get('ttc_threshold_s', 1.0))),
         '_raw_world_poses': world,
     }
 
 
-def _expert_pass(loader, vehicle_cfg, planning_safety_cfg):
+def _expert_pass(loader, vehicle_cfg, planning_safety_cfg, cr_windows):
     """Evaluate each synchronized expert scene once, independently of seeds."""
     rows = []
     for batch_index, (features, targets, metadata) in enumerate(loader, start=1):
@@ -442,7 +473,7 @@ def _expert_pass(loader, vehicle_cfg, planning_safety_cfg):
             pose0 = targets['koopman_pose0_si'][index].detach().cpu().numpy()
             rows.append(_trajectory_safety_record(
                 'Expert', None, meta, _extract_features_numpy(features, index), poses, pose0,
-                0.0, vehicle_cfg, planning_safety_cfg))
+                0.0, vehicle_cfg, planning_safety_cfg, cr_windows))
         if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(loader):
             print(f'[EXPERT METRICS] batch={batch_index}/{len(loader)} '
                   f'samples={len(rows)}/{len(loader.dataset)}', flush=True)
@@ -453,7 +484,7 @@ def _expert_pass(loader, vehicle_cfg, planning_safety_cfg):
 
 
 def _planning_seed_pass(method, model, loader, device, seed,
-                        vehicle_cfg, planning_safety_cfg, figure_meta):
+                        vehicle_cfg, planning_safety_cfg, figure_meta, cr_windows):
     """Evaluate planning metrics on the selected raw K2 trajectory, before JTP."""
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
@@ -497,7 +528,7 @@ def _planning_seed_pass(method, model, loader, device, seed,
                 raw_local = selected_poses[index].detach().cpu().numpy()
                 record = _trajectory_safety_record(
                     method, int(seed), meta, features_np, raw_local, pose0,
-                    float(planning_minade[index].cpu()), vehicle_cfg, planning_safety_cfg)
+                    float(planning_minade[index].cpu()), vehicle_cfg, planning_safety_cfg, cr_windows)
                 rows.append(record)
                 now = time.perf_counter()
                 if len(rows) == 1 or now - last_progress >= 10 or len(rows) == len(loader.dataset):
@@ -539,17 +570,21 @@ def _apply_synchronized_intertruck(rows, vehicle_cfg, planning_safety_cfg):
     ttc_threshold_s = float(planning_safety_cfg.get("ttc_threshold_s", 1.0))
     for group in groups.values():
         records = [{"raw_world_poses": item["_raw_world_poses"]} for item in group]
-        collision_free = intertruck_collision_free(records, vehicle_cfg)
+        collision_free = intertruck_collision_free([
+            {'raw_world_poses': item['_raw_world_poses'][:item['cr_valid_future_steps'] + 1]}
+            for item in group
+        ], vehicle_cfg)
         intertruck_ttc = intertruck_group_min_ttc_s(
             records, vehicle_cfg,
             closing_speed_epsilon_mps=closing_speed_epsilon_mps,
         )
         for index, item in enumerate(group):
-            item["intertruck_collision_free"] = bool(collision_free[index])
+            steps = item['cr_valid_future_steps']
+            item["intertruck_collision_free"] = bool(collision_free[index]) if steps else None
             item["intertruck_min_ttc_s"] = float(intertruck_ttc[index])
             item["collision"] = bool(
                 (not item["external_collision_free"]) or (not collision_free[index])
-            )
+            ) if steps else None
             item["min_ttc_s"] = float(
                 min(item["external_min_ttc_s"], item["intertruck_min_ttc_s"])
             )
@@ -708,6 +743,8 @@ def run(args=None):
         vehicle_cfg = yaml.safe_load(jtp_path.read_text(encoding="utf-8"))
         if not isinstance(vehicle_cfg, dict):
             raise ValueError("Vehicle geometry config must be a YAML mapping")
+        vehicle_cfg['body_dimensions_m'] = json.loads(
+            (dataset_root / 'reports/manifest.json').read_text(encoding='utf-8'))['vehicle_dimensions_m']
 
     if 'a1_dataset_root' in cfg:
         raise ValueError('a1_dataset_root is removed; A1 is generated online from dataset_root')
@@ -789,6 +826,8 @@ def run(args=None):
         data_manifest['anchor_generation'] = 'raw scenes; shared online A1AnchorBuilder; synchronized frame filter'
 
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
+    cr_windows = (_cr_frame_windows(loader, float(vehicle_cfg['execution']['dt_s']))
+                  if stage != 'anchors' else {})
     all_metadata = read_subset_metadata(subset)
     first_meta = all_metadata[0]
     figure_meta = (
@@ -841,7 +880,7 @@ def run(args=None):
                 print(f"[ANCHOR ABLATION] planning method={method}, seed={seed}", flush=True)
                 method_rows, planning_figure = _planning_seed_pass(
                     method, model, loader, device, seed,
-                    vehicle_cfg, planning_safety_cfg, figure_meta,
+                    vehicle_cfg, planning_safety_cfg, figure_meta, cr_windows,
                 )
                 _apply_synchronized_intertruck(method_rows, vehicle_cfg, planning_safety_cfg)
                 planning_rows.extend(method_rows)
@@ -855,7 +894,7 @@ def run(args=None):
     summary_methods = list(methods)
     if stage != 'anchors':
         print('[ANCHOR ABLATION] expert trajectory reference', flush=True)
-        planning_rows.extend(_expert_pass(loader, vehicle_cfg, planning_safety_cfg))
+        planning_rows.extend(_expert_pass(loader, vehicle_cfg, planning_safety_cfg, cr_windows))
         summary_methods.append('Expert')
     summary = summarize(anchor_rows, planning_rows, methods=summary_methods)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -950,7 +989,7 @@ def run(args=None):
             "trajectory_diversity": "Mean pairwise pointwise XY distance across anchor trajectories, in metres",
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
             "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point K2 execution trajectories",
-            "collision_rate": "Percentage of selected raw K2 trajectories with at least one collision against uncontrolled actors under constant-velocity prediction or synchronized controlled trucks using their raw K2 predictions",
+            "collision_rate": "Percentage of CR-eligible trajectories with zero-margin oriented body-rectangle overlap against CV background actors or synchronized controlled-truck predictions; all methods and Expert use the same prefix before the earliest expert terminal clipping in each frame; no valid future nodes means exclusion from the CR denominator",
             "drivable_area_compliance": "Mean percentage of future time steps for which the full multi-circle ego footprint remains inside the union of raw lane-edge polygons (internal lane boundaries removed)",
             "ttc_compliance": "Percentage of selected raw K2 trajectories whose minimum predicted TTC to uncontrolled actors or synchronized controlled trucks is no less than the configured threshold",
         },
@@ -958,6 +997,13 @@ def run(args=None):
             "trajectory_source": "selected raw K2 prediction before JTP",
             "background_actor_prediction": "constant velocity",
             "controlled_vehicle_prediction": "synchronized raw K2 prediction",
+            "cr_body_dimensions_m": vehicle_cfg['body_dimensions_m'] if vehicle_cfg else None,
+            "cr_rectangle_overlap_tolerance_m": 1e-6,
+            "cr_terminal_clipping_rule": "At least two repeated tail nodes (step <= 0.001 m), approach speed > 1 m/s, endpoint within 0.05 m of the actual lane-end cross-section and inside lane width; preview end must reach lane length",
+            "cr_frame_windows": [
+                dict(episode_index=key[0], frame_index=key[1], dataset_seed=key[2], **window)
+                for key, window in sorted(cr_windows.items())
+            ],
             "ttc_threshold_s": float(planning_safety_cfg["ttc_threshold_s"]),
             "closing_speed_epsilon_mps": float(planning_safety_cfg["closing_speed_epsilon_mps"]),
             "drivable_area_tolerance_m": float(planning_safety_cfg["drivable_area_tolerance_m"]),

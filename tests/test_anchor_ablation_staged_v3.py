@@ -25,6 +25,7 @@ from evaluation.ablation.anchor_ablation.runner import _filter_a1_and_sample_fra
 
 def _vehicle_cfg():
     return {
+        "body_dimensions_m": [8.0, 2.6],
         "geometry": {"footprint": {"circle_offsets_m": [-3.0, 0.0, 3.0],
                                    "circle_radius_m": 1.45}},
         "execution": {"dt_s": 0.1},
@@ -159,7 +160,8 @@ def test_expert_reference_reuses_safety_checks_and_keeps_anchor_columns_empty(tm
                                   'koopman_pose0_si': torch.tensor([float(ego), 0., 0.])},
                         {'episode_index': 3, 'frame_index': 7, 'ego_index': ego, 'seed': 12}))
     loader = DataLoader(samples, batch_size=1, collate_fn=collate_anchor_batch)
-    rows = runner._expert_pass(loader, _vehicle_cfg(), {'ttc_threshold_s': 1.0})
+    rows = runner._expert_pass(loader, _vehicle_cfg(), {'ttc_threshold_s': 1.0},
+                               runner._cr_frame_windows(loader, .1))
     assert len(rows) == 2
     assert all(row['seed'] is None for row in rows)
     assert all(row['planning_minade_m'] == 0.0 for row in rows)
@@ -187,6 +189,8 @@ def _road_features(width=8.0):
     maps[0, :, 4] = width
     maps[0, :, 6] = 1.0  # is_current_lane / recognized drivable lane
     geometry = np.zeros((1, 32, 9), dtype=np.float32)
+    geometry[0, :, 0] = maps[0, :, 0]
+    geometry[0, :, 7] = width
     geometry[0, :, 2] = maps[0, :, 0]
     geometry[0, :, 3] = width / 2
     geometry[0, :, 4] = maps[0, :, 0]
@@ -197,6 +201,7 @@ def _road_features(width=8.0):
         "road_lane_geometry": geometry,
         "road_lane_point_mask": np.ones((1, 32), dtype=bool),
         "road_lane_mask": np.asarray([True]),
+        "road_lane_meta": np.asarray([[20., 100., 0., 0., 50., 2., 0.]]),
     }
 
 
@@ -302,6 +307,7 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
     features.update({key: torch.as_tensor(value) for key, value in _road_features().items()})
     targets = {
         "trajectory": torch.zeros(8, 2),
+        "trajectory_dense": torch.column_stack((torch.arange(1, 41), torch.zeros(40))),
         "koopman_state_hist_si": torch.zeros(5, 5),
         "koopman_control_hist_si": torch.zeros(4, 2),
         "koopman_pose0_si": torch.zeros(3),
@@ -326,7 +332,8 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
         "drivable_area_tolerance_m": 1e-6,
     }
     rows, figure = runner._planning_seed_pass(
-        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, (0, 1, 0)
+        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, (0, 1, 0),
+        runner._cr_frame_windows(loader, .1),
     )
     assert [row["planning_minade_m"] for row in rows] == [2.0, 2.0]
     assert all(row["external_collision_free"] for row in rows)
