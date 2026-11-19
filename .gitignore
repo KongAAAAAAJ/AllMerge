@@ -38,3 +38,4 @@ __pycache__/
 !/tests/test_diffusion_resume.py
 !/tests/test_anchor_ablation_staged_v3.py
 !/tests/test_joint_trajectory_projection.py
+!/tests/test_anchor_multiscene_figure.py

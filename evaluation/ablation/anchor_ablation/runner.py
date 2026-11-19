@@ -20,6 +20,7 @@ from highway_env.planner.diffusion.common.execution import K2_CONTEXT
 from highway_env.planner.diffusion.config.experiment import resolve_repo_file
 
 from .data import build_complete_frame_subset, make_loader, read_subset_metadata, select_figure_samples
+from .figure_selection import sample_figure_candidates, select_safety_improvement_scenes
 from .paper_safety import (
     drivable_area_compliance,
     external_collision_free,
@@ -384,6 +385,14 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
                         "expert_xy": expert_xy[index].detach().cpu().numpy(),
                         "anchors_xy": xy[index].detach().cpu().numpy(),
                         "valid": valid[index].detach().cpu().numpy(),
+                        "hard_safe": safety['hard_safe'][index].detach().cpu().numpy(),
+                        "safety": {
+                            "valid_count": int(metrics["valid_anchor_count"][index].cpu()),
+                            "safe_count": int(metrics["safe_anchor_count"][index].cpu()),
+                            "unsafe_count": int((valid[index] & ~safety['hard_safe'][index]).sum().cpu()),
+                            "collision_unsafe_count": int(safety['collision_unsafe'][index].sum().cpu()),
+                            "road_unsafe_count": int(safety['road_unsafe'][index].sum().cpu()),
+                        },
                     }
             if batch_index == 1 or batch_index % 20 == 0 or batch_index == len(loader):
                 processed = min(batch_index * loader.batch_size, len(loader.dataset))
@@ -567,6 +576,8 @@ def run(args=None):
     parser.add_argument("--seeds", default=None, help="Comma-separated diffusion inference seeds")
     parser.add_argument("--sample-seed", type=int, default=None)
     parser.add_argument("--figure-scenes", type=int, default=None, help="Number of distinct frames in the anchor figure (default: 3)")
+    parser.add_argument("--figure-candidate-samples", type=int, default=None,
+                        help="Observed ego scenes considered for A2-versus-A1 safety advantage figures")
     parser.add_argument("--figure-seed", type=int, default=None, help="Result-independent figure sampling seed")
     parser.add_argument("--device", default=None)
     parser.add_argument("--output-dir", default=None)
@@ -640,8 +651,12 @@ def run(args=None):
     sample_seed = int(parsed.sample_seed if parsed.sample_seed is not None else cfg.get("sample_seed", 2026))
     figure_count = int(parsed.figure_scenes if parsed.figure_scenes is not None else cfg.get('figure_scenes', 3))
     figure_seed = int(parsed.figure_seed if parsed.figure_seed is not None else cfg.get('figure_seed', 2027))
+    figure_candidates = int(parsed.figure_candidate_samples if parsed.figure_candidate_samples is not None
+                            else cfg.get('figure_candidate_samples', 100))
     if figure_count < 1:
         parser.error('--figure-scenes must be positive')
+    if figure_candidates < figure_count:
+        parser.error('--figure-candidate-samples must be at least --figure-scenes')
     device_name = parsed.device or cfg.get("device", "auto")
     device = torch.device(
         "cuda" if device_name == "auto" and torch.cuda.is_available()
@@ -756,9 +771,16 @@ def run(args=None):
     )
 
     figure_metas = []
+    rank_figure_safety = 'A1' in methods and 'A2' in methods
+    figure_selection = {'strategy': 'random distinct frames', 'candidate_samples': 0}
     if stage != 'feasibility':
-        figure_metas = select_figure_samples(
-            all_metadata, count=figure_count, seed=figure_seed)
+        if rank_figure_safety:
+            figure_metas = sample_figure_candidates(
+                all_metadata, count=figure_candidates, seed=figure_seed)
+        else:
+            figure_metas = select_figure_samples(
+                all_metadata, count=figure_count, seed=figure_seed)
+        figure_selection['candidate_samples'] = len(figure_metas)
         if len(figure_metas) < figure_count:
             print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
 
@@ -807,6 +829,28 @@ def run(args=None):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if stage != "feasibility":
+        if rank_figure_safety:
+            figure_metas, ranking = select_safety_improvement_scenes(anchor_figures, count=figure_count)
+            figure_selection.update({
+                'strategy': 'A2 advantage examples: descending A1-minus-A2 unsafe anchor count; '
+                            'road then collision reduction break ties; prefer distinct episodes and unique frames',
+                'candidate_samples_requested': figure_candidates,
+                'candidate_seed': figure_seed,
+                'quantitative_sample_selection_changed': False,
+                'positive_gap_candidates': sum(row['unsafe_anchor_reduction'] > 0 for row in ranking),
+                'ranking': ranking,
+            })
+            write_json(output_dir / 'anchor_figure_selection.json', figure_selection)
+            for row in ranking:
+                if row['selected']:
+                    print(f"[ANCHOR FIGURE] episode={row['episode_index']} frame={row['frame_index']} "
+                          f"ego={row['ego_index']} unsafe A1={row['A1']['unsafe_count']} "
+                          f"A2={row['A2']['unsafe_count']} reduction={row['unsafe_anchor_reduction']}", flush=True)
+            if len(figure_metas) < figure_count:
+                print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available.', flush=True)
+            if any(row['selected'] and row['unsafe_anchor_reduction'] <= 0 for row in ranking):
+                print('[ANCHOR FIGURE] Some selected scenes do not show a positive A2 safety gap; '
+                      'increase the candidate pool or evaluation sample count for more examples.', flush=True)
         write_csv(output_dir / "anchor_quality_per_sample.csv", anchor_rows)
         draw_anchor_ablation(
             output_dir / "anchor_ablation.pdf",
@@ -897,7 +941,7 @@ def run(args=None):
         "anchor_figure_samples": [dict(episode_index=key[0], frame_index=key[1], ego_index=key[2])
                                   for key in figure_metas],
         "anchor_figure_seed": figure_seed,
-        "anchor_figure_selection": "Random distinct frames, prioritizing distinct episodes; independent of method scores",
+        "anchor_figure_selection": figure_selection,
         "iterative_projection_enabled": False,
         "jtp_projector_invoked": False,
         "summary": summary,

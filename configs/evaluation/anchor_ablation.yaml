@@ -18,10 +18,11 @@ max_samples: null
 batch_size: 128
 num_workers: 0           # Avoid spawning extra PyTorch/CUDA processes on Windows
 device: auto
-seeds: "0,1,2"
+seeds: "0"
 sample_seed: 2026
 figure_scenes: 3        # Distinct frames; rows in the anchor comparison figure
-figure_seed: 2027       # Independent of evaluation scores and inference seeds
+figure_candidate_samples: 100  # Random ego scenes from evaluated samples; rank by A2/A1 safety gap
+figure_seed: 2027       # Reproducible candidate sampling; does not change quantitative metrics
 output_dir: outputs/anchor_ablation/evaluation
 
 

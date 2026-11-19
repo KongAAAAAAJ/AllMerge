@@ -87,4 +87,7 @@ def anchor_safety_cost(features, xy, valid=None, *, collision_weight=1.0,
         col = col.masked_fill(~valid, 0.0)
         road = road.masked_fill(~valid, 0.0)
         hard_safe = hard_safe & valid
-    return {'total': total, 'collision': col, 'road': road, 'hard_safe': hard_safe}
+        col_unsafe = col_unsafe & valid
+        road_unsafe = road_unsafe & valid
+    return {'total': total, 'collision': col, 'road': road, 'hard_safe': hard_safe,
+            'collision_unsafe': col_unsafe, 'road_unsafe': road_unsafe}

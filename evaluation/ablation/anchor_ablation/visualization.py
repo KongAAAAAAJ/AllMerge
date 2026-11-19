@@ -9,6 +9,11 @@ import numpy as np
 EGO_LENGTH_M = 10.0
 EGO_WIDTH_M = 2.4
 VEHICLE_ALPHA = 0.35
+UNSAFE_ANCHOR_COLOR = '#d62728'
+UNSAFE_ANCHOR_ALPHA = 0.45
+METHOD_LABEL_POSITION = (0.025, 0.94)  # Axes fractions: left, bottom.
+METHOD_LABEL_ALPHA = 0.55
+METHOD_LABEL_COLORS = {'A0': '#EAD8C4', 'A1': '#CCDDE8', 'A2': '#D4E5D5'}
 _METHODS = (("A0", "Fixed Anchors"), ("A1", "Dynamic Anchors"), ("A2", "Ours"))
 
 
@@ -98,7 +103,7 @@ def _finish_anchor_grid(fig, grid, path, sample_label):
     panel_width = 4.05
     column_gap = 0.22
     row_gap = 0.78
-    left, right, top, bottom = 0.58, 0.12, 0.78, 0.62
+    left, right, top, bottom = 0.58, 0.12, 0.35, 0.62
     fig.canvas.draw()  # Resolve shared limits before measuring each row's aspect.
     heights = []
     for axes in grid:
@@ -130,10 +135,6 @@ def _finish_anchor_grid(fig, grid, path, sample_label):
                bbox_to_anchor=(0.5, 0.025 / height), ncol=min(6, len(unique)),
                frameon=False, fontsize=8, borderaxespad=0,
                columnspacing=1.3, handletextpad=0.5)
-    title = 'Anchor distributions across sampled highway scenes'
-    if sample_label:
-        title += f' ({sample_label})'
-    fig.suptitle(title, y=1 - 0.06 / height, fontsize=11, va='top')
     from matplotlib.text import Text
     import matplotlib
     for text in fig.findobj(Text):
@@ -151,6 +152,7 @@ def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
 
     scenes = [figure_payload] if isinstance(figure_payload, Mapping) else list(figure_payload)
     if not scenes:
@@ -171,13 +173,32 @@ def draw_anchor_ablation(path: Path, figure_payload, *, sample_label: str = "",
             _draw_scene(ax, item)
             xy = np.asarray(item["anchors_xy"])
             valid = np.asarray(item.get("valid", np.ones(len(xy), dtype=bool)), dtype=bool)
-            for index, trajectory in enumerate(xy[valid]):
+            hard_safe = np.ones(len(xy), dtype=bool)
+            if method in ('A0', 'A1'):
+                if 'hard_safe' not in item:
+                    raise ValueError(f'{method} figure requires per-anchor hard_safe labels')
+                hard_safe = np.asarray(item['hard_safe'], dtype=bool)
+                if hard_safe.shape != (len(xy),):
+                    raise ValueError(f'{method} hard_safe labels must match the anchor count')
+            colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+            seen = set()
+            for index in np.flatnonzero(valid):
+                trajectory = xy[index]
+                unsafe = not hard_safe[index]
+                legend_label = 'Unsafe anchors (A0/A1)' if unsafe else 'Anchor trajectories'
                 ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
-                        linewidth=1.0, alpha=0.68,
-                        label="Anchor trajectories" if index == 0 else None)
+                        color=UNSAFE_ANCHOR_COLOR if unsafe else colors[index % len(colors)],
+                        linestyle='--' if unsafe else '-', linewidth=1.0,
+                        alpha=UNSAFE_ANCHOR_ALPHA if unsafe else 0.68,
+                        label=legend_label if legend_label not in seen else None)
+                seen.add(legend_label)
+            ax.text(*METHOD_LABEL_POSITION, title, transform=ax.transAxes,
+                    ha='left', va='top', fontsize=9, zorder=10,
+                    bbox={'boxstyle': 'square,pad=0.30',
+                          'facecolor': to_rgba(METHOD_LABEL_COLORS[method], METHOD_LABEL_ALPHA),
+                          'edgecolor': '#555555', 'linewidth': 0.65})
             label = scene_labels[row] if scene_labels is not None else f'Scene {row + 1}'
-            ax.set_title(f'{title}\n{label if col == 0 else " "}' if row == 0
-                         else (label if col == 0 else ''), fontsize=10)
+            ax.set_title(label if col == 0 else '', fontsize=10)
             ax.tick_params(labelbottom=True)
             if col == 0:
                 ax.set_ylabel('Lateral position (m)')

@@ -107,3 +107,32 @@ rendering. The planning figure displays the selected unprojected raw K2 path.
 
 A1 is generated online from raw scenes; no precomputed A1 dataset is required.
 The default `num_workers: 0` avoids extra PyTorch/CUDA processes on Windows.
+
+## Anchor figure selection
+
+When both A1 and A2 are evaluated, `figure_candidate_samples: 100` randomly
+samples up to 100 observed ego scenes from the evaluated subset, using
+`figure_seed`. It reuses the existing anchor-quality pass; it does not run an
+additional model pass. `figure_scenes: 3` controls the final number of rows.
+Increase the candidate count with `--figure-candidate-samples 200`; the pool
+cannot exceed the number of evaluated samples.
+
+Scenes are ranked by the reduction in unsafe anchors from A1 to A2 (collision
+or road violation, counted once per anchor). Road and collision reductions
+break ties. Positive improvements are preferred, with distinct episodes and
+unique frames where possible. If too few positive examples exist, the best
+available scenes are shown and the evaluator prints a notice.
+
+These are **selected A2 advantage examples**, not a random illustration of
+overall performance. Quantitative averages still use every evaluation sample.
+`anchor_figure_selection.json` and `evaluation_manifest.json` record the
+selection rule, all candidate safety counts, ranks and selected scene IDs.
+Runs without both A1 and A2 retain random scene selection.
+
+In `anchor_ablation.pdf`, unsafe A0/A1 anchors (collision or road violation)
+use translucent red dashed lines from the same per-anchor safety labels used
+for Safe Ratio. Safe anchors and A2 curves retain their normal colors. The
+legend identifies the A0/A1 highlighting explicitly. Each subplot shows its
+method name in a rectangular label with a translucent method-specific fill.
+Style constants at the top of `visualization.py` control the unsafe-line color
+and opacity, label position in axes fractions, and label fill colors/opacity.
