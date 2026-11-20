@@ -174,7 +174,19 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
                                 if line.get_label() == 'Selected diffusion trajectory'][0]
                     assert selected.get_color() == '#d62728' and selected.get_linestyle() == ':'
                 for panel in [ax, *ax.child_axes]:
-                    assert 'Target' not in panel.get_legend_handles_labels()[1]
+                    assert 'Target point' in panel.get_legend_handles_labels()[1]
+                    target = [artist for artist in panel.collections
+                              if artist.get_label() == 'Target point']
+                    assert len(target) == 1
+                    np.testing.assert_array_equal(target[0].get_offsets(), [[30., 0.]])
+                    np.testing.assert_array_equal(target[0].get_facecolors(), [[1., 0., 0., 1.]])
+                    np.testing.assert_array_equal(target[0].get_sizes(), [24])
+                    assert target[0].get_zorder() == 8 and target[0].get_clip_on()
+                    from matplotlib.markers import MarkerStyle
+                    circle = MarkerStyle('o')
+                    np.testing.assert_array_equal(
+                        target[0].get_paths()[0].vertices,
+                        circle.get_path().transformed(circle.get_transform()).vertices)
                     expert = [line for line in panel.lines if line.get_label() == 'Expert trajectory']
                     assert len(expert) == 1 and expert[0].get_linewidth() == 0.9
                 if index % method_count == 0:

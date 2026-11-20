@@ -306,6 +306,7 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         torch.save(checkpoint, output / 'last.pt')
         if improved:
             torch.save(checkpoint, output / 'best.pt')
+        shutil.copy2(output / 'best.pt', output / f'best_through_epoch_{epoch:04d}.pt')
         _write_history(output / 'loss.csv', history)
         print(
             f'[TRACE SAFETY] epoch={epoch}/{epochs} '

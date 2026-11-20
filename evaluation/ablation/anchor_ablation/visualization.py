@@ -67,6 +67,10 @@ def _draw_scene(ax, item):
         )
         other_label_used = True
 
+    target = np.asarray(features["target_point"])
+    ax.scatter(target[0], target[1], color="red", marker="o", s=24,
+               zorder=8, label="Target point")
+
     expert = np.asarray(item["expert_xy"])
     ax.plot(np.r_[0.0, expert[:, 0]], np.r_[0.0, expert[:, 1]],
             color="#222222", linestyle="--", linewidth=EXPERT_LINEWIDTH,

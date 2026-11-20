@@ -37,3 +37,6 @@ python scripts/training/run_diffusion.py ^
 --resume 恢复模型、优化器、轮次、历史最佳验证损失和早停计数。
 --max-epochs 是总轮次上限；第 8 轮 checkpoint 会从第 9 轮继续。
 
+
+## 训练时保存每轮最佳 checkpoint 
+

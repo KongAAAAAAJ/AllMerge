@@ -219,3 +219,32 @@ def test_resume_uses_total_epoch_limit(tmp_path, monkeypatch):
             cfg, root=tmp_path / 'dataset', output_dir=output,
             max_epochs=1, max_steps=1, device='cpu', resume=output / 'last.pt',
         )
+
+
+def test_best_through_epoch_snapshots(tmp_path, monkeypatch):
+    monkeypatch.setattr(training, 'ControlDiffusionPlanner', _DummySafetyPlanner)
+    monkeypatch.setattr(training, '_make_loader', lambda *args, **kwargs: _Loader())
+    validation_losses = iter([0.5, 0.8, 0.3])
+
+    def run_pass(model, loader, optimizer, device, max_batches=None, clip_norm=1.0):
+        if optimizer is not None:
+            with torch.no_grad():
+                model.weight.add_(1.0)
+            return _metrics(1.0)
+        return _metrics(next(validation_losses))
+
+    monkeypatch.setattr(training, '_run_pass', run_pass)
+    output = tmp_path / 'snapshots'
+    training.train(_config(), root=tmp_path / 'dataset', output_dir=output,
+                   max_epochs=3, max_steps=1, device='cpu')
+    snapshots = [torch.load(output / f'best_through_epoch_{epoch:04d}.pt',
+                            map_location='cpu', weights_only=True)
+                 for epoch in (1, 2, 3)]
+    assert [saved['epoch'] for saved in snapshots] == [1, 1, 3]
+    assert [saved['best_val_loss'] for saved in snapshots] == [0.5, 0.5, 0.3]
+    assert [saved['model_state']['weight'].item() for saved in snapshots] == [2.0, 2.0, 4.0]
+    assert (output / 'best_through_epoch_0001.pt').read_bytes() == (output / 'best_through_epoch_0002.pt').read_bytes()
+    assert (output / 'best_through_epoch_0003.pt').read_bytes() == (output / 'best.pt').read_bytes()
+    latest = torch.load(output / 'last.pt', map_location='cpu', weights_only=True)
+    assert latest['epoch'] == 3
+    assert latest['model_state']['weight'].item() == 4.0

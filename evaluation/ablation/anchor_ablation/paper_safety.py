@@ -12,16 +12,56 @@ import math
 from typing import Mapping, Sequence
 
 import numpy as np
+import shapely
+from shapely.geometry.polygon import orient
 from shapely.affinity import affine_transform
 
-from highway_env.planner.road_area import road_area, road_clearance
+from highway_env.planner.road_area import road_area
 
 
 def road_geometry_from_features(features: Mapping, pose0: np.ndarray) -> dict:
-    """Build the world-frame road union from raw lane edges."""
+    """Build DAC-only road geometry with exposed sides and classified end caps.
+
+    Closed holes that vanish under 1-mm erosion are numerical seams. This
+    does not buffer the road exterior or alter shared scorer/training geometry.
+    """
+    raw = road_area(features)
+    polygons = list(raw.geoms) if raw.geom_type == "MultiPolygon" else [raw]
+    polygons = [orient(shapely.Polygon(
+        polygon.exterior,
+        [ring.coords for ring in polygon.interiors
+         if not shapely.Polygon(ring).buffer(-0.001).is_empty],
+    ), sign=1.0) for polygon in polygons]
+    area = shapely.union_all(polygons)
+    caps, cap_types = [], []
+    for lane in np.flatnonzero(features['road_lane_mask']):
+        edges = features['road_lane_geometry'][lane][features['road_lane_point_mask'][lane]]
+        meta = features['road_lane_meta'][lane]
+        for node, actual in ((edges[0], abs(float(meta[3])) <= 1e-4),
+                             (edges[-1], abs(float(meta[4] - meta[1])) <= 1e-4)):
+            caps.append(shapely.LineString([node[2:4], node[4:6]]))
+            cap_types.append('actual' if actual else 'preview')
+    starts, ends, is_cap, endpoint_types = [], [], [], []
+    for polygon in polygons:
+        for ring in (polygon.exterior, *polygon.interiors):
+            coords = np.asarray(ring.coords)
+            for first, last in zip(coords[:-1], coords[1:]):
+                segment_points = shapely.points(np.stack((first, (first + last) / 2, last)))
+                match = np.flatnonzero(np.asarray([
+                    np.all(shapely.distance(segment_points, cap) <= 1e-4) for cap in caps]))
+                starts.append(first)
+                ends.append(last)
+                is_cap.append(bool(len(match)))
+                endpoint_types.append(cap_types[int(match[0])] if len(match) else 'side')
+    starts, ends = np.asarray(starts), np.asarray(ends)
     c, s = math.cos(float(pose0[2])), math.sin(float(pose0[2]))
-    return {"area": affine_transform(
-        road_area(features), [c, -s, s, c, float(pose0[0]), float(pose0[1])])}
+    rotation = np.array([[c, -s], [s, c]])
+    transform = [c, -s, s, c, float(pose0[0]), float(pose0[1])]
+    return {'area': affine_transform(area, transform),
+            'starts': starts @ rotation.T + pose0[:2],
+            'ends': ends @ rotation.T + pose0[:2],
+            'is_cap': np.asarray(is_cap, dtype=bool),
+            'endpoint_types': endpoint_types}
 
 
 def local_to_world_poses(local_poses: np.ndarray, pose0: np.ndarray) -> np.ndarray:
@@ -238,8 +278,8 @@ def drivable_area_compliance(
     vehicle_cfg: Mapping,
     *,
     tolerance_m: float = 1e-6,
-) -> float:
-    """Percentage of future steps with the full multi-circle vehicle footprint inside drivable area."""
+) -> dict:
+    """Side-boundary DAC; unknown end-cap steps are excluded unless sides fail."""
     poses = np.asarray(world_poses, dtype=np.float64)
     if poses.ndim != 2 or poses.shape[-1] != 3 or poses.shape[0] < 2:
         raise ValueError("world_poses must be [H+1,3]")
@@ -248,9 +288,42 @@ def drivable_area_compliance(
     radius = float(footprint["circle_radius_m"])
     centers = _circle_centers(poses[1:], offsets)  # Exclude the initial state: future horizon only.
 
-    circle_inside = road_clearance(road["area"], centers) + tolerance_m >= radius
-    step_inside = circle_inside.all(axis=1)
-    return float(step_inside.mean() * 100.0)
+    # CCW exterior / CW holes place the union interior left of each segment.
+    start = road['starts']
+    segment = road['ends'] - start
+    length = np.linalg.norm(segment, axis=-1)
+    relative = centers[..., None, :] - start
+    projection = np.sum(relative * segment, axis=-1) / length**2
+    closest = start + np.clip(projection, 0.0, 1.0)[..., None] * segment
+    distance = np.linalg.norm(centers[..., None, :] - closest, axis=-1)
+    signed = (segment[:, 0] * relative[..., 1]
+              - segment[:, 1] * relative[..., 0]) / length
+    inside = shapely.covers(road['area'], shapely.points(centers))
+    nearest = distance.min(axis=-1, keepdims=True)
+    # Only local sides may constrain a circle: near its footprint, or nearest
+    # to an outside centre. Other lanes' distant half-planes do not apply.
+    local = ((distance + tolerance_m < radius)
+             | (~inside[..., None] & (distance <= nearest + tolerance_m)))
+    side_bad = (~road['is_cap'] & (projection >= 0.0) & (projection <= 1.0)
+                & (signed + tolerance_m < radius) & local).any(axis=-1)
+    # An outside centre nearest a lateral vertex is also confirmed outside.
+    # This uses the finite union boundary, not an extrapolated side tangent;
+    # a vertex shared with an end cap remains unknown unless a side projects.
+    nearest_side = (~road['is_cap'] & (distance <= nearest + tolerance_m)).any(axis=-1)
+    nearest_cap = (road['is_cap'] & (distance <= nearest + tolerance_m)).any(axis=-1)
+    side_bad |= ~inside & nearest_side & ~nearest_cap
+    cap_unknown = (road['is_cap'] & local).any(axis=-1)
+    failed = side_bad.any(axis=1)
+    excluded = cap_unknown.any(axis=1) & ~failed
+    valid_count = int((~excluded).sum())
+    failed_count = int(failed.sum())
+    return {
+        'drivable_area_compliance_pct': (
+            100.0 * (valid_count - failed_count) / valid_count if valid_count else None),
+        'dac_valid_steps': valid_count,
+        'dac_endpoint_excluded_steps': int(excluded.sum()),
+        'dac_side_failure_steps': failed_count,
+    }
 
 
 def intertruck_collision_free(records: Sequence[dict], vehicle_cfg: Mapping) -> list[bool]:

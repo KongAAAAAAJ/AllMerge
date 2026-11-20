@@ -113,6 +113,7 @@ def test_reporting_writes_exact_eight_metric_table(tmp_path):
     planning_rows = [{
         "method": "A0", "planning_minade_m": 0.9,
         "collision": True, "drivable_area_compliance_pct": 95.0,
+        "dac_valid_steps": 40, "dac_endpoint_excluded_steps": 0, "dac_side_failure_steps": 2,
         "ttc_compliant": False, "min_ttc_s": 0.8, "external_min_ttc_s": 1.2,
     }]
     summary = summarize(anchor_rows, planning_rows, methods=["A0"])
@@ -212,13 +213,13 @@ def test_drivable_area_compliance_uses_full_vehicle_footprint():
     poses_inside[:, 0] = np.linspace(0.0, 40.0, 41)
     assert drivable_area_compliance(
         poses_inside, road, _vehicle_cfg()
-    ) == 100.0
+    )["drivable_area_compliance_pct"] == 100.0
 
     poses_outside = poses_inside.copy()
     poses_outside[:, 1] = 3.0
     assert drivable_area_compliance(
         poses_outside, road, _vehicle_cfg()
-    ) == 0.0
+    )["drivable_area_compliance_pct"] == 0.0
 
 
 def test_external_collision_and_ttc_use_constant_velocity_background_actor():
@@ -327,7 +328,7 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
     monkeypatch.setattr(runner, "road_geometry_from_features", lambda *args: {})
     monkeypatch.setattr(runner, "external_collision_free", lambda *args: True)
     monkeypatch.setattr(runner, "external_min_ttc_s", lambda *args, **kwargs: 2.0)
-    monkeypatch.setattr(runner, "drivable_area_compliance", lambda *args, **kwargs: 98.0)
+    monkeypatch.setattr(runner, "drivable_area_compliance", lambda *args, **kwargs: {'drivable_area_compliance_pct': 98.0, 'dac_valid_steps': 40, 'dac_endpoint_excluded_steps': 0, 'dac_side_failure_steps': 0})
 
     cfg = _vehicle_cfg()
     safety_cfg = {

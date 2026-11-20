@@ -33,8 +33,10 @@ A1AnchorManager/A1AnchorBuilder interface.
    without valid future nodes are excluded from the CR denominator. CSV/JSON
    record the valid future steps, cutoff, clipping reason and CR sample counts.
    This clipping rule changes only CR, not minADE, DAC, TTC or Safe Ratio.
-7. **DAC (%) ↑**: mean percentage of future time steps for which the complete
-   ego vehicle footprint remains inside the union of raw lane-edge polygons. The footprint uses the configured multi-circle vehicle envelope.
+7. **DAC (%) ↑**: mean per-trajectory percentage of valid future steps without confirmed lateral
+   road-boundary violations, using the configured multi-circle vehicle envelope.
+   End-cap unknown steps are excluded unless a local side violation is confirmed.
+   Trajectories with no valid steps have no DAC value and are omitted from the mean.
 8. **TTC (%) ↑**: percentage of selected planning trajectories whose minimum
    predicted TTC to uncontrolled actors or synchronized controlled trucks
    is greater than or equal to the configured threshold. The default threshold
@@ -197,10 +199,24 @@ with `ANCHOR_INSET_OVERRIDES = {(0, 'A1'): {'bounds': (0.03, 0.08, 0.50, 0.50)}}
 Set `enabled` to `False` globally or in an override to hide insets. Insets
 reuse the plotted trajectories and safety labels without additional evaluation.
 
-Road checks use the geometric union of raw `road_lane_geometry` left/right edges,
-with the raw lane and point masks. Internal lane boundaries do not count as road
-boundaries; disconnected areas and holes remain outside. DAC requires every
-vehicle footprint circle to fit inside this union. Anchor teacher road labels
-retain center-point checks and mean squared outside distance (hard threshold
-`1e-4 m`). Shapely 2.x is required. A2 cache V5 invalidates old road labels;
-rebuild caches and retrain the scorer before using the revised teacher.
+DAC uses a separate evaluation-only copy of the raw lane-edge polygon union.
+Closed holes whose 1-mm inward buffer is empty are filled as numerical seams
+(a fixed sub-2-mm-width assumption); the exterior is never buffered and larger
+holes and disconnected areas remain. Exposed boundary segments are matched to
+raw lane end cross-sections with 0.1-mm tolerance. Both actual lane ends and
+preview truncations are unknown beyond their caps; side segments use local
+projection and signed inward distance, without extending endpoint tangents.
+Confirmed side violations take precedence over endpoint exclusion. Circle
+footprints, contact tolerance and the future time grid are unchanged.
+
+Per-sample CSV/JSON records `dac_valid_steps`, `dac_endpoint_excluded_steps`
+and `dac_side_failure_steps`; summaries include their totals. DAC remains a
+mean of per-trajectory percentages rather than a pooled time-step rate. A zero
+valid denominator is empty (`--` in the table), not 100%. Different methods may
+have different effective denominators; compare the reported counts as well.
+Old evaluation outputs require new inference to obtain revised DAC values.
+
+Shared road geometry, anchor teacher labels, training losses, CR and TTC are
+unchanged. The anchor teacher still checks centres against the original raw
+road union, including holes, with its existing hard threshold `1e-4 m`.
+Shapely 2.x is required.

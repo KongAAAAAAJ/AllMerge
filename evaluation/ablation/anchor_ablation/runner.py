@@ -214,7 +214,7 @@ def _extract_features_numpy(features: Mapping, index: int) -> dict:
     names = (
         "ego_state", "agent_states", "agent_valid_mask",
         "map_polylines", "map_valid_mask", "target_point",
-        "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
+        "road_lane_geometry", "road_lane_point_mask", "road_lane_mask", "road_lane_meta",
     )
     missing = [key for key in names if key not in features]
     if missing:
@@ -454,7 +454,7 @@ def _trajectory_safety_record(method, seed, meta, features, local_poses, pose0,
         'planning_minade_m': float(planning_minade),
         'external_collision_free': external_ok, 'external_min_ttc_s': float(external_ttc),
         'intertruck_collision_free': True, 'intertruck_min_ttc_s': float('inf'),
-        'collision': not external_ok if steps else None, 'drivable_area_compliance_pct': float(dac),
+        'collision': not external_ok if steps else None, **dac,
         'min_ttc_s': float(external_ttc),
         'ttc_compliant': bool(external_ttc >= float(planning_safety_cfg.get('ttc_threshold_s', 1.0))),
         '_raw_world_poses': world,
@@ -944,7 +944,7 @@ def run(args=None):
 
     manifest = {
         "study": "TRACE Adaptive Anchor Ablation",
-        "road_definition": "raw lane-edge polygon union; internal boundaries removed",
+        "road_definition": "raw lane-edge polygon union; DAC alone fills closed sub-2-mm seams and excludes unknown end-cap steps",
         "stage": stage,
         "selected_methods": methods,
         "expert_reference": {
@@ -980,7 +980,7 @@ def run(args=None):
             "control_diversity": "Mean pairwise pointwise control distance after channel normalization by [2.5 m/s^2, 0.08 rad]",
             "planning_minADE": "Minimum ADE over valid diffusion-generated eight-point K2 execution trajectories",
             "collision_rate": "Percentage of CR-eligible trajectories with zero-margin oriented body-rectangle overlap against CV background actors or synchronized controlled-truck predictions; all methods and Expert use the same prefix before the earliest expert terminal clipping in each frame; no valid future nodes means exclusion from the CR denominator",
-            "drivable_area_compliance": "Mean percentage of future time steps for which the full multi-circle ego footprint remains inside the union of raw lane-edge polygons (internal lane boundaries removed)",
+            "drivable_area_compliance": "Mean per-trajectory percentage of valid future steps without confirmed lateral road-boundary violations; closed seams erased by 1-mm hole erosion are filled, end-cap unknown steps excluded unless a local side violation is confirmed; zero-valid trajectories omitted",
             "ttc_compliance": "Percentage of selected raw K2 trajectories whose minimum predicted TTC to uncontrolled actors or synchronized controlled trucks is no less than the configured threshold",
         },
         "planning_safety": {
