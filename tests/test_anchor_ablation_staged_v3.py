@@ -272,6 +272,7 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
     poses = torch.zeros(2, 2, 41, 3)
     poses[:, 0, 1:, 0] = 4.0
     poses[:, 1, 1:, 0] = 2.0
+    calls = dict(prepare=0, sample=0, predict=0)
 
     class Model:
         anchors_config = {"strategy": "fixed"}
@@ -280,6 +281,7 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
             return self
 
         def _prepare_anchors(self, features):
+            calls['prepare'] += 1
             # Online A1 consumes raw geometry without returning it.
             return dict(
                 {key: value for key, value in features.items() if not key.startswith('road_')},
@@ -288,9 +290,11 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
             )
 
         def _sample_controls(self, features, generator):
+            calls['sample'] += 1
             return torch.zeros(2, 2, 40, 2)
 
         def _all_predictions(self, controls, features, context):
+            calls['predict'] += 1
             return {"poses": poses}
 
         def _select_goal_endpoint_mode(self, prediction, features):
@@ -315,8 +319,8 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
         "koopman_road_mu": torch.tensor(0.8),
     }
     loader = DataLoader(
-        [(features, targets, {"episode_index": 0, "frame_index": 1, "ego_index": i})
-         for i in range(2)],
+        [(features, targets, {"episode_index": 0, "frame_index": frame, "ego_index": i})
+         for frame in (1, 2) for i in range(2)],
         batch_size=2,
         collate_fn=collate_anchor_batch,
     )
@@ -331,16 +335,20 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
         "closing_speed_epsilon_mps": 0.1,
         "drivable_area_tolerance_m": 1e-6,
     }
-    rows, figure = runner._planning_seed_pass(
-        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, (0, 1, 0),
-        runner._cr_frame_windows(loader, .1),
+    keys = [(0, 2, 1), (0, 1, 0), (0, 2, 0)]
+    windows = runner._cr_frame_windows(loader, .1)
+    rows, figures = runner._planning_seed_pass(
+        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, keys, windows,
     )
-    assert [row["planning_minade_m"] for row in rows] == [2.0, 2.0]
+    assert set(figures) == set(keys)
+    assert calls == dict(prepare=2, sample=2, predict=2)
+    assert [row["planning_minade_m"] for row in rows] == [2.0] * 4
     assert all(row["external_collision_free"] for row in rows)
     assert all(row["drivable_area_compliance_pct"] == 98.0 for row in rows)
     assert all(row["ttc_compliant"] for row in rows)
-    assert "selected_projected_xy" not in figure
-    np.testing.assert_array_equal(figure["selected_raw_xy"], poses[0, 0, 5::5, :2])
+    for figure in figures.values():
+        assert "selected_projected_xy" not in figure
+        np.testing.assert_array_equal(figure["selected_raw_xy"], poses[0, 0, 5::5, :2])
     assert not hasattr(runner, "JointTrajectoryProjector")
 
     runner._apply_synchronized_intertruck(rows, cfg, safety_cfg)
@@ -349,3 +357,9 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
     assert all(row["collision"] for row in rows)
     assert all(row["min_ttc_s"] == 0.0 for row in rows)
     assert all(not row["ttc_compliant"] for row in rows)
+    without_figures, figures = runner._planning_seed_pass(
+        "A0", Model(), loader, "cpu", 0, cfg, safety_cfg, [], windows,
+    )
+    runner._apply_synchronized_intertruck(without_figures, cfg, safety_cfg)
+    assert figures == {} and without_figures == rows
+    assert calls == dict(prepare=4, sample=4, predict=4)

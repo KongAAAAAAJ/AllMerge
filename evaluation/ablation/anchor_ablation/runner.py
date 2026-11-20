@@ -484,11 +484,12 @@ def _expert_pass(loader, vehicle_cfg, planning_safety_cfg, cr_windows):
 
 
 def _planning_seed_pass(method, model, loader, device, seed,
-                        vehicle_cfg, planning_safety_cfg, figure_meta, cr_windows):
+                        vehicle_cfg, planning_safety_cfg, figure_metas, cr_windows):
     """Evaluate planning metrics on the selected raw K2 trajectory, before JTP."""
     generator = torch.Generator(device=device)
     generator.manual_seed(int(seed))
-    rows, figure_payload = [], None
+    rows, figure_payload = [], {}
+    figure_keys = set(figure_metas)
     started = last_progress = time.perf_counter()
     print(f"[PLANNING METRICS] method={method} seed={seed} samples=0/{len(loader.dataset)}", flush=True)
     model.eval()
@@ -539,9 +540,9 @@ def _planning_seed_pass(method, model, loader, device, seed,
                           f"elapsed={elapsed:.1f}s eta={remaining:.1f}s", flush=True)
                     last_progress = now
 
-                if figure_payload is None and key == figure_meta:
+                if key in figure_keys:
                     raw_local_sampled = raw_local[5::5, :2]
-                    figure_payload = {
+                    figure_payload[key] = {
                         "features": features_np,
                         "expert_xy": expert_xy[index].detach().cpu().numpy(),
                         "anchors_xy": prepared["coarse_trajectories"][index].detach().cpu().numpy(),
@@ -829,26 +830,17 @@ def run(args=None):
     cr_windows = (_cr_frame_windows(loader, float(vehicle_cfg['execution']['dt_s']))
                   if stage != 'anchors' else {})
     all_metadata = read_subset_metadata(subset)
-    first_meta = all_metadata[0]
-    figure_meta = (
-        _meta_int(first_meta, "episode_index"),
-        _meta_int(first_meta, "frame_index"),
-        _meta_int(first_meta, "ego_index"),
-    )
-
-    figure_metas = []
     rank_figure_safety = 'A1' in methods and 'A2' in methods
     figure_selection = {'strategy': 'random distinct frames', 'candidate_samples': 0}
-    if stage != 'feasibility':
-        if rank_figure_safety:
-            figure_metas = sample_figure_candidates(
-                all_metadata, count=figure_candidates, seed=figure_seed)
-        else:
-            figure_metas = select_figure_samples(
-                all_metadata, count=figure_count, seed=figure_seed)
-        figure_selection['candidate_samples'] = len(figure_metas)
-        if len(figure_metas) < figure_count:
-            print(f'[ANCHOR FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
+    if rank_figure_safety and stage != 'feasibility':
+        figure_metas = sample_figure_candidates(
+            all_metadata, count=figure_candidates, seed=figure_seed)
+    else:
+        figure_metas = select_figure_samples(
+            all_metadata, count=figure_count, seed=figure_seed)
+    figure_selection['candidate_samples'] = len(figure_metas)
+    if len(figure_metas) < figure_count:
+        print(f'[ABLATION FIGURE] Only {len(figure_metas)} distinct frames available; plotting all.', flush=True)
 
     anchor_rows, planning_rows = [], []
     anchor_figures, planning_figures = {}, {}
@@ -880,15 +872,12 @@ def run(args=None):
                 print(f"[ANCHOR ABLATION] planning method={method}, seed={seed}", flush=True)
                 method_rows, planning_figure = _planning_seed_pass(
                     method, model, loader, device, seed,
-                    vehicle_cfg, planning_safety_cfg, figure_meta, cr_windows,
+                    vehicle_cfg, planning_safety_cfg,
+                    figure_metas if seed_index == 0 else [], cr_windows,
                 )
                 _apply_synchronized_intertruck(method_rows, vehicle_cfg, planning_safety_cfg)
                 planning_rows.extend(method_rows)
                 if seed_index == 0:
-                    if planning_figure is None:
-                        raise RuntimeError(
-                            f"{method} did not produce the common representative planning scene"
-                        )
                     planning_figures[method] = planning_figure
 
     summary_methods = list(methods)
@@ -933,8 +922,9 @@ def run(args=None):
         write_csv(output_dir / "planning_per_sample.csv", planning_rows)
         draw_diffusion_planning(
             output_dir / "anchor_planning_ablation.pdf",
-            planning_figures,
-            sample_label=f"episode {figure_meta[0]}, frame {figure_meta[1]}, ego {figure_meta[2]}",
+            [{method: planning_figures[method][key] for method in methods} for key in figure_metas],
+            scene_labels=[f"Scene {i+1}: episode {key[0]}, frame {key[1]}, ego {key[2]}"
+                          for i, key in enumerate(figure_metas)],
         )
 
     write_csv(output_dir / "anchor_ablation_summary.csv", summary)
@@ -1021,13 +1011,12 @@ def run(args=None):
         "checkpoints": checkpoint_info,
         "anchor_sources": source_info,
         "a2_safety_teacher_config": teacher_cfg,
-        "figure_sample": {
-            "episode_index": figure_meta[0],
-            "frame_index": figure_meta[1],
-            "ego_index": figure_meta[2],
-        },
+        "planning_figure_samples": [dict(episode_index=key[0], frame_index=key[1], ego_index=key[2])
+                                    for key in figure_metas] if stage != 'anchors' else [],
+        "planning_figure_seed": figure_seed,
+        "planning_figure_inference_seed": seeds[0] if stage != 'anchors' else None,
         "anchor_figure_samples": [dict(episode_index=key[0], frame_index=key[1], ego_index=key[2])
-                                  for key in figure_metas],
+                                  for key in figure_metas] if stage != 'feasibility' else [],
         "anchor_figure_seed": figure_seed,
         "anchor_figure_selection": figure_selection,
         "iterative_projection_enabled": False,

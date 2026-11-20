@@ -14,7 +14,7 @@ from evaluation.ablation.anchor_ablation.figure_selection import (
 )
 from evaluation.ablation.anchor_ablation.runner import _anchor_pass
 from evaluation.ablation.anchor_ablation.sources import AnchorSource
-from evaluation.ablation.anchor_ablation.visualization import draw_anchor_ablation
+from evaluation.ablation.anchor_ablation.visualization import draw_anchor_ablation, draw_diffusion_planning
 
 
 def test_selects_distinct_episodes_reproducibly_without_duplicate_frames():
@@ -125,7 +125,8 @@ def test_positive_scenes_are_not_replaced_by_negative_scenes_for_episode_variety
 
 
 @pytest.mark.parametrize('method_count', [1, 2, 3])
-def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_count):
+@pytest.mark.parametrize('figure_kind', ['anchors', 'planning'])
+def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_count, figure_kind):
     item = {
         'features': {'map_polylines': np.zeros((1, 8, 10)),
                      'map_valid_mask': np.ones(1, dtype=bool),
@@ -136,6 +137,8 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
         'anchors_xy': np.zeros((10, 8, 2)), 'valid': np.ones(10, dtype=bool),
         'hard_safe': np.ones(10, dtype=bool),
     }
+    item.update(diffusion_candidates=item['anchors_xy'], diffusion_valid=item['valid'],
+                selected_raw_xy=item['expert_xy'])
     methods = ('A0', 'A1', 'A2')[:method_count]
     scenes = [{m: item for m in methods} for _ in range(3)]
     original_close = plt.close
@@ -145,6 +148,9 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
         if hasattr(fig, 'axes'):
             captured.append(len(fig.axes))
             assert len(fig.axes) == 3 * method_count
+            assert len(fig.legends) == 1 and not fig.legends[0].get_frame_on()
+            from matplotlib.text import Text
+            assert all(text.get_fontfamily() == ['Times New Roman'] for text in fig.findobj(Text))
             if method_count > 1:
                 assert fig.axes[0].get_shared_x_axes().joined(fig.axes[0], fig.axes[1])
             assert not fig.axes[0].get_shared_x_axes().joined(fig.axes[0], fig.axes[method_count])
@@ -162,6 +168,11 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
                 assert 0 < box.get_facecolor()[3] < 1
                 assert box.get_linewidth() > 0
                 assert ax.get_xlabel() == ax.get_ylabel() == ''
+                if figure_kind == 'planning':
+                    assert not ax.child_axes
+                    selected = [line for line in ax.lines
+                                if line.get_label() == 'Selected diffusion trajectory'][0]
+                    assert selected.get_color() == '#d62728' and selected.get_linestyle() == ':'
                 for panel in [ax, *ax.child_axes]:
                     assert 'Target' not in panel.get_legend_handles_labels()[1]
                     expert = [line for line in panel.lines if line.get_label() == 'Expert trajectory']
@@ -173,8 +184,9 @@ def test_grid_has_one_row_per_scene_and_one_column_per_method(tmp_path, method_c
         original_close(fig)
 
     with patch.object(plt, 'close', side_effect=check_close):
-        path = tmp_path / 'anchors.pdf'
-        draw_anchor_ablation(path, scenes, scene_labels=['Example 1', 'Example 2', 'Example 3'])
+        path = tmp_path / f'{figure_kind}.pdf'
+        draw = draw_anchor_ablation if figure_kind == 'anchors' else draw_diffusion_planning
+        draw(path, scenes, scene_labels=['Example 1', 'Example 2', 'Example 3'])
         assert path.stat().st_size > 0
     assert captured == [3 * method_count]
 

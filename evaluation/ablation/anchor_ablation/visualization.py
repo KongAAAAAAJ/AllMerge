@@ -193,28 +193,6 @@ def _method_items(payload: Mapping[str, dict]):
     return methods
 
 
-def _finish_figure(fig, axes, path: Path, sample_label: str, title: str):
-    axes[0].set_ylabel("Lateral position (m)")
-    unique = {}
-    for ax in axes:
-        handles, labels = ax.get_legend_handles_labels()
-        for handle, label in zip(handles, labels):
-            if label and label not in unique:
-                unique[label] = handle
-    if unique:
-        fig.legend(unique.values(), unique.keys(), loc="lower center",
-                   ncol=min(6, len(unique)), frameon=False, fontsize=8)
-    if sample_label:
-        fig.suptitle(f"{title} ({sample_label})")
-    else:
-        fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0.10, 1, 0.93))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, bbox_inches="tight")
-    import matplotlib.pyplot as plt
-    plt.close(fig)
-
-
 def _finish_anchor_grid(fig, grid, path, sample_label):
     """Size the canvas around equal-scale road panels, using physical inch gaps."""
     rows, cols = grid.shape
@@ -307,49 +285,47 @@ def draw_anchor_distribution(path: Path, payload: Mapping[str, dict], sample_lab
     return draw_anchor_ablation(path, payload, sample_label=sample_label)
 
 
-def draw_diffusion_planning(path: Path, figure_payload: Mapping[str, dict], *,
-                            sample_label: str = ""):
+def draw_diffusion_planning(path: Path, scenes, *, scene_labels):
+    """Compare the same scene rows and method columns as the anchor figure."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import to_rgba
 
-    methods = _method_items(figure_payload)
+    methods = _method_items(scenes[0])
     fig, grid = plt.subplots(
-        1, len(methods), figsize=(5.4 * len(methods), 5.0),
-        sharex=True, sharey=True, squeeze=False,
+        len(scenes), len(methods), figsize=(5.2 * len(methods), 3.0 * len(scenes) + 0.8),
+        sharex='row', sharey='row', squeeze=False,
     )
-    axes = grid[0]
-    for ax, (method, title) in zip(axes, methods):
-        item = figure_payload[method]
-        _draw_scene(ax, item)
+    for row, scene in enumerate(scenes):
+        for col, (method, title) in enumerate(methods):
+            ax = grid[row, col]
+            item = scene[method]
+            _draw_scene(ax, item)
 
-        anchors = np.asarray(item["anchors_xy"])
-        anchor_valid = np.asarray(item.get("valid", np.ones(len(anchors), dtype=bool)), dtype=bool)
-        first_anchor = True
-        for trajectory in anchors[anchor_valid]:
-            ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
-                    color="#4c78a8", linewidth=0.8, alpha=0.28,
-                    label="Anchors" if first_anchor else None)
-            first_anchor = False
+            anchors = np.asarray(item["anchors_xy"])
+            anchor_valid = np.asarray(item["valid"], dtype=bool)
+            for index, trajectory in enumerate(anchors[anchor_valid]):
+                ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
+                        color="#4c78a8", linewidth=0.8, alpha=0.28,
+                        label="Anchors" if index == 0 else None)
 
-        candidates = np.asarray(item["diffusion_candidates"])
-        candidate_valid = np.asarray(
-            item.get("diffusion_valid", np.ones(len(candidates), dtype=bool)), dtype=bool
-        )
-        first_candidate = True
-        for trajectory in candidates[candidate_valid]:
-            ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
-                    color="#f2a541", linewidth=0.85, alpha=0.36,
-                    label="Diffusion candidates" if first_candidate else None)
-            first_candidate = False
+            candidates = np.asarray(item["diffusion_candidates"])
+            candidate_valid = np.asarray(item["diffusion_valid"], dtype=bool)
+            for index, trajectory in enumerate(candidates[candidate_valid]):
+                ax.plot(np.r_[0.0, trajectory[:, 0]], np.r_[0.0, trajectory[:, 1]],
+                        color="#f2a541", linewidth=0.85, alpha=0.36,
+                        label="Diffusion candidates" if index == 0 else None)
 
-        raw = np.asarray(item["selected_raw_xy"])
-        ax.plot(np.r_[0.0, raw[:, 0]], np.r_[0.0, raw[:, 1]],
-                color="#d62728", linewidth=2.0, linestyle=":",
-                label="Selected diffusion trajectory", zorder=7)
-        ax.set_title(title)
+            raw = np.asarray(item["selected_raw_xy"])
+            ax.plot(np.r_[0.0, raw[:, 0]], np.r_[0.0, raw[:, 1]],
+                    color="#d62728", linewidth=2.0, linestyle=":",
+                    label="Selected diffusion trajectory", zorder=7)
+            ax.text(*METHOD_LABEL_POSITION, title, transform=ax.transAxes,
+                    ha='left', va='top', fontsize=9, zorder=10,
+                    bbox={'boxstyle': 'square,pad=0.30',
+                          'facecolor': to_rgba(METHOD_LABEL_COLORS[method], METHOD_LABEL_ALPHA),
+                          'edgecolor': '#555555', 'linewidth': 0.65})
+            ax.set_title(scene_labels[row] if col == 0 else '', fontsize=10)
 
-    _finish_figure(
-        fig, axes, path, sample_label,
-        "Anchor-conditioned diffusion planning before projection",
-    )
+    _finish_anchor_grid(fig, grid, path, '')
