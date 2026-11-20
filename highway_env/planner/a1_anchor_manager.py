@@ -110,22 +110,21 @@ class A1AnchorManager:
             raise KeyError("Online A1 generation requires ego_state")
 
         started = time.perf_counter()
-        arrays = {key: self._numpy(features[key]) for key in A1_ROAD_GEOMETRY_KEYS}
         ego = self._numpy(features["ego_state"])
-        if ego.ndim != 2 or ego.shape[1] < 1:
-            raise ValueError(f"Online A1 ego_state must be [B,D], got {ego.shape}")
         batch_size = int(ego.shape[0])
-        for key, value in arrays.items():
-            if value.shape[0] != batch_size:
-                raise ValueError(
-                    f"Online A1 road field {key} batch={value.shape[0]} != ego batch={batch_size}"
-                )
-
         built = []
-        for batch_index in range(batch_size):
-            sample = {"ego_state": ego[batch_index]}
-            sample.update({key: value[batch_index] for key, value in arrays.items()})
-            built.append(self.builder.build(sample))
+        if "a2_candidate_controls" in features:
+            from highway_env.planner.candidate_cache import CANDIDATE_KEYS
+            pools = {key: self._numpy(features[value]) for key, value in CANDIDATE_KEYS.items()}
+            for batch_index in range(batch_size):
+                pool = {key: value[batch_index] for key, value in pools.items()}
+                built.append(self.builder.select_pool(pool, ego[batch_index]))
+        else:
+            arrays = {key: self._numpy(features[key]) for key in A1_ROAD_GEOMETRY_KEYS}
+            for batch_index in range(batch_size):
+                sample = {"ego_state": ego[batch_index]}
+                sample.update({key: value[batch_index] for key, value in arrays.items()})
+                built.append(self.builder.build(sample))
 
         device = features["ego_state"].device
         dtype = features["ego_state"].dtype
@@ -150,7 +149,7 @@ class A1AnchorManager:
 
         selected = {
             key: value for key, value in features.items()
-            if key not in A1_ROAD_GEOMETRY_KEYS
+            if key not in A1_ROAD_GEOMETRY_KEYS and not key.startswith("a2_candidate_")
         }
         selected["coarse_controls"] = controls
         selected["coarse_trajectories"] = trajectories

@@ -112,6 +112,9 @@ class A1AnchorBuilder:
             map_valid_mask=map_valid,
             target_acceleration=float(ego_state[2]) if ego_state.size > 2 else 0.0,
         )
+        return self.select_pool(pool, ego_state)
+
+    def select_pool(self, pool, ego_state):
         controls = torch.from_numpy(pool["coarse_controls"][None])
         trajectories = torch.from_numpy(pool["coarse_trajectories"][None])
         valid = torch.from_numpy(pool["mode_valid_mask"][None])

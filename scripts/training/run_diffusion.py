@@ -15,6 +15,7 @@ def main(argv=None):
     parser.add_argument('--config', default='configs/train/diffusion.yaml')
     parser.add_argument('--dataset-root', default=None)
     parser.add_argument('--output-dir', default=None)
+    parser.add_argument('--anchor-cache-dir', default=None, help='Read shared A1/A2 candidate pools')
     parser.add_argument('--resume', default=None, help='Resume model, optimizer and epoch history from last.pt')
     parser.add_argument('--max-steps', type=int, default=None)
     parser.add_argument('--max-epochs', type=int, default=None)
@@ -32,7 +33,8 @@ def main(argv=None):
     print('[DIFFUSION MODE] control (40-step acceleration/steering; configurable dynamics and objectives)', flush=True)
     train(cfg, root=root, output_dir=output, max_steps=args.max_steps,
           max_epochs=args.max_epochs, limit_samples=args.limit_samples,
-          device=args.device, resume=args.resume)
+          device=args.device, resume=args.resume,
+          anchor_cache_dir=resolve_repo_file(args.anchor_cache_dir) if args.anchor_cache_dir else None)
     return 0
 
 

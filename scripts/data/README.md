@@ -39,3 +39,23 @@ python evaluation/ablation/run_anchor.py ^
   --num-workers 0
 
   --stage anchors 前四项指标      --stage feasibility Planning minADE 和 Pre-proj. Feas.      --stage all 六项指标；不执行迭代投影，Proj. Corr. 为 --
+
+
+## A1/A2 共享候选池缓存
+
+在 `all_merge` 目录执行。缓存只保存筛选前的候选池，不需要 A2 scorer：
+
+```powershell
+python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --cache-dir outputs/anchor_ablation/cache_candidates
+```
+
+默认生成 train、val；可用 `--splits train,val,test` 和 `--candidate-config` 指定划分与候选配置。目标 split 已存在时直接报错，不自动覆盖。缓存绑定原始数据、样本顺序和候选生成配置。
+
+```powershell
+# A1
+python scripts/training/run_diffusion.py --anchor-cache-dir outputs/anchor_ablation/cache_candidates
+# A2
+python scripts/training/run_diffusion.py --config configs/train/ablation/diffusion_a2_adaptive.yaml --anchor-cache-dir outputs/anchor_ablation/cache_candidates
+```
+
+不传 `--anchor-cache-dir` 即在线生成。缓存缺失或不匹配会直接报错；A1 仍执行多样性筛选，A2 仍执行 scorer 评分和 Top-R 筛选，因此缓存不会消除 A2 的评分开销。数据目录应与训练配置或 `--dataset-root` 一致。缓存不会改变模型或 checkpoint 格式。

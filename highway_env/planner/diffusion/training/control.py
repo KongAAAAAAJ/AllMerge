@@ -38,7 +38,8 @@ SAFETY_ARCHITECTURE = 'TRACE_control_diffusion_safety_v1'
 
 def unpack(batch, device):
     features, targets = batch[:2]
-    features = {key: value.to(device, non_blocking=True) for key, value in features.items()}
+    features = {key: value if key.startswith("a2_candidate_") else value.to(device, non_blocking=True)
+                for key, value in features.items()}
     context = {
         key: value.to(device, non_blocking=True)
         for key, value in targets.items()
@@ -53,12 +54,15 @@ def unpack(batch, device):
 
 
 def _make_loader(dataset_root, split, batch_size, workers, max_samples, shuffle,
-                 include_platoon_reference=False):
+                 include_platoon_reference=False, anchor_cache_dir=None, candidate_config=None):
     dataset = RawExpertDataset(
         Path(dataset_root), split=split,
         max_samples=(int(max_samples) if max_samples else None),
         include_platoon_reference=include_platoon_reference,
     )
+    if anchor_cache_dir is not None:
+        from highway_env.planner.candidate_cache import CachedCandidateDataset
+        dataset = CachedCandidateDataset(dataset, anchor_cache_dir, split, candidate_config)
     return DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle, num_workers=workers,
         pin_memory=torch.cuda.is_available(), persistent_workers=workers > 0,
@@ -155,7 +159,7 @@ def _write_history(path, history):
 
 
 def train(cfg, *, root, output_dir, train_split=None, val_split=None,
-          max_steps=None, max_epochs=None, limit_samples=0, device=None, resume=None):
+          max_steps=None, max_epochs=None, limit_samples=0, device=None, resume=None, anchor_cache_dir=None):
     if cfg.get('output_space') != 'control':
         raise ValueError('train_diffusion_control requires output_space: control')
     training_cfg = cfg['training']
@@ -205,13 +209,24 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
 
     batch_size = int(training_cfg.get('batch_size', 8))
     workers = int(training_cfg.get('num_workers', 0))
+    candidate_config = None
+    if anchor_cache_dir is not None:
+        kind = model.anchor_manager.runtime_kind
+        if kind == 'a1':
+            candidate_config = model.anchor_manager.builder.candidate_builder.resolved_config
+        elif kind == 'a2':
+            candidate_config = model.anchor_manager.builder.resolved_config
+        else:
+            raise ValueError('Candidate cache is only supported for A1/A2')
     train_loader = _make_loader(
         root, train_split or training_cfg.get('train_split', 'train'),
         batch_size, workers, limit_samples, True, include_platoon_reference=True,
+        anchor_cache_dir=anchor_cache_dir, candidate_config=candidate_config,
     )
     val_loader = _make_loader(
         root, val_split or training_cfg.get('val_split', 'val'),
         batch_size, workers, limit_samples, False, include_platoon_reference=True,
+        anchor_cache_dir=anchor_cache_dir, candidate_config=candidate_config,
     )
 
     from highway_env.planner.diffusion.common.execution import K2_CONTEXT

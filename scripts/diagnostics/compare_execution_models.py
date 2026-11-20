@@ -224,7 +224,9 @@ def main(argv=None):
     axes[0,1].set_title('Yaw response');axes[0,1].set_xlabel('Time [s]');axes[0,1].set_ylabel('Yaw [deg]')
     axes[1,0].axhline(0,color='k',linestyle='--',linewidth=.8);axes[1,0].set_title('Lateral position error vs expert');axes[1,0].set_xlabel('Time [s]');axes[1,0].set_ylabel('Lateral error [m]')
     axes[1,1].set_title('Trajectory curvature');axes[1,1].set_xlabel('Time [s]');axes[1,1].set_ylabel('Curvature [1/m]')
-    for ax in axes: ax.grid(alpha=.25);ax.legend()
+    for ax in axes.flat:
+        ax.grid(alpha=.25)
+        ax.legend()
     fig.savefig(out/'execution_comparison.png',dpi=180);plt.close(fig)
     print(json.dumps(report,indent=2,ensure_ascii=False));print(f'[DONE] {out.resolve()}')
     return 0
