@@ -10,7 +10,7 @@ python scripts\data\collect_expert_dataset.py ^
 
 构建 A0 anchor 命令：
 python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-rad 0.08 ^
---dataset-root outputs/expert_dataset/expert_trucksim_dual_50k_v3 ^
+--dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
 --output outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
 
 构建 A1 anchoor：
@@ -19,7 +19,7 @@ A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景
 训练 A2 命令：
 python scripts/data/train_a2_anchors.py ^
   --config configs/train/a2_scorer.yaml ^
-  --dataset-root outputs/expert_dataset/expert_trucksim_dual_50k_v3_straight ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 30 ^
   --output-dir outputs/anchor_ablation/ckpt/A2_anchors_straight ^
   --cache-dir outputs/anchor_ablation/cache_A2_straight
@@ -46,7 +46,7 @@ python evaluation/ablation/run_anchor.py ^
 在 `all_merge` 目录执行。缓存只保存筛选前的候选池，不需要 A2 scorer：
 
 ```powershell
-python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_dual_raw_100k_v3 --cache-dir outputs/anchor_ablation/cache_candidates
+python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k --cache-dir outputs/anchor_ablation/cache_candidates
 ```
 
 默认生成 train、val；可用 `--splits train,val,test` 和 `--candidate-config` 指定划分与候选配置。目标 split 已存在时直接报错，不自动覆盖。缓存绑定原始数据、样本顺序和候选生成配置。
