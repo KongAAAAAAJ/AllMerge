@@ -13,9 +13,9 @@ python scripts/data/build_anchor_candidate_cache.py ^
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
   --config configs/train/diffusion.yaml ^
-  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k_straight ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1_straight
 
 ## Diffusion 训练命令 A2：
 python scripts/training/run_diffusion.py ^
