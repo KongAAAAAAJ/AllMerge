@@ -1,14 +1,14 @@
 ## Diffusion 训练命令 A0：
 python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a0_fixed.yaml ^
-  --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_50k_straight ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0_straight
 
 ## A1/A2 共享候选池缓存
 python scripts/data/build_anchor_candidate_cache.py ^
---dataset-root outputs/expert_dataset/expert_trucksim_50k ^ 
---cache-dir outputs/anchor_ablation/cache_candidates
+--dataset-root outputs/expert_dataset/expert_trucksim_50k_straight ^
+--cache-dir outputs/anchor_ablation/cache_candidates_straight
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
@@ -28,7 +28,6 @@ python scripts/training/run_diffusion.py ^
 ## 从已保存的 A0 checkpoint 续训：
 python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a0_fixed.yaml ^
-  --anchor-cache-dir outputs/anchor_ablation/cache_candidates ^
   --dataset-root outputs/expert_dataset/expert_trucksim_50k ^
   --resume outputs/anchor_ablation/diffusion_ckpt/A0/last.pt ^
   --max-epochs 60 ^
