@@ -54,11 +54,11 @@ def unpack(batch, device):
 
 
 def _make_loader(dataset_root, split, batch_size, workers, max_samples, shuffle,
-                 include_platoon_reference=False, anchor_cache_dir=None, candidate_config=None):
+                 include_platoon_reference=False, anchor_cache_dir=None, candidate_config=None, trajectory_source='polynomial'):
     dataset = RawExpertDataset(
         Path(dataset_root), split=split,
         max_samples=(int(max_samples) if max_samples else None),
-        include_platoon_reference=include_platoon_reference,
+        include_platoon_reference=include_platoon_reference, trajectory_source=trajectory_source,
     )
     if anchor_cache_dir is not None:
         from highway_env.planner.candidate_cache import CachedCandidateDataset
@@ -114,6 +114,7 @@ def _restore_training_state(path, model, optimizer, cfg):
         )
 
     for key, expected in (
+        ('trajectory_source', cfg['training'].get('trajectory_source', 'polynomial')),
         ('model_config', cfg.get('model', {})),
         ('control_config', cfg.get('control', {})),
         ('execution_config', model.execution_config),
@@ -222,11 +223,13 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
         root, train_split or training_cfg.get('train_split', 'train'),
         batch_size, workers, limit_samples, True, include_platoon_reference=True,
         anchor_cache_dir=anchor_cache_dir, candidate_config=candidate_config,
+        trajectory_source=training_cfg.get("trajectory_source", "polynomial"),
     )
     val_loader = _make_loader(
         root, val_split or training_cfg.get('val_split', 'val'),
         batch_size, workers, limit_samples, False, include_platoon_reference=True,
         anchor_cache_dir=anchor_cache_dir, candidate_config=candidate_config,
+        trajectory_source=training_cfg.get("trajectory_source", "polynomial"),
     )
 
     from highway_env.planner.diffusion.common.execution import K2_CONTEXT
@@ -290,6 +293,7 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
 
         checkpoint = {
             'architecture': SAFETY_ARCHITECTURE,
+            'trajectory_source': training_cfg.get('trajectory_source', 'polynomial'),
             'model_config': cfg['model'],
             'control_config': cfg['control'],
             'execution_config': model.execution_config,

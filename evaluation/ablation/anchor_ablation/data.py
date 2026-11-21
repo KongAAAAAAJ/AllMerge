@@ -13,9 +13,10 @@ from data_pipeline.raw_expert_dataset import RawExpertDataset
 
 
 def build_complete_frame_subset(dataset_root: Path, split: str, *, num_frames: int = 0,
-                                seed: int = 2026, max_samples: int | None = None):
+                                seed: int = 2026, max_samples: int | None = None,
+                                trajectory_source: str = 'polynomial'):
     """Build a reproducible subset containing complete synchronized ego groups."""
-    ds = RawExpertDataset(dataset_root, split=split, max_samples=max_samples)
+    ds = RawExpertDataset(dataset_root, split=split, max_samples=max_samples, trajectory_source=trajectory_source)
     by_shard = defaultdict(list)
     for global_i, (shard_idx, sample_i) in enumerate(ds._index):
         by_shard[int(shard_idx)].append((global_i, int(sample_i)))

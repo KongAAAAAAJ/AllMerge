@@ -10,7 +10,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict
 
 import numpy as np
 
@@ -28,139 +27,6 @@ def _load_scenarios():
     from highway_env.envs.scenarios.merge_out_env import MergeOutEnv
     return {"straight": StraightLaneChangeEnv, "curved": CurvedLaneChangeEnv,
             "merge_in": MergeInEnv, "merge_out": MergeOutEnv}
-
-def _extract_polynomial_gt_10hz(
-    env,
-    expert_trajectory: Dict,
-    *,
-    dense_dt_s: float = 0.1,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Extract true Polynomial path at 10 Hz in the planner ego frame.
-
-    The Polynomial planner internally produces a 0.1 s path in world
-    coordinates. The supervised target stores aligned 8-point 0.5 s samples.
-    The unified dataset also preserves the original path on a fixed
-    10 Hz grid and transform it with the SAME planning origin used by
-    PlannerTrajectory.from_world_path().
-    """
-    from highway_env.planner.geometry import world_to_ego_point
-
-    sparse_time_s = np.asarray(
-        expert_trajectory["trajectory_time_s"],
-        dtype=np.float32,
-    ).reshape(-1)
-    if sparse_time_s.size == 0:
-        raise RuntimeError("Empty expert trajectory_time_s")
-
-    horizon_s = float(sparse_time_s[-1])
-    if horizon_s <= 0.0:
-        raise RuntimeError(f"Invalid expert horizon: {horizon_s}")
-    if dense_dt_s <= 0.0:
-        raise ValueError("dense_dt_s must be positive")
-
-    steps = int(round(horizon_s / float(dense_dt_s)))
-    dense_time_s = (
-        np.arange(steps + 1, dtype=np.float32)
-        * np.float32(dense_dt_s)
-    )
-    # Keep the last timestamp exactly aligned with the sparse planner horizon.
-    if not np.isclose(
-        float(dense_time_s[-1]),
-        horizon_s,
-        atol=1e-5,
-        rtol=0.0,
-    ):
-        raise RuntimeError(
-            "Planner horizon is not compatible with 10 Hz dense GT: "
-            f"horizon={horizon_s:.6f}s"
-        )
-    dense_time_s[-1] = np.float32(horizon_s)
-
-    dense_ego_xy = []
-    for ego_idx, vehicle in enumerate(env.controlled_vehicles):
-        path = getattr(vehicle, "path", None)
-        planner_trajectory = getattr(
-            vehicle,
-            "latest_planner_trajectory",
-            None,
-        )
-        if path is None or planner_trajectory is None:
-            raise RuntimeError(
-                "Polynomial dense GT unavailable for ego "
-                f"{ego_idx}: missing vehicle.path/latest_planner_trajectory"
-            )
-
-        source_time_s = np.asarray(
-            path.get("time_s"),
-            dtype=np.float32,
-        ).reshape(-1)
-        if source_time_s.size < 2:
-            raise RuntimeError(
-                f"Polynomial dense GT path too short for ego {ego_idx}"
-            )
-
-        def _scalar_path(values, name: str) -> np.ndarray:
-            values = list(values)
-            result = np.asarray(
-                [
-                    float(np.asarray(value).reshape(-1)[0])
-                    for value in values
-                ],
-                dtype=np.float32,
-            )
-            if result.shape[0] != source_time_s.shape[0]:
-                raise RuntimeError(
-                    f"Polynomial {name}/time length mismatch for ego "
-                    f"{ego_idx}: {result.shape[0]} vs {source_time_s.shape[0]}"
-                )
-            return result
-
-        world_x = _scalar_path(path["x"], "x")
-        world_y = _scalar_path(path["y"], "y")
-
-        if np.any(np.diff(source_time_s) <= 0.0):
-            raise RuntimeError(
-                f"Polynomial time grid is not strictly increasing for ego {ego_idx}"
-            )
-        if float(source_time_s[0]) > 1e-5:
-            raise RuntimeError(
-                "Polynomial path starts after t=0 for ego "
-                f"{ego_idx}: {float(source_time_s[0]):.6f}s"
-            )
-        if float(source_time_s[-1]) < horizon_s - 1e-5:
-            raise RuntimeError(
-                "Polynomial path does not cover sparse expert horizon for ego "
-                f"{ego_idx}: source_end={float(source_time_s[-1]):.6f}s, "
-                f"horizon={horizon_s:.6f}s"
-            )
-
-        dense_world_xy = np.stack(
-            [
-                np.interp(dense_time_s, source_time_s, world_x),
-                np.interp(dense_time_s, source_time_s, world_y),
-            ],
-            axis=-1,
-        ).astype(np.float32)
-
-        origin = planner_trajectory.get("ego_position_world")
-        heading = planner_trajectory.get("ego_heading_world")
-        if origin is None or heading is None:
-            raise RuntimeError(
-                "PlannerTrajectory is missing planning origin for ego "
-                f"{ego_idx}"
-            )
-
-        local_xy = world_to_ego_point(
-            dense_world_xy,
-            np.asarray(origin, dtype=np.float32),
-            float(heading),
-        ).astype(np.float32)
-        dense_ego_xy.append(local_xy)
-
-    return np.stack(dense_ego_xy, axis=0), dense_time_s
-
-
-
 
 DEFAULT_CONFIG = ROOT / "configs/data/expert_collection.yaml"
 
@@ -303,7 +169,7 @@ def main(argv=None):
     }
     env_config["Planner"] = planner_cfg
     if args.check_only:
-        print(f"[CHECK-ONLY PASS] kinematic | scenario={args.scenario} | output={args.output_dir}")
+        print(f"[CHECK-ONLY PASS] TruckSim | scenario={args.scenario} | output={args.output_dir}")
         return 0
     env = SCENARIOS[args.scenario](config=env_config, render_mode=None)
     env.reset(seed=int(args.seed))
@@ -321,6 +187,12 @@ def main(argv=None):
         )
         print(f"[TRUCKSIM] case={case['model_id']} payload={case['payload_kg']}kg mu={case['road_mu']}", flush=True)
 
+    from data_pipeline.expert_collection.trajectories import finalize_dual_samples
+    if not np.isclose(float(env.config['policy_frequency']), 10.0):
+        raise ValueError('Dual expert collection requires a 10-Hz policy grid')
+    def current_poses():
+        return np.asarray([[*v.position, v.heading] for v in env.controlled_vehicles], dtype=np.float64)
+    world_poses = [current_poses()]
     samples = []
     recorded_controls = [set() for _ in env.controlled_vehicles]
     env._expert_collection_control_windows_ready = min_control_steps == 0
@@ -332,8 +204,16 @@ def main(argv=None):
             if history is not None and history.ready():
                 pre_context = [history.at_planning_time(i, case) for i in range(len(env.controlled_vehicles))]
             _, _, terminated, truncated, info = env.step(int(args.group_action))
+            world_poses.append(current_poses())
             if history is not None:
                 history.append_executed_transition(env.controlled_vehicles)
+            # Only complete future windows count towards the termination gate.
+            mature_frame = step + 1 - 40
+            for sample in samples:
+                if int(sample['frame_index']) == mature_frame:
+                    recorded_controls[int(sample['ego_index'])].update(range(mature_frame - 4, mature_frame))
+            env._expert_collection_control_windows_ready = all(
+                longest_control_run(s) >= min_control_steps for s in recorded_controls)
             if bool(terminated) or bool(truncated):
                 exit_status = {
                     'step': step + 1, 'time_s': float(env.time),
@@ -362,30 +242,15 @@ def main(argv=None):
             if any(k in features for k in ("coarse_controls", "coarse_trajectories", "mode_valid_mask")):
                 raise RuntimeError("anchor generation was not disabled in unified expert collection")
 
-            dense_xy, dense_t = _extract_polynomial_gt_10hz(
-                env, expert_trajectory
-            )
-            expert_xy = np.asarray(
-                expert_trajectory["expert_trajectory_xy"], np.float32
-            )
             n_ego = len(env.controlled_vehicles)
-            if expert_xy.shape != (n_ego, 8, 2) or dense_xy.shape != (n_ego, 41, 2):
-                raise RuntimeError(f"unexpected expert target shapes: sparse={expert_xy.shape}, dense={dense_xy.shape}")
             for ego_i in range(n_ego):
                 sample = {}
                 for k, v in features.items():
                     sample[k] = _extract_one(v, ego_i, n_ego)
                 for k, v in road.items():
                     sample[k] = _extract_one(v, ego_i, n_ego)
-                sample["expert_trajectory_xy"] = expert_xy[ego_i].copy()
-                sample["future_trajectory_dense"] = np.asarray(
-                    expert_trajectory["future_trajectory_dense"][ego_i], np.float32
-                ).copy()  # 40 future points at 0.1 s, t=0.1..4.0
-                sample["expert_trajectory_10hz_xy"] = dense_xy[ego_i].copy()  # includes t=0
-                sample["trajectory_time_s"] = np.asarray(
-                    expert_trajectory["trajectory_time_s"], np.float32
-                ).copy()
-                sample["expert_trajectory_10hz_time_s"] = dense_t.copy()
+                sample["polynomial_future_xy"] = np.asarray(
+                    expert_trajectory["future_trajectory_dense"][ego_i], np.float32).copy()
                 sample["dense_dt"] = np.asarray(0.1, np.float32)
                 sample["trajectory_horizon_s"] = np.asarray(4.0, np.float32)
                 sample["frame_index"] = np.asarray(step, np.int32)
@@ -395,11 +260,6 @@ def main(argv=None):
                 sample["seed"] = np.asarray(args.seed, np.int32)
                 sample["scenario"] = np.asarray(args.scenario, dtype="U16")
                 sample["expert_type"] = np.asarray("Polynomial", dtype="U16")
-                vehicle = env.controlled_vehicles[ego_i]
-                sample["ego_pose_world"] = np.asarray(
-                    [float(vehicle.position[0]), float(vehicle.position[1]), float(vehicle.heading)],
-                    dtype=np.float32,
-                )
                 sample["ego_dimensions"] = np.asarray(
                     [args.ego_length_m, args.ego_width_m], dtype=np.float32
                 )
@@ -411,19 +271,15 @@ def main(argv=None):
                     sample["koopman_payload_kg"] = np.asarray(case["payload_kg"], np.float32)
                     sample["koopman_road_mu"] = np.asarray(case["road_mu"], np.float32)
                     sample["koopman_model_id"] = np.asarray(case["model_id"], dtype="U32")
-                    # Validate the complete sample: check_context also verifies
-                    # future_trajectory_dense, which is added above.
+                    # Context and Polynomial reference share the planning origin.
                     check_context(sample)
                 samples.append(sample)
-                if case is not None:
-                    recorded_controls[ego_i].update(range(step - 4, step))
-            env._expert_collection_control_windows_ready = all(
-                longest_control_run(s) >= min_control_steps for s in recorded_controls)
             if step % 10 == 0:
                 print(f"[EXPERT-COLLECT] step={step+1}/{frame_count} samples={len(samples)}", flush=True)
     finally:
         env.close()
 
+    samples = finalize_dual_samples(samples, world_poses)
     if not samples:
         raise RuntimeError("No valid pre-anchor expert samples collected; check warm-up and episode duration")
     keys = tuple(samples[0])
@@ -442,7 +298,9 @@ def main(argv=None):
         np.savez_compressed(handle, **{k: np.stack([s[k] for s in samples], axis=0) for k in keys})
     os.replace(tmp, shard)
     manifest = {
-        "schema_version": "trace_expert_preanchor_episode_v2",
+        "schema_version": "trace_expert_raw_k2_v3",
+        "trajectory_sources": ["polynomial", "trucksim_closed_loop"],
+        "execution_target": "future closed-loop execution including replanning",
         "anchor_generation": "disabled_during_collection",
         "a1_builder": "online_runtime",
         "scenario": args.scenario,

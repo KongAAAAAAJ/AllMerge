@@ -1,3 +1,4 @@
+trajectory_source: polynomial
 # TRACE paper-aligned A0/A1/A2 Anchor Ablation evaluation.
 stage: all              # anchors: 4 metrics | feasibility: 2 metrics | all: 6 metrics; no iterative projection
 methods: [A0, A1, A2]   # Select one or several methods
@@ -10,7 +11,7 @@ anchor_sources:
     max_accel_mps2: 4.0
     max_steer_rad: 0.5
   a2_scorer: outputs/anchor_ablation/ckpt/A2_anchors/best.pt
-dataset_root: outputs/expert_dataset/expert_trucksim_50k
+dataset_root: outputs/expert_dataset/expert_trucksim_dual_raw_100k_v3
 split: test
 num_frames: 20          # feasibility/all: 多少个场景帧
 num_samples: 500        # anchors: 多少个样本

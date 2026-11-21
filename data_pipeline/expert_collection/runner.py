@@ -21,14 +21,12 @@ from data_pipeline.expert_collection.trucksim import load_collection_config, phy
 PREANCHOR_REQUIRED = (
     "ego_state", "agent_states", "agent_valid_mask", "map_polylines",
     "map_valid_mask", "target_point", "target_lane_polyline",
-    "expert_trajectory_xy", "future_trajectory_dense",
-    "expert_trajectory_10hz_xy", "expert_trajectory_10hz_time_s",
-    "trajectory_time_s", "dense_dt", "trajectory_horizon_s",
+    "polynomial_future_xy", "trucksim_future_poses", "dense_dt", "trajectory_horizon_s",
     "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
     "road_lane_index", "road_lane_meta", "road_lane_line_types",
     "road_lane_connections", "road_current_lane_slot", "road_target_lane_slot",
     "road_current_lane_index", "road_target_lane_index", "road_forward_preview_m",
-    "road_backward_preview_m", "road_geometry_version", "ego_pose_world",
+    "road_backward_preview_m", "road_geometry_version",
     "ego_dimensions", "koopman_state_hist_si", "koopman_control_hist_si",
     "koopman_pose0_si", "koopman_ltr0", "koopman_payload_kg", "koopman_road_mu",
     "koopman_model_id", "koopman_vx_init_kmh", "episode_index", "frame_index",
@@ -90,9 +88,8 @@ def _validate_preanchor_episode(path: Path):
         if n <= 0:
             raise ValueError(f"{path.name}: empty episode")
         shapes = {
-            "expert_trajectory_xy": (n, 8, 2),
-            "future_trajectory_dense": (n, 40, 2),
-            "expert_trajectory_10hz_xy": (n, 41, 2),
+            "polynomial_future_xy": (n, 40, 2),
+            "trucksim_future_poses": (n, 40, 3),
             "koopman_state_hist_si": (n, 5, 5),
             "koopman_control_hist_si": (n, 4, 2),
             "koopman_pose0_si": (n, 3),
@@ -182,7 +179,10 @@ def main(args=None):
 
     # Resume only under the same sampling contract; target size and episode cap may change.
     contract_path = reports / "collection_contract.json"
-    contract = {"scenarios": args.scenarios, "cases": cases, "seed": args.start_seed,
+    contract = {"schema_version": "trace_expert_raw_k2_v3",
+                "trajectory_sources": ["polynomial", "trucksim_closed_loop"],
+                "execution_target": "future closed-loop execution including replanning",
+                "scenarios": args.scenarios, "cases": cases, "seed": args.start_seed,
                 "start_episode_index": args.start_episode_index, "duration": args.duration,
                 "group_action": args.group_action,
                 "min_contiguous_control_steps": args.min_contiguous_control_steps,
@@ -216,7 +216,7 @@ def main(args=None):
     audit_path = reports / "episode_audit.csv"
 
     if accepted < args.target_samples or len(preanchor_by_episode) < args.min_episodes:
-        _atomic_json(reports / "manifest.json", {"schema_version": "trace_expert_raw_k2_v2", "complete": False})
+        _atomic_json(reports / "manifest.json", {"schema_version": "trace_expert_raw_k2_v3", "complete": False})
 
     while (accepted < args.target_samples or len(preanchor_by_episode) < args.min_episodes) and attempts < args.max_episodes:
         episode = next_episode
@@ -271,7 +271,7 @@ def main(args=None):
         next_episode += 1
         attempts += 1
         _atomic_json(progress_path, {
-            "schema_version": "trace_expert_raw_k2_v2",
+            "schema_version": "trace_expert_raw_k2_v3",
             "next_episode_index": next_episode, "accepted_samples": accepted,
             "target_samples": args.target_samples, "preanchor_episode_count": len(preanchor_by_episode),
             "last_episode": episode,
@@ -281,8 +281,10 @@ def main(args=None):
 
     complete = accepted >= args.target_samples and len(preanchor_by_episode) >= args.min_episodes
     manifest = {
-        "schema_version": "trace_expert_raw_k2_v2",
+        "schema_version": "trace_expert_raw_k2_v3",
         "pipeline": "single_Polynomial_TruckSim_batch_collector",
+        "trajectory_sources": ["polynomial", "trucksim_closed_loop"],
+        "execution_target": "future closed-loop execution including replanning",
         "expert": "Polynomial", "plant": "TruckSim_longitudinal_lateral",
         "anchor_generation": "none; A1 generated online by consumers",
         "sample_unit": "one controlled ego at one valid 10-Hz planning frame",
@@ -293,8 +295,8 @@ def main(args=None):
         "trucksim_physical_cases": len(cases), "scenarios": args.scenarios,
         "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
         "road_geometry": args.road_geometry,
-        "trajectory": {"sparse_shape": [8, 2], "dense_future_shape": [40, 2],
-                       "visualization_shape": [41, 2], "dt_s": 0.1, "horizon_s": 4.0},
+        "trajectory": {"polynomial_future_xy": [40, 2], "trucksim_future_poses": [40, 3],
+                       "dt_s": 0.1, "horizon_s": 4.0},
         "split_ratios": contract["split_ratios"], "split_seed": args.split_seed,
         "complete": complete,
     }

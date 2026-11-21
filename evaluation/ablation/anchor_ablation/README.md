@@ -120,10 +120,11 @@ The default `num_workers: 0` avoids extra PyTorch/CUDA processes on Windows.
 `feasibility/all` also adds an **Expert trajectory** reference row to the table
 and CSV/JSON summaries. Its four anchor-quality entries are `-` in LaTeX. The
 planning minADE is zero by definition (expert reference against itself); CR,
-DAC and TTC use `future_trajectory_dense` directly, without diffusion or K2
-prediction. Because raw labels provide XY only, future headings for footprint
-checks are estimated from path tangents, retaining the last heading at stops.
-The observed initial local heading is zero.
+DAC and TTC use the YAML-selected `trajectory_source` directly, without
+diffusion or K2 prediction. `polynomial` reads `polynomial_future_xy`, with
+headings estimated from path tangents. `trucksim_closed_loop` reads
+`trucksim_future_poses`, including actual body yaw. The observed initial
+local pose is zero.
 
 Expert checks use exactly the same evaluated synchronized scenes, vehicle
 footprint, road geometry, CV background prediction and safety thresholds as
@@ -220,3 +221,17 @@ Shared road geometry, anchor teacher labels, training losses, CR and TTC are
 unchanged. The anchor teacher still checks centres against the original raw
 road union, including holes, with its existing hard threshold `1e-4 m`.
 Shapely 2.x is required.
+
+## 双轨迹数据与评估来源
+
+仅支持新格式 `trace_expert_raw_k2_v3`，不兼容旧数据。评估 YAML 顶层设置：
+
+```yaml
+trajectory_source: polynomial  # 或 trucksim_closed_loop
+```
+
+该标签统一选择 minADE 参考、专家基准和图中的专家轨迹。所加载 diffusion
+checkpoint 的训练来源必须一致；缺失或不一致直接报错。输出 manifest 记录来源。
+TruckSim 来源表示持续重规划下的实际未来 4 秒，不是固定当前规划的跟踪轨迹；
+不使用 Polynomial 的冻结尾部裁剪规则。两种来源始终使用同一组完整未来样本。
+A0 控制库和 A2 scorer 不增加来源开关；共享候选池可供新数据的两种来源共用。

@@ -1,7 +1,7 @@
 采集专家数据命令：
 python scripts\data\collect_expert_dataset.py ^
   --config configs\data\expert_collection.yaml ^
-  --dataset-name expert_trucksim_50k ^
+  --dataset-name expert_trucksim_dual_50k_v3 ^
   --target-samples 50000 ^
   --min-episodes 252 ^
   --duration 12 ^
@@ -10,7 +10,7 @@ python scripts\data\collect_expert_dataset.py ^
 
 构建 A0 anchor 命令：
 python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-rad 0.08 ^
---dataset-root outputs/expert_dataset/expert_trucksim_50k ^
+--dataset-root outputs/expert_dataset/expert_trucksim_dual_50k_v3 ^
 --output outputs/anchor_ablation/ckpt/A0_anchors/A0_control_anchors.npz
 
 构建 A1 anchoor：
@@ -19,7 +19,7 @@ A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景
 训练 A2 命令：
 python scripts/data/train_a2_anchors.py ^
   --config configs/train/a2_scorer.yaml ^
-  --dataset-root outputs/expert_dataset/expert_trucksim_50k_straight ^
+  --dataset-root outputs/expert_dataset/expert_trucksim_dual_50k_v3_straight ^
   --max-epochs 30 ^
   --output-dir outputs/anchor_ablation/ckpt/A2_anchors_straight ^
   --cache-dir outputs/anchor_ablation/cache_A2_straight
@@ -46,7 +46,7 @@ python evaluation/ablation/run_anchor.py ^
 在 `all_merge` 目录执行。缓存只保存筛选前的候选池，不需要 A2 scorer：
 
 ```powershell
-python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_k2_raw_100k --cache-dir outputs/anchor_ablation/cache_candidates
+python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_dual_raw_100k_v3 --cache-dir outputs/anchor_ablation/cache_candidates
 ```
 
 默认生成 train、val；可用 `--splits train,val,test` 和 `--candidate-config` 指定划分与候选配置。目标 split 已存在时直接报错，不自动覆盖。缓存绑定原始数据、样本顺序和候选生成配置。
@@ -61,3 +61,28 @@ python scripts/training/run_diffusion.py --config configs/train/ablation/diffusi
 不传 `--anchor-cache-dir` 即在线生成。缓存缺失或不匹配会直接报错；A1 仍执行多样性筛选，A2 仍执行 scorer 评分和 Top-R 筛选，因此缓存不会消除 A2 的评分开销。数据目录应与训练配置或 `--dataset-root` 一致。缓存不会改变模型或 checkpoint 格式。
 
 
+
+
+## 双轨迹格式 v3
+
+当前采集仍为独立 episode 进程、10 Hz 逐帧记录、episode 结束后原子写入压缩 `.npz`。
+每个有效样本同时包含 `polynomial_future_xy [40,2]`（当前规划的参考轨迹）和
+`trucksim_future_poses [40,3]`（随后闭环实际执行的位置、车身航向），两者都在
+规划时刻 `koopman_pose0_si` 的局部坐标系中。后者包含后续重规划，不能视作固定
+当前规划的单次跟踪结果。稀疏 8 点由第 5、10、…、40 步派生，不重复存储。
+
+仅支持 `trace_expert_raw_k2_v3`。旧数据不转换、不回退；需使用新数据目录重新采集。
+默认新数据集名为 `expert_trucksim_dual_raw_100k_v3`。episode 尾部不足完整 4 秒的
+样本按三车同步帧舍弃，不外推、不补点、不延长 episode；有效样本数会相应减少。
+
+训练在 `configs/train/diffusion.yaml` 的 `control.training` 下设置：
+
+```yaml
+trajectory_source: polynomial  # 或 trucksim_closed_loop
+```
+
+该选项统一切换监督目标和其他受控车的参考轨迹。评估时在
+`configs/evaluation/anchor_ablation.yaml` 顶层设置同名标签，与 checkpoint 来源保持一致。
+checkpoint 和 resolved config 记录来源；切换来源应使用新的训练输出目录启动新训练，
+不可用另一来源的 `--resume` 延续历史。已有旧 checkpoint 缺少来源时不能续训。
+同一份 v3 数据生成的共享候选池可供两种来源共用；旧数据的缓存不迁移。

@@ -21,7 +21,8 @@ control:
     inference_start_timestep: 8
     inference_noise_scale: 1.0
   training:
-    dataset_root: outputs/expert_dataset/expert_trucksim_k2_raw_100k
+    trajectory_source: polynomial
+    dataset_root: outputs/expert_dataset/expert_trucksim_dual_raw_100k_v3
     output_dir: outputs/anchor_ablation/safety_diffusion_ckpt/A1
     train_split: train
     val_split: val

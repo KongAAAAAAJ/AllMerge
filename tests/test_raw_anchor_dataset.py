@@ -19,8 +19,8 @@ def create_raw(root):
                     map_polylines=np.zeros((n,1,8,10),np.float32),
                     map_valid_mask=np.ones((n,1),bool), target_point=np.zeros((n,2),np.float32),
                     target_lane_polyline=np.zeros((n,8,10),np.float32),
-                    expert_trajectory_xy=np.zeros((n,8,2),np.float32),
-                    future_trajectory_dense=np.zeros((n,40,2),np.float32),
+                    polynomial_future_xy=np.zeros((n,40,2),np.float32),
+                    trucksim_future_poses=np.zeros((n,40,3),np.float32),
                     koopman_state_hist_si=np.zeros((n,5,5),np.float32),
                     koopman_control_hist_si=np.zeros((n,4,2),np.float32),
                     koopman_pose0_si=np.zeros((n,3),np.float32),
@@ -34,7 +34,7 @@ def create_raw(root):
         np.savez(root/'episodes'/name,**arrays)
         records.append(dict(name=name,episode_index=episode,samples=n))
     (root/'reports/manifest.json').write_text(json.dumps(dict(
-        schema_version='trace_expert_raw_k2_v2',complete=True,trajectory={'dt_s':.1},
+        schema_version='trace_expert_raw_k2_v3',complete=True,trajectory={'dt_s':.1},
         episode_files=records,split_ratios=[.8,.1,.1],split_seed=0)))
 
 

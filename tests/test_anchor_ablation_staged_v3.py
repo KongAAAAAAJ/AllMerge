@@ -158,6 +158,7 @@ def test_expert_reference_reuses_safety_checks_and_keeps_anchor_columns_empty(tm
     samples = []
     for ego in range(2):
         samples.append((features, {'trajectory_dense': dense,
+                                  'trajectory_poses': torch.from_numpy(expert_local_poses(dense.numpy())),
                                   'koopman_pose0_si': torch.tensor([float(ego), 0., 0.])},
                         {'episode_index': 3, 'frame_index': 7, 'ego_index': ego, 'seed': 12}))
     loader = DataLoader(samples, batch_size=1, collate_fn=collate_anchor_batch)

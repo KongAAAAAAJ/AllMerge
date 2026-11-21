@@ -5,6 +5,7 @@ import json
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from data_pipeline.expert_collection.trajectories import TRAJECTORY_SOURCES, expert_local_poses
 
 
 def raw_episode_paths(root: Path, split: str):
@@ -13,8 +14,8 @@ def raw_episode_paths(root: Path, split: str):
         raise ValueError("Raw split must be train, val, or test")
     manifest_path = root / 'reports/manifest.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-    if not manifest.get('complete') or manifest.get('schema_version') != 'trace_expert_raw_k2_v2':
-        raise ValueError('Expected a completed trace_expert_raw_k2_v2 dataset')
+    if not manifest.get('complete') or manifest.get('schema_version') != 'trace_expert_raw_k2_v3':
+        raise ValueError('Expected a completed trace_expert_raw_k2_v3 dataset')
     if not np.isclose(float(manifest['trajectory']['dt_s']), 0.1):
         raise ValueError('Raw A0 controls require a 0.1 s observation grid')
     records = manifest['episode_files']
@@ -73,8 +74,11 @@ class RawExpertDataset(Dataset):
 
     CONTROLLED_EGO_INDICES = (0, 1, 2)
 
-    def __init__(self, root, split='test', max_samples=None, include_platoon_reference=False):
+    def __init__(self, root, split='test', max_samples=None, include_platoon_reference=False, trajectory_source='polynomial'):
         self.shard_paths, records, self.split_manifest = raw_episode_paths(Path(root), split)
+        if trajectory_source not in TRAJECTORY_SOURCES:
+            raise ValueError(f'Unknown trajectory_source: {trajectory_source}')
+        self.trajectory_source = trajectory_source
         self.include_platoon_reference = bool(include_platoon_reference)
         self._index = []
         self._frame_rows = []
@@ -82,18 +86,18 @@ class RawExpertDataset(Dataset):
         self._cached = None
         for file_index, path in enumerate(self.shard_paths):
             with np.load(path, allow_pickle=False) as data:
-                required = (*self.FEATURE_KEYS, *self.ROAD_KEYS, *self.CONTEXT_KEYS, 'expert_trajectory_xy',
-                            'future_trajectory_dense', 'episode_index', 'frame_index', 'ego_index')
+                required = (*self.FEATURE_KEYS, *self.ROAD_KEYS, *self.CONTEXT_KEYS, 'polynomial_future_xy',
+                            'trucksim_future_poses', 'episode_index', 'frame_index', 'ego_index')
                 missing = [key for key in required if key not in data.files]
                 if missing:
                     raise ValueError(f'{path.name}: missing raw fields {missing}')
-                count = len(data['expert_trajectory_xy'])
+                count = len(data['ego_state'])
                 if count != int(records[path.name]['samples']):
                     raise ValueError(f'{path.name}: sample count differs from raw manifest')
                 if not np.all(data['episode_index'] == records[path.name]['episode_index']):
                     raise ValueError(f'{path.name}: episode ID differs from raw manifest')
-                for key, shape in (('expert_trajectory_xy', (count,8,2)),
-                                   ('future_trajectory_dense', (count,40,2)),
+                for key, shape in (('polynomial_future_xy', (count,40,2)),
+                                   ('trucksim_future_poses', (count,40,3)),
                                    ('koopman_state_hist_si', (count,5,5)),
                                    ('koopman_control_hist_si', (count,4,2))):
                     if data[key].shape != shape:
@@ -132,43 +136,27 @@ class RawExpertDataset(Dataset):
         state['_cached'] = None
         return state
 
+    def _future_poses(self, row):
+        if self.trajectory_source == 'polynomial':
+            return expert_local_poses(self._cached['polynomial_future_xy'][row]).astype(np.float32)
+        return np.concatenate((np.zeros((1, 3), np.float32),
+                               self._cached['trucksim_future_poses'][row]), axis=0)
+
     @staticmethod
     def _partner_poses_in_ego_frame(ego_pose, partner_pose, partner_future):
-        ego_pose = np.asarray(ego_pose, dtype=np.float64)
-        partner_pose = np.asarray(partner_pose, dtype=np.float64)
-        partner_future = np.asarray(partner_future, dtype=np.float64)
-        if ego_pose.shape != (3,) or partner_pose.shape != (3,) or partner_future.shape != (40, 2):
-            raise ValueError('Platoon reference pose/trajectory shapes are invalid')
-        if not (np.isfinite(ego_pose).all() and np.isfinite(partner_pose).all()
-                and np.isfinite(partner_future).all()):
-            raise ValueError('Platoon reference contains NaN/Inf')
-
-        ce, se = np.cos(ego_pose[2]), np.sin(ego_pose[2])
-        cp, sp = np.cos(partner_pose[2]), np.sin(partner_pose[2])
-        partner_world = partner_future @ np.asarray([[cp, sp], [-sp, cp]]) + partner_pose[:2]
-        world_delta = partner_world - ego_pose[:2]
-        future_ego = world_delta @ np.asarray([[ce, -se], [se, ce]])
-        initial_delta = partner_pose[:2] - ego_pose[:2]
-        initial_ego = initial_delta @ np.asarray([[ce, -se], [se, ce]])
-        full_xy = np.concatenate((initial_ego[None], future_ego), axis=0)
-        delta = np.diff(full_xy, axis=0)
-        initial_heading = np.arctan2(np.sin(partner_pose[2] - ego_pose[2]),
-                                     np.cos(partner_pose[2] - ego_pose[2]))
-        future_heading = []
-        heading = initial_heading
-        for displacement in delta:
-            if np.linalg.norm(displacement) > 1e-3:
-                heading = float(np.arctan2(displacement[1], displacement[0]))
-            future_heading.append(heading)
-        heading = np.concatenate(([initial_heading], np.asarray(future_heading)))
-        return np.concatenate((full_xy, heading[:, None]), axis=-1).astype(np.float32)
+        from data_pipeline.expert_collection.trajectories import world_poses_to_local
+        c, s = np.cos(partner_pose[2]), np.sin(partner_pose[2])
+        world = np.array(partner_future, dtype=np.float64, copy=True)
+        world[:, :2] = world[:, :2] @ np.array([[c, s], [-s, c]]) + partner_pose[:2]
+        world[:, 2] += partner_pose[2]
+        return world_poses_to_local(world, ego_pose)
 
     def __getitem__(self, index):
         file_index, row = self._index[index]
         if self._cached_index != file_index:
             with np.load(self.shard_paths[file_index], allow_pickle=False) as data:
-                names = (*self.FEATURE_KEYS, *self.ROAD_KEYS, *self.CONTEXT_KEYS, 'expert_trajectory_xy',
-                         'future_trajectory_dense', 'episode_index', 'frame_index', 'ego_index',
+                names = (*self.FEATURE_KEYS, *self.ROAD_KEYS, *self.CONTEXT_KEYS, 'polynomial_future_xy',
+                         'trucksim_future_poses', 'episode_index', 'frame_index', 'ego_index',
                          'seed', 'dense_dt', 'trajectory_horizon_s')
                 self._cached = {key: np.array(data[key], copy=True) for key in names if key in data.files}
             self._cached_index = file_index
@@ -181,8 +169,10 @@ class RawExpertDataset(Dataset):
                 value = tensor(key)
                 features[key] = (value.bool() if key.endswith('_mask') or key == 'road_lane_connections'
                                  else value.long() if key.endswith('_slot') else value.float())
-        targets = {'trajectory': tensor('expert_trajectory_xy').float(),
-                   'trajectory_dense': tensor('future_trajectory_dense').float(),
+        poses = torch.from_numpy(self._future_poses(row))
+        targets = {'trajectory': poses[5::5, :2].clone(),
+                   'trajectory_dense': poses[1:, :2].clone(),
+                   'trajectory_poses': poses,
                    **{key: tensor(key).float() for key in self.CONTEXT_KEYS}}
         if self.include_platoon_reference:
             frame = int(data['frame_index'][row])
@@ -194,7 +184,7 @@ class RawExpertDataset(Dataset):
                 self._partner_poses_in_ego_frame(
                     ego_pose,
                     data['koopman_pose0_si'][partner_row],
-                    data['future_trajectory_dense'][partner_row],
+                    self._future_poses(partner_row),
                 )
                 for partner_row in partner_rows
             ]

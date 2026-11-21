@@ -26,7 +26,6 @@ from .paper_safety import (
     external_collision_free,
     external_min_ttc_s,
     expert_cr_valid_pose_count,
-    expert_local_poses,
     intertruck_collision_free,
     intertruck_group_min_ttc_s,
     local_to_world_poses,
@@ -110,7 +109,7 @@ def _strategy(model) -> str:
 
 
 def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
-                 expected_num_modes: int | None = None):
+                 expected_num_modes: int | None = None, trajectory_source='polynomial'):
     """Load requested methods and validate shared architecture, K, and K2 weights."""
     from highway_env.planner.diffusion.training.control import load_control_checkpoint
 
@@ -123,6 +122,8 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
         if not path.is_file():
             raise FileNotFoundError(f"{method} diffusion checkpoint not found: {path}")
         model, payload = load_control_checkpoint(path, device="cpu")
+        if payload['trajectory_source'] != trajectory_source:
+            raise ValueError(f'{method} checkpoint trajectory_source differs from evaluation')
         scene_config = getattr(model, "scene_config", None)
         checkpoint_num_modes = getattr(scene_config, "num_modes", None)
         if checkpoint_num_modes is None:
@@ -186,6 +187,7 @@ def _load_models(checkpoints: Mapping[str, Path], device: torch.device,
             "sha256": _sha256(path),
             "strategy": strategy,
             "epoch": payload.get("epoch"),
+            "trajectory_source": payload["trajectory_source"],
             "k2_state_sha256": k2_hash,
             "anchors_config": payload.get("anchors_config", {}),
             "num_modes": int(checkpoint_num_modes) if checkpoint_num_modes is not None else None,
@@ -405,7 +407,7 @@ def _anchor_pass(method, model, loader, device, teacher_cfg, expected_count, fig
     return rows, figure_payload
 
 
-def _cr_frame_windows(loader, dt):
+def _cr_frame_windows(loader, dt, trajectory_source='polynomial'):
     """Compute one shared CR prefix per frame from raw labels, before model inference."""
     windows = {}
     names = ('ego_state', 'road_lane_geometry', 'road_lane_point_mask',
@@ -419,8 +421,9 @@ def _cr_frame_windows(loader, dt):
                 'cr_valid_until_s': len(dense[index]) * dt,
                 'cr_truncation_reason': None,
             })
-            count = expert_cr_valid_pose_count(
+            count = (expert_cr_valid_pose_count(
                 dense[index], {name: features[name][index].numpy() for name in names}, dt)
+                if trajectory_source == 'polynomial' else len(dense[index]) + 1)
             steps = max(0, count - 1)
             if count < len(dense[index]) + 1 and steps <= window['cr_valid_future_steps']:
                 window.update(cr_valid_future_steps=steps,
@@ -469,7 +472,7 @@ def _expert_pass(loader, vehicle_cfg, planning_safety_cfg, cr_windows):
         if dense.shape[1:] != (40, 2):
             raise ValueError('Expert reference requires 40 future XY nodes at 0.1 s')
         for index, meta in enumerate(metadata):
-            poses = expert_local_poses(dense[index])
+            poses = targets['trajectory_poses'][index].detach().cpu().numpy()
             pose0 = targets['koopman_pose0_si'][index].detach().cpu().numpy()
             rows.append(_trajectory_safety_record(
                 'Expert', None, meta, _extract_features_numpy(features, index), poses, pose0,
@@ -653,6 +656,7 @@ def run(args=None):
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(cfg, dict):
         raise ValueError("Anchor Ablation config must be a YAML mapping")
+    trajectory_source = cfg.get("trajectory_source", "polynomial")
 
     diffusion_config = (
         parsed.diffusion_config
@@ -767,7 +771,7 @@ def run(args=None):
                 scorer_path = info["scorer_path"]
     else:
         models, checkpoint_info = _load_models(
-            checkpoint_paths, device, expected_num_modes=num_modes
+            checkpoint_paths, device, expected_num_modes=num_modes, trajectory_source=trajectory_source
         )
         if parsed.a2_scorer and "A2" in models:
             from highway_env.planner.anchor_scoring.manager import AdaptiveAnchorManager
@@ -798,7 +802,7 @@ def run(args=None):
 
     if stage == "anchors":
         from data_pipeline.raw_expert_dataset import RawExpertDataset
-        raw_dataset = RawExpertDataset(dataset_root, split=split, max_samples=cfg.get("max_samples"))
+        raw_dataset = RawExpertDataset(dataset_root, split=split, max_samples=cfg.get("max_samples"), trajectory_source=trajectory_source)
         subset, data_manifest = _select_raw_sample_subset(
             raw_dataset, num_samples=anchor_num_samples, seed=sample_seed, split=split
         )
@@ -817,7 +821,7 @@ def run(args=None):
     else:
         subset, data_manifest = build_complete_frame_subset(
             dataset_root, split, num_frames=0 if 'A1' in methods else num_frames,
-            seed=sample_seed, max_samples=cfg.get('max_samples'))
+            seed=sample_seed, max_samples=cfg.get('max_samples'), trajectory_source=trajectory_source)
         if 'A1' in methods:
             subset, a1_manifest = _filter_a1_and_sample_frames(
                 subset, expected_anchor_count=num_modes, num_frames=num_frames, seed=sample_seed,
@@ -827,7 +831,7 @@ def run(args=None):
         data_manifest['anchor_generation'] = 'raw scenes; shared online A1AnchorBuilder; synchronized frame filter'
 
     loader = make_loader(subset, batch_size=batch_size, num_workers=workers)
-    cr_windows = (_cr_frame_windows(loader, float(vehicle_cfg['execution']['dt_s']))
+    cr_windows = (_cr_frame_windows(loader, float(vehicle_cfg['execution']['dt_s']), trajectory_source)
                   if stage != 'anchors' else {})
     all_metadata = read_subset_metadata(subset)
     rank_figure_safety = 'A1' in methods and 'A2' in methods
@@ -944,13 +948,14 @@ def run(args=None):
 
     manifest = {
         "study": "TRACE Adaptive Anchor Ablation",
+        "trajectory_source": trajectory_source,
         "road_definition": "raw lane-edge polygon union; DAC alone fills closed sub-2-mm seams and excludes unknown end-cap steps",
         "stage": stage,
         "selected_methods": methods,
         "expert_reference": {
             "evaluated": stage != 'anchors',
-            "trajectory_source": "raw future_trajectory_dense; no K2 or diffusion inference",
-            "heading_source": "path tangent; observed initial local yaw is zero",
+            "trajectory_source": trajectory_source,
+            "heading_source": "Polynomial path tangent" if trajectory_source == "polynomial" else "TruckSim body yaw",
             "planning_minade_definition": "zero by definition: expert reference compared with itself",
             "seed_independent": True,
             "sampling": "same synchronized scenes as model planning metrics; each scene evaluated once",

@@ -262,7 +262,7 @@ def check_context(sample: dict):
     assert np.asarray(sample['koopman_state_hist_si']).shape == (5, 5)
     assert np.asarray(sample['koopman_control_hist_si']).shape == (4, 2)
     assert np.asarray(sample['koopman_pose0_si']).shape == (3,)
-    assert np.asarray(sample['future_trajectory_dense']).shape == (40, 2)
+    assert np.asarray(sample['polynomial_future_xy']).shape == (40, 2)
     for field in ('koopman_state_hist_si', 'koopman_control_hist_si',
                   'koopman_pose0_si', 'koopman_ltr0', 'koopman_payload_kg', 'koopman_road_mu'):
         if not np.isfinite(np.asarray(sample[field], dtype=float)).all():

@@ -16,6 +16,7 @@ import shapely
 from shapely.geometry.polygon import orient
 from shapely.affinity import affine_transform
 
+from data_pipeline.expert_collection.trajectories import expert_local_poses
 from highway_env.planner.road_area import road_area
 
 
@@ -78,24 +79,6 @@ def local_to_world_poses(local_poses: np.ndarray, pose0: np.ndarray) -> np.ndarr
     return world
 
 
-def expert_local_poses(future_xy: np.ndarray) -> np.ndarray:
-    """Prepend the observed origin and estimate future yaw from path tangents.
-
-    Raw expert labels contain XY rather than body yaw. The initial local yaw
-    is zero; stationary future nodes retain the preceding tangent heading.
-    """
-    xy = np.asarray(future_xy, dtype=np.float64)
-    if xy.ndim != 2 or xy.shape[1] != 2 or len(xy) < 1 or not np.isfinite(xy).all():
-        raise ValueError('Expert future trajectory must be finite [H,2] XY points')
-    poses = np.zeros((len(xy) + 1, 3), dtype=np.float64)
-    poses[1:, :2] = xy
-    tangent = np.gradient(poses[:, :2], axis=0)
-    for index in range(1, len(poses)):
-        if np.linalg.norm(tangent[index]) > 1e-8:
-            poses[index, 2] = math.atan2(tangent[index, 1], tangent[index, 0])
-        else:
-            poses[index, 2] = poses[index - 1, 2]
-    return poses
 
 
 def expert_cr_valid_pose_count(future_xy: np.ndarray, features: Mapping, dt: float) -> int:
