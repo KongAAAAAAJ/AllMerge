@@ -1,12 +1,12 @@
-采集专家数据命令：
+采集专家数据命令（新）：
 python scripts\data\collect_expert_dataset.py ^
   --config configs\data\expert_collection.yaml ^
-  --dataset-name expert_trucksim_dual_50k_v3 ^
-  --target-samples 50000 ^
-  --min-episodes 252 ^
+  --dataset-name expert_trucksim_dual_100k ^
+  --scenario all ^
+  --target-samples 100000 ^
   --duration 12 ^
-  --max-episodes 30000 ^
-  --no-resume
+  --max-episodes 10000 ^
+  --resume
 
 构建 A0 anchor 命令：
 python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-rad 0.08 ^
