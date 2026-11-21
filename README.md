@@ -41,7 +41,21 @@ and `--max-steer-rad` are retained; values are never clipped. Per-channel
 exclusion counts are reported (they may overlap). The resulting centroids are
 also checked. Short or discontinuous histories are not padded or interpolated.
 
-Control-space Diffusion uses the raw dataset root configured in `configs/train/diffusion.yaml`:
+Control-space Diffusion uses the raw dataset root configured in `configs/train/diffusion.yaml`.
+
+Two TRACE training objectives can be selected through YAML:
+
+- `configs/train/diffusion.yaml`: original `goal_endpoint` baseline. Expert trajectory and the existing auxiliary objectives are evaluated on the goal-endpoint-selected generated mode.
+- `configs/train/ablation/diffusion_anchor_consistent.yaml`: anchor-assigned objective. All anchor controls are rolled out by the same frozen K2. The anchor with minimum execution-space ADE to the expert assigns the expert-supervised mode; every other valid mode receives paired K2-anchor consistency. Safety, TTC, road-boundary, LTR, progress, and relative-fuel objectives are evaluated over all valid generated modes. Target Point remains a scene condition in both training and inference; inference retains the goal-endpoint selector.
+
+Run the two schemes as separate experiments:
+
+```bash
+python scripts/training/run_diffusion.py --config configs/train/diffusion.yaml
+python scripts/training/run_diffusion.py --config configs/train/ablation/diffusion_anchor_consistent.yaml
+```
+
+Keep dataset/splits, seed, A1 settings, K2 checkpoint, and optimizer settings identical for a controlled comparison. Do not resume one objective from the other's checkpoint.
 
 ```bash
 python scripts/diagnostics/validate_expert_dataset.py --help

@@ -22,7 +22,10 @@ from highway_env.planner.diffusion.config.experiment import load_mode_yaml, reso
 
 
 METRIC_KEYS = (
-    'loss', 'trajectory_loss',
+    'loss', 'trajectory_loss', 'anchor_consistency_loss', 'anchor_execution_gap_m',
+    'fuel_relative_loss', 'fuel_relative_ratio', 'fuel_improvement_pct',
+    'expert_anchor_ade', 'goal_selected_ade', 'expert_goal_mode_disagreement',
+    'safety_mode_count',
     'background_collision_loss', 'intertruck_collision_loss',
     'ttc_loss', 'ttc_background_loss', 'ttc_intertruck_loss',
     'road_boundary_loss', 'ltr_loss', 'fuel_loss', 'progress_loss',
@@ -316,6 +319,14 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
             f'[TRACE SAFETY] epoch={epoch}/{epochs} '
             f'train={train_metrics["loss"]:.5f} val={val_metrics["loss"]:.5f} '
             f'traj={val_metrics["trajectory_loss"]:.4f} '
+            f'anchor={val_metrics["anchor_consistency_loss"]:.4f} '
+            f'anchor_gap={val_metrics["anchor_execution_gap_m"]:.3f}m '
+            f'fuel_rel={val_metrics["fuel_relative_ratio"]:.4f} '
+            f'fuel_gain={val_metrics["fuel_improvement_pct"]:.2f}% '
+            f'expert_anchor_ADE={val_metrics["expert_anchor_ade"]:.3f}m '
+            f'goal_ADE={val_metrics["goal_selected_ade"]:.3f}m '
+            f'mode_disagree={val_metrics["expert_goal_mode_disagreement"]:.3f} '
+            f'safety_modes={val_metrics["safety_mode_count"]:.1f} '
             f'bg_col={val_metrics["background_collision_loss"]:.4f} '
             f'intertruck={val_metrics["intertruck_collision_loss"]:.4f} '
             f'ttc={val_metrics["ttc_loss"]:.4f} road={val_metrics["road_boundary_loss"]:.4f} '

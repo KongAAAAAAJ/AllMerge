@@ -1,9 +1,11 @@
-"""TRACE control-space stochastic diffusion planner with shared mode selection.
+"""TRACE control-space stochastic diffusion planner with switchable objectives.
 
 Control candidates are refined by DDIM and rolled out by frozen Koopman K2.
-Training selects the same valid goal-endpoint candidate used at inference and
-optimizes expert trajectory, collision, TTC, road-boundary, LTR, fuel and
-progress objectives in execution space.
+The original goal-endpoint objective is retained as a baseline. The optional
+anchor-assigned objective routes expert supervision through K2-executed Anchor
+ADE, preserves the remaining Anchor modes, and evaluates auxiliary objectives
+over all valid generated modes. Target Point conditioning and inference-time
+goal-endpoint selection are shared by both schemes.
 
 Without clean control labels the objective is trajectory-trained iterative
 diffusion refinement, not standard DDPM noise-prediction supervision.
@@ -86,11 +88,13 @@ class DirectControlDenoiser(nn.Module):
 
 
 class ControlDiffusionPlanner(nn.Module):
-    """Control-space diffusion with goal-endpoint selection in train and inference.
+    """Control-space diffusion with switchable goal-endpoint and anchor-assigned losses.
 
-    All candidate controls are rolled out by the chosen execution backend. The
-    same valid-mode-filtered goal-endpoint selector chooses the executed mode
-    for trajectory supervision, auxiliary objectives, and online inference.
+    Target Point is encoded by the shared scene encoder in both training and
+    inference. The original scheme uses goal-endpoint selection for supervision.
+    The anchor-consistent scheme assigns expert supervision to the K2-executed
+    anchor nearest to the expert trajectory, preserves the other anchor modes,
+    and still uses goal-endpoint selection for inference-compatible diagnostics.
     """
 
     def __init__(self, model_config=None, control_config=None, *,
@@ -197,10 +201,20 @@ class ControlDiffusionPlanner(nn.Module):
             sample = self.schedule.step_predict_x0(sample, x0, t, next_t)
         return sample * self.control_limits
 
+    def _training_scheme(self):
+        """Return the selected objective family without mutating legacy configs."""
+        scheme = str(self.loss_config.get('training_scheme', 'goal_endpoint'))
+        if scheme not in ('goal_endpoint', 'anchor_consistent'):
+            raise ValueError(
+                "losses.training_scheme must be 'goal_endpoint' or 'anchor_consistent'"
+            )
+        return scheme
+
     def _validate_objectives(self):
         cfg = self.loss_config
         if cfg['mode_selection'] != 'goal_endpoint':
             raise ValueError('Control diffusion requires goal_endpoint mode selection')
+        scheme = self._training_scheme()
         required = ('trajectory', 'background_collision', 'intertruck_collision',
                     'ttc', 'road_boundary', 'ltr', 'fuel', 'progress')
         for name in required:
@@ -224,7 +238,24 @@ class ControlDiffusionPlanner(nn.Module):
             limit = float(cfg['ltr']['limit'])
             if not 0 < limit < 1:
                 raise ValueError('LTR limit must be in (0,1)')
-        if self._weight('fuel') > 0:
+        if scheme == 'goal_endpoint':
+            if self._weight('fuel') > 0:
+                self._fuel_parameters()
+        else:
+            if self.vehicle_model.kind != 'koopman_k2':
+                raise ValueError('anchor_consistent training requires frozen Koopman K2 execution')
+            anchor_cfg = cfg.get('anchor_consistency')
+            if not isinstance(anchor_cfg, dict):
+                raise ValueError('anchor_consistent training requires losses.anchor_consistency')
+            anchor_weight = float(anchor_cfg.get('weight', 0.0))
+            if anchor_weight <= 0:
+                raise ValueError('anchor_consistency.weight must be positive')
+            relative_fuel_weight = float(cfg['fuel'].get('relative_weight', 0.0))
+            relative_epsilon = float(cfg['fuel'].get('relative_epsilon', 1e-8))
+            if relative_fuel_weight <= 0:
+                raise ValueError('fuel.relative_weight must be positive for anchor_consistent training')
+            if relative_epsilon <= 0:
+                raise ValueError('fuel.relative_epsilon must be positive')
             self._fuel_parameters()
         if self._weight('progress') > 0 and float(cfg['progress']['minimum_progress_m']) < 0:
             raise ValueError('progress.minimum_progress_m must be nonnegative')
@@ -232,10 +263,60 @@ class ControlDiffusionPlanner(nn.Module):
     def _weight(self, name):
         return float(self.loss_config[name]['weight'])
 
+    def _relative_fuel_weight(self):
+        return float(self.loss_config['fuel'].get('relative_weight', 0.0))
+
+    @staticmethod
+    def _masked_mode_mean(values, valid_mask, mode_weights=None):
+        """Mean over valid [B,M] modes, optionally with per-mode weights."""
+        weights = valid_mask.to(dtype=values.dtype)
+        if mode_weights is not None:
+            weights = weights * mode_weights.to(dtype=values.dtype)
+        denominator = weights.sum().clamp_min(torch.finfo(values.dtype).eps)
+        return (values * weights).sum() / denominator
+
+    def _relative_fuel_objective(self, generated_speeds, anchor_speeds,
+                                 payload_kg, valid_mask):
+        """Per-anchor relative VT-CPFM fuel change in frozen-K2 execution space.
+
+        A negative value denotes a fuel reduction relative to the corresponding
+        anchor; zero denotes parity. Anchor fuel is detached from autograd.
+        """
+        batch, modes, steps = generated_speeds.shape
+        if anchor_speeds.shape != generated_speeds.shape:
+            raise ValueError('Generated and anchor K2 speeds must have identical [B,M,H+1] shapes')
+        if valid_mask.shape != (batch, modes):
+            raise ValueError('mode_valid_mask must match [B,M] fuel candidates')
+        payload = payload_kg.to(generated_speeds).reshape(batch)
+        repeated_payload = payload[:, None].expand(batch, modes).reshape(-1)
+        parameters = self._fuel_parameters()
+        generated = vt_cpfm_from_states(
+            generated_speeds.reshape(batch * modes, steps), repeated_payload,
+            parameters, dt=self.ctrl_cfg.dt,
+        )['fuel_total'].reshape(batch, modes)
+        with torch.no_grad():
+            anchor = vt_cpfm_from_states(
+                anchor_speeds.detach().reshape(batch * modes, steps), repeated_payload,
+                parameters, dt=self.ctrl_cfg.dt,
+            )['fuel_total'].reshape(batch, modes)
+        epsilon = float(self.loss_config['fuel'].get('relative_epsilon', 1e-8))
+        ratio = generated / anchor.clamp_min(epsilon)
+        relative_change = ratio - 1.0
+        loss = self._masked_mode_mean(relative_change, valid_mask)
+        mean_ratio = self._masked_mode_mean(ratio, valid_mask)
+        improvement_pct = -100.0 * self._masked_mode_mean(relative_change, valid_mask)
+        return {
+            'loss': loss,
+            'ratio': mean_ratio,
+            'improvement_pct': improvement_pct,
+            'generated_fuel': generated,
+            'anchor_fuel': anchor,
+        }
+
     def _fuel_parameters(self):
         values = self.loss_config.get('fuel', {}).get('parameters')
         if not isinstance(values, dict):
-            raise ValueError('Positive fuel weight requires calibrated fuel.parameters')
+            raise ValueError('Fuel objective requires calibrated fuel.parameters')
         return FuelParameters(**values)
 
     def _all_predictions(self, controls, features, context=None):
@@ -260,14 +341,162 @@ class ControlDiffusionPlanner(nn.Module):
         selected = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
         return selected, scores
 
+    @staticmethod
+    def _select_anchor_expert_mode(anchor_poses, target_dense_xy, valid_mask):
+        """Assign expert supervision to the K2-executed anchor with minimum ADE.
+
+        The assignment is training-only and is computed from frozen Anchor K2
+        rollouts. Target Point remains an input condition; inference continues
+        to use _select_goal_endpoint_mode because expert labels are unavailable.
+        """
+        if anchor_poses.ndim != 4 or anchor_poses.shape[-1] != 3:
+            raise ValueError('anchor_poses must be [B,M,H+1,3]')
+        batch, modes, steps = anchor_poses.shape[:3]
+        if target_dense_xy.shape != (batch, steps - 1, 2):
+            raise ValueError('target_dense_xy must align with K2 anchor execution horizon')
+        if valid_mask.shape != (batch, modes):
+            raise ValueError('mode_valid_mask must be [B,M]')
+        valid = valid_mask.bool()
+        if not valid.any(dim=1).all():
+            raise ValueError('Every episode needs at least one valid anchor mode')
+        anchor_xy = anchor_poses[:, :, 1:, :2]
+        expert = target_dense_xy[:, None].to(anchor_xy)
+        per_mode_ade = torch.linalg.vector_norm(anchor_xy - expert, dim=-1).mean(dim=-1)
+        per_mode_ade = per_mode_ade.masked_fill(~valid, torch.inf)
+        selected = per_mode_ade.argmin(dim=1)
+        selected_ade = per_mode_ade.gather(1, selected[:, None]).squeeze(1)
+        return selected, selected_ade, per_mode_ade
+
+    def _all_mode_safety_objectives(self, poses_all, features, safety_targets,
+                                    road_safety_features, valid_modes):
+        """Evaluate collision/TTC/road objectives on every valid generated mode.
+
+        Modes are processed one at a time to bound peak memory for the road
+        footprint projection. Each mode contributes in proportion to its number
+        of valid batch samples, yielding a mean over all valid (sample, mode) pairs.
+        """
+        batch, modes, steps = poses_all.shape[:3]
+        if valid_modes.shape != (batch, modes) or not valid_modes.any():
+            raise ValueError('At least one valid candidate mode is required for safety losses')
+
+        safety = self.loss_config['safety']
+        collision_args = {
+            'dt': self.ctrl_cfg.dt,
+            'collision_margin_m': float(safety['collision_margin_m']),
+            'ttc_threshold_s': float(safety['ttc_threshold_s']),
+            'softplus_temperature_m': float(safety['softplus_temperature_m']),
+            'collision_distance_scale_m': float(safety['collision_distance_scale_m']),
+            'ttc_distance_scale_m': float(safety['ttc_distance_scale_m']),
+        }
+        background_poses, background_dimensions, background_valid = background_constant_velocity_poses(
+            features['agent_states'], features['agent_valid_mask'], features['ego_state'],
+            self.ctrl_cfg.horizon_steps, self.ctrl_cfg.dt,
+        )
+        platoon_all = safety_targets['platoon_reference_poses'].to(poses_all)
+        total_valid = int(valid_modes.sum().item())
+        accum = {
+            'background_collision_loss': poses_all.new_zeros(()),
+            'intertruck_collision_loss': poses_all.new_zeros(()),
+            'ttc_background_loss': poses_all.new_zeros(()),
+            'ttc_intertruck_loss': poses_all.new_zeros(()),
+            'road_boundary_loss': poses_all.new_zeros(()),
+            'background_collision_rate': poses_all.new_zeros(()),
+            'intertruck_collision_rate': poses_all.new_zeros(()),
+            'ttc_background_violation_rate': poses_all.new_zeros(()),
+            'ttc_intertruck_violation_rate': poses_all.new_zeros(()),
+            'road_violation_rate': poses_all.new_zeros(()),
+            'background_min_gap_m': poses_all.new_zeros(()),
+            'intertruck_min_gap_m': poses_all.new_zeros(()),
+        }
+        max_road_violation = poses_all.new_zeros(())
+        background_min_gap_count = 0
+
+        for mode in range(modes):
+            batch_indices = torch.nonzero(valid_modes[:, mode].bool(), as_tuple=False).flatten()
+            count = int(batch_indices.numel())
+            if count == 0:
+                continue
+            ego_poses = poses_all.index_select(0, batch_indices)[:, mode]
+            ego_dimensions = ego_poses.new_tensor(
+                [float(safety['vehicle_length_m']), float(safety['vehicle_width_m'])]
+            ).expand(count, 2)
+
+            bg_stats = pairwise_vehicle_safety(
+                ego_poses, ego_dimensions,
+                background_poses.index_select(0, batch_indices),
+                background_dimensions.index_select(0, batch_indices),
+                background_valid.index_select(0, batch_indices),
+                **collision_args,
+            )
+            platoon_poses = platoon_all.index_select(0, batch_indices)
+            platoon_dimensions = ego_poses.new_tensor(
+                [float(safety['vehicle_length_m']), float(safety['vehicle_width_m'])]
+            ).view(1, 1, 2).expand(count, 2, 2)
+            platoon_valid = torch.ones((count, 2), dtype=torch.bool, device=ego_poses.device)
+            platoon_stats = pairwise_vehicle_safety(
+                ego_poses, ego_dimensions, platoon_poses, platoon_dimensions,
+                platoon_valid, **collision_args,
+            )
+            take = lambda key: road_safety_features[key].index_select(0, batch_indices)
+            road_stats = road_boundary_safety_loss(
+                ego_poses, ego_dimensions,
+                take('road_lane_geometry'), take('road_lane_point_mask'),
+                take('road_lane_mask'), take('road_lane_connections'),
+                take('road_current_lane_slot'), take('road_target_lane_slot'),
+                softplus_temperature_m=float(safety['softplus_temperature_m']),
+                distance_scale_m=float(safety['road_distance_scale_m']),
+            )
+
+            accum['background_collision_loss'] = accum['background_collision_loss'] + bg_stats['collision_loss'] * count
+            accum['intertruck_collision_loss'] = accum['intertruck_collision_loss'] + platoon_stats['collision_loss'] * count
+            accum['ttc_background_loss'] = accum['ttc_background_loss'] + bg_stats['ttc_loss'] * count
+            accum['ttc_intertruck_loss'] = accum['ttc_intertruck_loss'] + platoon_stats['ttc_loss'] * count
+            accum['road_boundary_loss'] = accum['road_boundary_loss'] + road_stats['loss'] * count
+            accum['background_collision_rate'] = accum['background_collision_rate'] + bg_stats['collision_rate'] * count
+            accum['intertruck_collision_rate'] = accum['intertruck_collision_rate'] + platoon_stats['collision_rate'] * count
+            accum['ttc_background_violation_rate'] = accum['ttc_background_violation_rate'] + bg_stats['ttc_violation_rate'] * count
+            accum['ttc_intertruck_violation_rate'] = accum['ttc_intertruck_violation_rate'] + platoon_stats['ttc_violation_rate'] * count
+            accum['road_violation_rate'] = accum['road_violation_rate'] + road_stats['violation_rate'] * count
+            has_background = background_valid.index_select(0, batch_indices).any(dim=1)
+            background_count = int(has_background.sum().item())
+            if background_count:
+                accum['background_min_gap_m'] = (
+                    accum['background_min_gap_m'] + bg_stats['min_gap'] * background_count
+                )
+                background_min_gap_count += background_count
+            accum['intertruck_min_gap_m'] = accum['intertruck_min_gap_m'] + platoon_stats['min_gap'] * count
+            max_road_violation = torch.maximum(max_road_violation, road_stats['max_violation'])
+
+        for key in accum:
+            if key == 'background_min_gap_m':
+                denominator = max(background_min_gap_count, 1)
+            else:
+                denominator = total_valid
+            accum[key] = accum[key] / float(denominator)
+        accum['ttc_loss'] = 0.5 * (
+            accum['ttc_background_loss'] + accum['ttc_intertruck_loss']
+        )
+        accum['max_road_violation_m'] = max_road_violation
+        accum['safety_mode_count'] = valid_modes.sum().to(dtype=poses_all.dtype)
+        return accum
+
     def forward_train(self, features, target_dense_xy, safety_targets, *,
                       generator=None, context=None):
-        """Train the selected DDIM control sequence against expert and safety objectives.
+        """Train the selected objective while preserving the original baseline path."""
+        scheme = self._training_scheme()
+        if scheme == 'anchor_consistent':
+            return self._forward_train_anchor_consistent(
+                features, target_dense_xy, safety_targets,
+                generator=generator, context=context,
+            )
+        return self._forward_train_goal_endpoint(
+            features, target_dense_xy, safety_targets,
+            generator=generator, context=context,
+        )
 
-        The ego trajectory is predicted by frozen K2. Background vehicles use
-        constant-velocity references from agent_states. The other two controlled
-        trucks use synchronized expert trajectories supplied by RawExpertDataset.
-        """
+    def _forward_train_goal_endpoint(self, features, target_dense_xy, safety_targets, *,
+                                     generator=None, context=None):
+        """Original baseline: goal-endpoint-selected expert and auxiliary losses."""
         cfg = self.ctrl_cfg
         batch = features['ego_state'].shape[0]
         if target_dense_xy.shape != (batch, cfg.horizon_steps, 2):
@@ -354,6 +583,8 @@ class ControlDiffusionPlanner(nn.Module):
             limit = float(self.loss_config['ltr']['limit'])
             ltr_loss = torch.relu(selected_ltr.abs() - limit).square().mean()
         if self._weight('fuel') > 0:
+            if context is None or 'koopman_payload_kg' not in context:
+                raise KeyError('Fuel loss needs physical koopman_payload_kg [B] in expert context')
             payload = context['koopman_payload_kg'].to(selected_speeds).reshape(batch)
             fuel_result = vt_cpfm_from_states(
                 selected_speeds, payload, self._fuel_parameters(), dt=cfg.dt)
@@ -377,6 +608,17 @@ class ControlDiffusionPlanner(nn.Module):
         output = {
             'loss': total,
             'trajectory_loss': trajectory_loss,
+            'anchor_consistency_loss': zero,
+            'anchor_execution_gap_m': zero,
+            'fuel_relative_loss': zero,
+            'fuel_relative_ratio': zero,
+            'fuel_improvement_pct': zero,
+            'expert_anchor_ade': zero,
+            'goal_selected_ade': torch.linalg.vector_norm(
+                predicted_xy - target_dense_xy[:, None], dim=-1
+            ).mean(dim=-1).gather(1, selected[:, None]).squeeze(1).mean(),
+            'expert_goal_mode_disagreement': zero,
+            'safety_mode_count': zero + batch,
             'background_collision_loss': background_collision_loss,
             'intertruck_collision_loss': intertruck_collision_loss,
             'ttc_loss': ttc_loss,
@@ -398,12 +640,189 @@ class ControlDiffusionPlanner(nn.Module):
             'poses': selected_poses,
             'speeds': selected_speeds,
             'selected_mode': selected,
+            'goal_selected_mode': selected,
+            'expert_mode': selected,
         }
         if pred['ltr'] is not None:
             output['ltr'] = pred['ltr'][batch_ix, selected]
             output['states'] = pred['states'][batch_ix, selected]
         if fuel_total is not None:
             output['fuel_total'] = fuel_total
+        return output
+
+    def _forward_train_anchor_consistent(self, features, target_dense_xy, safety_targets, *,
+                                         generator=None, context=None):
+        """Anchor-assigned expert supervision plus per-mode consistency/objectives.
+
+        The expert mode is selected by ADE between each frozen-K2 anchor rollout
+        and the expert trajectory. Every other valid mode is regularized toward
+        its own frozen-K2 anchor rollout. Safety, LTR, progress and relative fuel
+        objectives are evaluated across all valid generated modes. Target Point
+        remains a shared scene condition and the goal-endpoint selector used by
+        inference is retained for the selected-output diagnostics.
+        """
+        cfg = self.ctrl_cfg
+        batch = features['ego_state'].shape[0]
+        if target_dense_xy.shape != (batch, cfg.horizon_steps, 2):
+            raise ValueError('Expert trajectory_dense must be [B,40,2]')
+        if safety_targets['platoon_reference_poses'].shape != (batch, 2, cfg.horizon_steps + 1, 3):
+            raise ValueError('platoon_reference_poses must be [B,2,41,3]')
+        if context is None or 'koopman_payload_kg' not in context:
+            raise KeyError('Anchor-consistent training requires physical koopman_payload_kg [B]')
+
+        road_safety_features = {
+            key: features[key] for key in (
+                'road_lane_geometry', 'road_lane_point_mask', 'road_lane_mask',
+                'road_lane_connections', 'road_current_lane_slot', 'road_target_lane_slot',
+            )
+        }
+        features = self._prepare_anchors(features)
+        controls_all = self._sample_controls(features, generator=generator)
+        pred = self._all_predictions(controls_all, features, context)
+        poses_all, speeds_all = pred['poses'], pred['speeds']
+        predicted_xy = poses_all[:, :, 1:, :2]
+        valid_modes = features['mode_valid_mask'].bool()
+        batch_ix = torch.arange(batch, device=controls_all.device)
+        goal_selected, _ = self._select_goal_endpoint_mode(poses_all, features)
+
+        anchor_controls = features.get('coarse_controls')
+        if anchor_controls is None or anchor_controls.shape != controls_all.shape:
+            raise ValueError('anchor_consistent training requires paired coarse_controls [B,M,40,2]')
+        if not torch.isfinite(anchor_controls).all():
+            raise ValueError('Anchor control sequence contains NaN/Inf')
+        # Anchor controls are fixed references. Execute them through exactly the
+        # same frozen K2 and the same observed context as generated controls.
+        with torch.no_grad():
+            anchor_pred = self._all_predictions(anchor_controls, features, context)
+        anchor_poses = anchor_pred['poses']
+        expert_mode, expert_anchor_ade, per_anchor_ade = self._select_anchor_expert_mode(
+            anchor_poses, target_dense_xy, valid_modes,
+        )
+
+        truth = target_dense_xy[:, None].expand_as(predicted_xy)
+        per_mode_expert_mse = (predicted_xy - truth).square().sum(dim=-1).mean(dim=-1)
+        trajectory_loss = per_mode_expert_mse.gather(
+            1, expert_mode[:, None]
+        ).squeeze(1).mean()
+
+        anchor_xy = anchor_poses[:, :, 1:, :2]
+        per_mode_anchor_mse = (predicted_xy - anchor_xy).square().sum(dim=-1).mean(dim=-1)
+        anchor_mode_mask = valid_modes.clone()
+        anchor_mode_mask[batch_ix, expert_mode] = False
+        anchor_consistency_loss = self._masked_mode_mean(
+            per_mode_anchor_mse, anchor_mode_mask,
+        )
+        anchor_sparse_xy = anchor_poses[:, :, 5::5, :2]
+        coarse_xy = features.get('coarse_trajectories')
+        if coarse_xy is None or coarse_xy.shape != anchor_sparse_xy.shape:
+            raise ValueError('coarse_trajectories must align with 8 K2 anchor samples')
+        anchor_execution_gap = torch.linalg.vector_norm(
+            anchor_sparse_xy - coarse_xy, dim=-1
+        ).mean(dim=-1)
+        anchor_execution_gap_m = self._masked_mode_mean(anchor_execution_gap, valid_modes)
+
+        safety_stats = self._all_mode_safety_objectives(
+            poses_all, features, safety_targets, road_safety_features, valid_modes,
+        )
+        background_collision_loss = safety_stats['background_collision_loss']
+        intertruck_collision_loss = safety_stats['intertruck_collision_loss']
+        ttc_loss = safety_stats['ttc_loss']
+        road_boundary_loss = safety_stats['road_boundary_loss']
+
+        zero = trajectory_loss.new_zeros(())
+        ltr_loss = zero
+        if self._weight('ltr') > 0:
+            if pred['ltr'] is None:
+                raise ValueError('LTR loss requires K2 LTR predictions')
+            limit = float(self.loss_config['ltr']['limit'])
+            per_mode_ltr = torch.relu(pred['ltr'][:, :, 1:].abs() - limit).square().mean(dim=-1)
+            ltr_loss = self._masked_mode_mean(per_mode_ltr, valid_modes)
+
+        relative_fuel = self._relative_fuel_objective(
+            speeds_all, anchor_pred['speeds'], context['koopman_payload_kg'], valid_modes,
+        )
+        fuel_loss = relative_fuel['loss']
+        fuel_relative_ratio = relative_fuel['ratio']
+        fuel_improvement_pct = relative_fuel['improvement_pct']
+
+        progress_loss = zero
+        if self._weight('progress') > 0:
+            minimum_progress = float(self.loss_config['progress']['minimum_progress_m'])
+            modes = poses_all.shape[1]
+            terminal = poses_all[:, :, -1, :].reshape(batch * modes, 3)
+            lane = features['target_lane_polyline'][:, None].expand(
+                batch, modes, *features['target_lane_polyline'].shape[1:]
+            ).reshape(batch * modes, *features['target_lane_polyline'].shape[1:])
+            progress = centerline_progress(terminal, lane).reshape(batch, modes)
+            per_mode_progress = torch.relu(minimum_progress - progress).square()
+            progress_loss = self._masked_mode_mean(per_mode_progress, valid_modes)
+
+        total = (
+            self._weight('trajectory') * trajectory_loss
+            + float(self.loss_config['anchor_consistency']['weight']) * anchor_consistency_loss
+            + self._weight('background_collision') * background_collision_loss
+            + self._weight('intertruck_collision') * intertruck_collision_loss
+            + self._weight('ttc') * ttc_loss
+            + self._weight('road_boundary') * road_boundary_loss
+            + self._weight('ltr') * ltr_loss
+            + self._relative_fuel_weight() * fuel_loss
+            + self._weight('progress') * progress_loss
+        )
+
+        per_mode_generated_ade = torch.linalg.vector_norm(
+            predicted_xy - target_dense_xy[:, None], dim=-1
+        ).mean(dim=-1)
+        goal_selected_ade = per_mode_generated_ade.gather(
+            1, goal_selected[:, None]
+        ).squeeze(1).mean()
+        expert_goal_disagreement = (expert_mode != goal_selected).float().mean()
+        selected_controls = controls_all[batch_ix, goal_selected]
+        selected_poses = poses_all[batch_ix, goal_selected]
+        selected_speeds = speeds_all[batch_ix, goal_selected]
+        output = {
+            'loss': total,
+            'trajectory_loss': trajectory_loss,
+            'anchor_consistency_loss': anchor_consistency_loss,
+            'anchor_execution_gap_m': anchor_execution_gap_m,
+            'fuel_relative_loss': fuel_loss,
+            'fuel_relative_ratio': fuel_relative_ratio,
+            'fuel_improvement_pct': fuel_improvement_pct,
+            'expert_anchor_ade': expert_anchor_ade.mean(),
+            'goal_selected_ade': goal_selected_ade,
+            'expert_goal_mode_disagreement': expert_goal_disagreement,
+            'safety_mode_count': safety_stats['safety_mode_count'],
+            'background_collision_loss': background_collision_loss,
+            'intertruck_collision_loss': intertruck_collision_loss,
+            'ttc_loss': ttc_loss,
+            'ttc_background_loss': safety_stats['ttc_background_loss'],
+            'ttc_intertruck_loss': safety_stats['ttc_intertruck_loss'],
+            'road_boundary_loss': road_boundary_loss,
+            'ltr_loss': ltr_loss,
+            'fuel_loss': fuel_loss,
+            'progress_loss': progress_loss,
+            'background_collision_rate': safety_stats['background_collision_rate'],
+            'intertruck_collision_rate': safety_stats['intertruck_collision_rate'],
+            'ttc_background_violation_rate': safety_stats['ttc_background_violation_rate'],
+            'ttc_intertruck_violation_rate': safety_stats['ttc_intertruck_violation_rate'],
+            'road_violation_rate': safety_stats['road_violation_rate'],
+            'background_min_gap_m': safety_stats['background_min_gap_m'],
+            'intertruck_min_gap_m': safety_stats['intertruck_min_gap_m'],
+            'max_road_violation_m': safety_stats['max_road_violation_m'],
+            # Keep selected_mode aligned with the inference selector. The
+            # expert-supervised mode is exposed separately for auditability.
+            'controls': selected_controls,
+            'poses': selected_poses,
+            'speeds': selected_speeds,
+            'selected_mode': goal_selected,
+            'goal_selected_mode': goal_selected,
+            'expert_mode': expert_mode,
+            'anchor_expert_ade_per_mode': per_anchor_ade,
+        }
+        if pred['ltr'] is not None:
+            output['ltr'] = pred['ltr'][batch_ix, goal_selected]
+            output['states'] = pred['states'][batch_ix, goal_selected]
+        output['fuel_total'] = relative_fuel['generated_fuel'][batch_ix, goal_selected]
+        output['anchor_fuel_total'] = relative_fuel['anchor_fuel'][batch_ix, goal_selected]
         return output
 
     def infer_multimodal(self, features, generator: Optional[torch.Generator] = None,

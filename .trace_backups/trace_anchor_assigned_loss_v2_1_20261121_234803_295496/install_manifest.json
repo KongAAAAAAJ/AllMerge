@@ -1,0 +1,61 @@
+{
+  "package": "TRACE_Anchor_Assigned_Loss_Installer_V2_1",
+  "version": "2.1.0",
+  "installed_at": "2026-11-21T23:48:03.304870+08:00",
+  "project_root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "backup_dir": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\trace_anchor_assigned_loss_v2_1_20261121_234803_295496",
+  "files": [
+    {
+      "path": "README.md",
+      "action": "UPDATE_EOL_PRESERVED",
+      "existed_before": true,
+      "original_sha256": "ac28087dcfab2ac336f0f0aa0cb9b86e8b79e26df6716e1643fd91c75b46eab5",
+      "installed_sha256": "2fe7995a8b07a0cdd997284d04c1ac29accd1ecd5ef20ad7143822ae3502ebcb"
+    },
+    {
+      "path": "TRACE_anchor_consistent_loss_implementation_report.md",
+      "action": "CREATE",
+      "existed_before": false,
+      "original_sha256": null,
+      "installed_sha256": "4387d01a5f522df6595d065e41d59a9b0aedbb007c254b80227b91832a15486f"
+    },
+    {
+      "path": "configs/train/ablation/diffusion_anchor_consistent.yaml",
+      "action": "CREATE",
+      "existed_before": false,
+      "original_sha256": null,
+      "installed_sha256": "941de28d765c44cde1b49bd7317f427730d6393074ec36ea42a4266d0a48e287"
+    },
+    {
+      "path": "highway_env/planner/diffusion/models/control.py",
+      "action": "UPDATE",
+      "existed_before": true,
+      "original_sha256": "340a76fa3136974d17fca72104527c466a077ba71e53a8a6e7b2d9094598d217",
+      "installed_sha256": "f945bc8c71c1a24458e7104b46a83f58c831b18fce7a3b1a2e4c185b00dccf6b"
+    },
+    {
+      "path": "highway_env/planner/diffusion/training/control.py",
+      "action": "MERGE",
+      "existed_before": true,
+      "original_sha256": "c9ee0dea1ff7bf46798d6dc49f7c5a68d96aaa24349ec834880fec666655ef32",
+      "installed_sha256": "2bb07e6555c2a1c50ea4cad3c0c2e4cdfb876ab8ac3883cc11babf1490baf223"
+    },
+    {
+      "path": "tests/test_fixed_anchor_manager.py",
+      "action": "UPDATE_EOL_PRESERVED",
+      "existed_before": true,
+      "original_sha256": "ccd774f1aacc039aad73bef6592218aa0c1ab96fd22e6779ab4d70076fbe9ad5",
+      "installed_sha256": "7df38c875384e7fdfd8cf397419db6df9b1328b92a5effe02ede3e7416e9b29f"
+    },
+    {
+      "path": "tests/test_trace_anchor_consistent_loss.py",
+      "action": "CREATE",
+      "existed_before": false,
+      "original_sha256": null,
+      "installed_sha256": "61bc92172eaf1202b98937193d775a863ecefd3c8a0a8cbc66e56b25f28c8576"
+    }
+  ],
+  "rolled_back": false,
+  "verified_at": "2026-11-21T23:48:09.804823+08:00",
+  "tests_run": true
+}

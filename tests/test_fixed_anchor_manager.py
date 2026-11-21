@@ -119,19 +119,46 @@ def test_fixed_control_strategy_training_inference_and_checkpoint_reload(tmp_pat
         "num_heads": 4, "num_scene_layers": 0,
         "num_denoiser_layers": 1, "dropout": 0.0,
     }
+    loss_config = {
+        "mode_selection": "goal_endpoint",
+        "trajectory": {"weight": 1.0},
+        "background_collision": {"weight": 1.0},
+        "intertruck_collision": {"weight": 1.0},
+        "ttc": {"weight": 1.0},
+        "road_boundary": {"weight": 1.0},
+        "safety": {
+            "vehicle_length_m": 8.0, "vehicle_width_m": 2.6,
+            "collision_margin_m": 0.2, "ttc_threshold_s": 1.0,
+            "softplus_temperature_m": 0.2, "collision_distance_scale_m": 1.0,
+            "ttc_distance_scale_m": 5.0, "road_distance_scale_m": 1.0,
+        },
+        "ltr": {"weight": 0.0, "limit": 0.6},
+        "fuel": {"weight": 0.0},
+        "progress": {"weight": 0.0, "minimum_progress_m": 60.0},
+    }
     model = ControlDiffusionPlanner(
         model_config=model_config,
         control_config={"inference_steps": 2, "inference_start_timestep": 8},
         execution_config={"model": "kinematic"},
-        loss_config={"trajectory": {"type": "paper_mse", "weight": 1.0}},
+        loss_config=loss_config,
         anchors_config=anchors_cfg,
     )
     features = _scene(batch=2)
+    from tests.test_a1_online_runtime import _live_geometry
+    features.update({key: torch.as_tensor(value) for key, value in _live_geometry(batch=2).items()})
     target = torch.zeros((2, 40, 2), dtype=torch.float32)
     target[:, :, 0] = torch.arange(1, 41, dtype=torch.float32)[None, :] * 2.0
-    train_out = model.forward_train(features, target)
+    platoon_reference = torch.zeros((2, 2, 41, 3), dtype=torch.float32)
+    platoon_reference[:, :, :, 0] = 500.0
+    train_out = model.forward_train(
+        features, target, {"platoon_reference_poses": platoon_reference}
+    )
     assert torch.isfinite(train_out["loss"])
     assert train_out["controls"].shape == (2, 40, 2)
+    expected_goal_ade = torch.linalg.vector_norm(
+        train_out["poses"][:, 1:, :2] - target, dim=-1
+    ).mean()
+    torch.testing.assert_close(train_out["goal_selected_ade"], expected_goal_ade)
     infer_out = model.infer_multimodal(features)
     assert infer_out["control_candidates"].shape == (2, 10, 40, 2)
     assert infer_out["trajectory_candidates"].shape == (2, 10, 8, 2)
@@ -141,7 +168,7 @@ def test_fixed_control_strategy_training_inference_and_checkpoint_reload(tmp_pat
         "model_config": model_config,
         "control_config": {"inference_steps": 2, "inference_start_timestep": 8},
         "execution_config": {"model": "kinematic"},
-        "loss_config": {"trajectory": {"type": "paper_mse", "weight": 1.0}},
+        "loss_config": loss_config,
         "koopman_metadata": None,
         "anchors_config": model.anchors_config,
         "model_state": model.state_dict(),

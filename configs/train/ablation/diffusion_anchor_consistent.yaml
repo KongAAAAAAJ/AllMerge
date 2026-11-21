@@ -1,0 +1,18 @@
+# TRACE Anchor-assigned multimodal objective.
+# The parent diffusion.yaml remains the unchanged goal_endpoint baseline.
+extends: ../diffusion.yaml
+
+control:
+  training:
+    output_dir: outputs/anchor_ablation/safety_diffusion_ckpt/A1_anchor_consistent
+  losses:
+    training_scheme: anchor_consistent
+    anchor_consistency:
+      # Apply to all valid modes except the anchor assigned to expert supervision.
+      weight: 0.1
+    fuel:
+      # Absolute fuel loss is disabled. Relative fuel is compared per mode
+      # against the same anchor's frozen-K2 execution reference.
+      weight: 0.0
+      relative_weight: 0.1
+      relative_epsilon: 1.0e-8
