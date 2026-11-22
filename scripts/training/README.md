@@ -1,7 +1,8 @@
 ## A1/A2 共享候选池缓存
 python scripts/data/build_anchor_candidate_cache.py ^
---dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
---cache-dir outputs/anchor_ablation/cache_candidates
+  --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
+  --cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
+  --workers 4
 
 ## 修改yaml配置：
 旧Loss: training_scheme: goal_endpoint
@@ -14,14 +15,15 @@ python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a0_fixed.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A0
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
   --config configs/train/diffusion.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
+  --anchor-cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1
 
 ## Diffusion 训练命令 A2：
 python scripts/training/run_diffusion.py ^
@@ -29,7 +31,7 @@ python scripts/training/run_diffusion.py ^
   --anchor-cache-dir outputs/anchor_ablation/cache_candidates ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A2
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2
 
 ## 从已保存的 A0 checkpoint 续训：
 python scripts/training/run_diffusion.py ^
@@ -65,3 +67,21 @@ trajectory_source: polynomial  # 或 trucksim_closed_loop
 checkpoint 和 resolved config 记录来源；切换来源应使用新的训练输出目录启动新训练，
 不可用另一来源的 `--resume` 延续历史。已有旧 checkpoint 缺少来源时不能续训。
 同一份 v3 数据生成的共享候选池可供两种来源共用；旧数据的缓存不迁移。
+
+
+### 候选池缓存的 CPU 并行与进度
+
+缓存生成默认使用 4 个 CPU worker，按 episode 并行计算，由主进程按原始样本索引写入缓存。
+可用 `--workers` 调整进程数；例如：
+
+```cmd
+python scripts/data/build_anchor_candidate_cache.py --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k --cache-dir outputs/anchor_ablation/cache_candidates_parallel --workers 4
+```
+
+开始时输出索引与进程池状态，每完成一个 episode 输出样本完成数、百分比、episode 完成数、
+samples/s、已耗时和预计剩余秒数。进度按完成的 episode 更新，worker 启动或首个 episode
+计算期间可能暂时没有新输出。增加 worker 会增加内存占用和磁盘读取压力，可从 4 开始调整。
+候选算法、样本顺序和缓存格式不变。
+
+已运行的旧进程不会自动切换到并行版本。若另行启动新版本，请使用独立缓存目录，
+避免与正在生成或已完成的缓存共用目标目录；本入口不提供缓存断点续建。

@@ -16,12 +16,13 @@ def main(argv=None):
     parser.add_argument("--cache-dir", required=True)
     parser.add_argument("--candidate-config", default="configs/anchors/control_candidate_pool.yaml")
     parser.add_argument("--splits", default="train,val")
+    parser.add_argument("--workers", type=int, default=4, help="CPU worker processes (default: 4)")
     args = parser.parse_args(argv)
     splits = args.splits.split(",")
     if not splits or any(split not in ("train", "val", "test") for split in splits):
         parser.error("--splits must be comma-separated train,val,test names")
     build_cache(resolve_repo_file(args.dataset_root), resolve_repo_file(args.cache_dir),
-                {"config_path": str(resolve_repo_file(args.candidate_config))}, splits)
+                {"config_path": str(resolve_repo_file(args.candidate_config))}, splits, workers=args.workers)
 
 
 if __name__ == "__main__":

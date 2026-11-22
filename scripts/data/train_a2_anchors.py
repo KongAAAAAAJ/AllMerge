@@ -22,6 +22,7 @@ def main(argv=None):
     parser.add_argument("--max-batches", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--precompute-batch-size", type=int, default=None)
+    parser.add_argument("--precompute-workers", type=int, default=None)
     parser.add_argument("--precompute-device", default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--evaluate-only", action="store_true")

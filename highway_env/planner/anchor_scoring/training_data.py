@@ -20,14 +20,13 @@ from torch.utils.data import Dataset, Sampler
 
 from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.adaptive_anchors import AdaptiveCandidateBuilder
+from highway_env.planner.candidate_cache import iter_episode_pools
 from .safety import anchor_safety_cost
 
 
 CACHE_VERSION = "TRACE_A2_RAW_SCORER_CACHE_V5"
 CANDIDATE_ALGORITHM_VERSION = "shared-control-candidate-pool-v3"
 FEATURE_KEYS = (*RawExpertDataset.FEATURE_KEYS, *RawExpertDataset.ROAD_KEYS)
-BOOL_FEATURE_KEYS = {'agent_valid_mask', 'map_valid_mask', 'road_lane_point_mask',
-                     'road_lane_mask', 'road_lane_connections'}
 
 
 def cache_array_specs(candidate_count: int):
@@ -94,18 +93,6 @@ def _group_dataset_indices(dataset):
     return groups
 
 
-def _feature_batch_from_shard(shard, sample_indices):
-    features = {}
-    for key in FEATURE_KEYS:
-        if key not in shard:
-            raise KeyError(f"A2 raw episode is missing required feature {key!r}")
-        value = np.asarray(shard[key][sample_indices])
-        tensor = torch.from_numpy(np.ascontiguousarray(value))
-        features[key] = (tensor.bool() if key in BOOL_FEATURE_KEYS else
-                         tensor.long() if key.endswith('_slot') else tensor.float())
-    return features
-
-
 def _cache_is_valid(cache_dir: Path, fingerprint: str, num_samples: int, candidate_count: int) -> bool:
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -145,7 +132,6 @@ def prepare_split_cache(
     cache_root,
     *,
     rebuild: bool = False,
-    progress_every_shards: int = 1,
 ):
     """Build one split cache. Returns its final directory and manifest."""
     dataset_root = Path(dataset_root)
@@ -194,29 +180,27 @@ def prepare_split_cache(
     groups = _group_dataset_indices(dataset)
     batch_size = max(1, int(cfg.get("precompute_batch_size", 16)))
     started = time.perf_counter()
-    total_done = 0
+    total_done = completed_episodes = 0
+    workers = int(cfg.get('precompute_workers', 4))
+    print(f"[A2-cache] split={split} samples={len(dataset)} episodes={len(groups)} "
+          f"precompute_workers={workers}", flush=True)
 
     try:
-        for shard_idx, entries in groups.items():
+        for shard_idx, indices, raw_features, pool in iter_episode_pools(
+                dataset, effective_candidate_config, workers=workers):
             shard_path = dataset.shard_paths[shard_idx]
-            with np.load(shard_path, allow_pickle=False) as source:
-                shard = {key: np.array(source[key], copy=True) for key in FEATURE_KEYS}
-            for start in range(0, len(entries), batch_size):
-                chunk = entries[start:start + batch_size]
-                global_indices = np.asarray([item[0] for item in chunk], dtype=np.int64)
-                sample_indices = np.asarray([item[1] for item in chunk], dtype=np.int64)
-                features = _feature_batch_from_shard(shard, sample_indices)
-
-                pool = generator.build_batch(features)
-                controls_np = np.asarray(pool["coarse_controls"], dtype=np.float32)
-                xy_np = np.asarray(pool["coarse_trajectories"], dtype=np.float32)
-                valid_np = np.asarray(pool["mode_valid_mask"], dtype=np.bool_)
-
-                safety_features = {
-                    name: features[name].to(device)
-                    for name in ("agent_states", "agent_valid_mask", "ego_state",
-                                 "road_lane_geometry", "road_lane_point_mask", "road_lane_mask")
-                }
+            for start in range(0, len(indices), batch_size):
+                stop = start + batch_size
+                global_indices = indices[start:stop]
+                controls_np = pool['coarse_controls'][start:stop]
+                xy_np = pool['coarse_trajectories'][start:stop]
+                valid_np = pool['mode_valid_mask'][start:stop]
+                safety_features = {}
+                for name in ('agent_states', 'agent_valid_mask', 'ego_state',
+                             'road_lane_geometry', 'road_lane_point_mask', 'road_lane_mask'):
+                    tensor = torch.from_numpy(np.ascontiguousarray(raw_features[name][start:stop]))
+                    safety_features[name] = tensor.to(
+                        device=device, dtype=torch.bool if name.endswith('_mask') else torch.float32)
                 xy_tensor = torch.as_tensor(xy_np, dtype=torch.float32, device=device)
                 valid_tensor = torch.as_tensor(valid_np, dtype=torch.bool, device=device)
                 with torch.inference_mode():
@@ -237,16 +221,16 @@ def prepare_split_cache(
                 arrays["safety_hard_safe"][global_indices] = labels["hard_safe"].cpu().numpy()
                 arrays["teacher_target"][global_indices] = target.cpu().numpy()
 
-                total_done += len(chunk)
+                total_done += len(global_indices)
 
-            if (len(groups) <= 10 or (shard_idx + 1) % max(1, progress_every_shards) == 0):
-                elapsed = max(time.perf_counter() - started, 1e-6)
-                rate = total_done / elapsed
-                print(
-                    f"[A2-cache] split={split} episode={shard_path.name} "
-                    f"done={total_done}/{len(dataset)} rate={rate:.1f} samples/s",
-                    flush=True,
-                )
+            completed_episodes += 1
+            elapsed = time.perf_counter() - started
+            rate = total_done / elapsed
+            eta = (len(dataset) - total_done) / rate
+            print(f"[A2-cache] split={split} episode={shard_path.name} "
+                  f"done={total_done}/{len(dataset)} ({100 * total_done / len(dataset):.1f}%) "
+                  f"episodes={completed_episodes}/{len(groups)} rate={rate:.1f} samples/s "
+                  f"elapsed={elapsed:.1f}s eta={eta:.1f}s", flush=True)
 
         for value in arrays.values():
             value.flush()

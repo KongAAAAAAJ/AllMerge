@@ -2,6 +2,10 @@
 from pathlib import Path
 import json
 import tempfile
+import time
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from itertools import groupby
 
 import numpy as np
 import torch
@@ -33,7 +37,50 @@ def source_identity(dataset):
     }
 
 
-def build_cache(dataset_root, cache_root, candidate_config, splits=("train", "val")):
+def _build_episode_pool(path, rows, candidate_config):
+    """Each worker reads one episode once; only the parent writes cache arrays."""
+    builder = AdaptiveCandidateBuilder(candidate_config)
+    with np.load(path, allow_pickle=False) as archive:
+        features = {key: archive[key][rows]
+                    for key in (*RawExpertDataset.FEATURE_KEYS, *RawExpertDataset.ROAD_KEYS)}
+    return features, builder.build_batch(features)
+
+
+def iter_episode_pools(dataset, candidate_config, *, workers=4):
+    """Yield (shard, global indices, raw features, pool), at most workers in flight."""
+    def tasks():
+        offset = 0
+        for shard, entries in groupby(dataset._index, key=lambda item: item[0]):
+            rows = [row for _, row in entries]
+            yield shard, np.arange(offset, offset + len(rows)), rows
+            offset += len(rows)
+
+    remaining = iter(tasks())
+    with ProcessPoolExecutor(max_workers=workers,
+            mp_context=multiprocessing.get_context('spawn'),
+            initializer=torch.set_num_threads, initargs=(1,)) as executor:
+        pending = {}
+        for _ in range(workers):
+            task = next(remaining, None)
+            if task is None:
+                break
+            shard, indices, rows = task
+            pending[executor.submit(_build_episode_pool, dataset.shard_paths[shard], rows,
+                                    candidate_config)] = (shard, indices)
+        while pending:
+            future = next(as_completed(pending))
+            shard, indices = pending.pop(future)
+            features, pool = future.result()
+            yield shard, indices, features, pool
+            del future, features, pool
+            task = next(remaining, None)
+            if task is not None:
+                shard, indices, rows = task
+                pending[executor.submit(_build_episode_pool, dataset.shard_paths[shard], rows,
+                                        candidate_config)] = (shard, indices)
+
+
+def build_cache(dataset_root, cache_root, candidate_config, splits=("train", "val"), *, workers=4):
     builder = AdaptiveCandidateBuilder(candidate_config)
     cache_root = Path(cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -41,6 +88,8 @@ def build_cache(dataset_root, cache_root, candidate_config, splits=("train", "va
         destination = cache_root / split
         if destination.exists():
             raise FileExistsError(destination)
+        started = time.perf_counter()
+        print(f"[candidate-cache] split={split} indexing raw episodes workers={workers}", flush=True)
         dataset = RawExpertDataset(dataset_root, split=split)
         count, candidates = len(dataset), builder.num_candidates
         with tempfile.TemporaryDirectory(prefix=f".{split}-", dir=cache_root) as temporary:
@@ -51,11 +100,21 @@ def build_cache(dataset_root, cache_root, candidate_config, splits=("train", "va
                     shape=(count, candidates, *tail),
                 ) for key, (dtype, tail) in ARRAYS.items()
             }
-            for index in range(count):
-                features, _, _ = dataset[index]
-                pool = builder.build_batch({key: value.unsqueeze(0) for key, value in features.items()})
+            episode_count = len(dataset.shard_paths)
+            print(f"[candidate-cache] split={split} samples={count} episodes={episode_count} "
+                  f"candidates={candidates} starting CPU pool", flush=True)
+            completed = completed_episodes = 0
+            for _, indices, _, pool in iter_episode_pools(dataset, builder.resolved_config, workers=workers):
                 for key, value in arrays.items():
-                    value[index] = pool[key][0]
+                    value[indices] = pool[key]
+                completed += len(indices)
+                completed_episodes += 1
+                elapsed = time.perf_counter() - started
+                rate = completed / elapsed
+                eta = (count - completed) / rate
+                print(f"[candidate-cache] split={split} done={completed}/{count} "
+                      f"({100 * completed / count:.1f}%) episodes={completed_episodes}/{episode_count} "
+                      f"rate={rate:.1f} samples/s elapsed={elapsed:.1f}s eta={eta:.1f}s", flush=True)
             for value in arrays.values():
                 value.flush()
                 value._mmap.close()

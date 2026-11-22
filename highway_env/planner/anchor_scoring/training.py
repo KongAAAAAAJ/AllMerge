@@ -166,6 +166,8 @@ def train(args):
         cfg["max_samples"] = args.max_samples
     if args.precompute_batch_size is not None:
         cfg["precompute_batch_size"] = args.precompute_batch_size
+    if args.precompute_workers is not None:
+        cfg["precompute_workers"] = args.precompute_workers
     if args.precompute_device:
         cfg["precompute_device"] = args.precompute_device
 

@@ -59,3 +59,103 @@ def test_a2_rejects_legacy_shard_dataset(tmp_path):
     (tmp_path / 'shards').mkdir()
     with pytest.raises(FileNotFoundError):
         prepare_split_cache(tmp_path, 'train', {}, tmp_path / 'cache')
+
+
+def test_parallel_candidates_labels_progress_and_worker_independent_reuse(tmp_path, capsys):
+    import torch
+    from highway_env.planner.candidate_cache import build_cache
+    from highway_env.planner.anchor_scoring.safety import anchor_safety_cost
+    root = tmp_path / 'raw'
+    root.mkdir()
+    create_raw(root)
+    generation = {'pool_scale': 1}
+    shared = tmp_path / 'shared'
+    build_cache(root, shared, generation, ('train',), workers=2)
+    cfg = dict(max_samples=8, precompute_workers=2, precompute_batch_size=3,
+               precompute_device='cpu', temperature=.3, candidate_generation=generation,
+               teacher={'ego_length_m': 8., 'ego_width_m': 2.6})
+    cache, manifest = prepare_split_cache(root, 'train', cfg, tmp_path / 'a2')
+    assert manifest['num_samples'] == 8
+    assert [record['count'] for record in manifest['episodes'][:2]] == [6, 2]
+    arrays = {key: np.load(cache / f'{key}.npy') for key in
+              ('coarse_controls', 'coarse_trajectories', 'mode_valid_mask', 'safety_total',
+               'safety_collision', 'safety_road', 'safety_hard_safe', 'teacher_target')}
+    for key in ('coarse_controls', 'coarse_trajectories', 'mode_valid_mask'):
+        np.testing.assert_array_equal(arrays[key], np.load(shared / 'train' / f'{key}.npy')[:8])
+    dataset = RawExpertDataset(root, 'train', max_samples=8)
+    # Independently evaluate the unchanged teacher in one batch.
+    features = {key: torch.stack([dataset[index][0][key] for index in range(8)])
+                for key in dataset[0][0]}
+    xy = torch.from_numpy(arrays['coarse_trajectories'])
+    valid = torch.from_numpy(arrays['mode_valid_mask'])
+    with torch.inference_mode():
+        labels = anchor_safety_cost(features, xy, valid=valid, **cfg['teacher'])
+        target = torch.softmax((-labels['total'] / cfg['temperature']).masked_fill(~valid, -torch.inf), -1)
+    for name, label in (('safety_total', 'total'), ('safety_collision', 'collision'),
+                        ('safety_road', 'road'), ('safety_hard_safe', 'hard_safe')):
+        np.testing.assert_allclose(arrays[name], labels[label].numpy(), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(arrays['teacher_target'], target.numpy(), rtol=1e-6, atol=1e-6)
+    assert 'precompute_workers' not in manifest['fingerprint_payload']
+    cfg['precompute_workers'] = 1
+    reused, reused_manifest = prepare_split_cache(root, 'train', cfg, tmp_path / 'a2')
+    assert reused == cache and reused_manifest['fingerprint'] == manifest['fingerprint']
+    output = capsys.readouterr().out
+    assert 'precompute_workers=2' in output and 'done=8/8 (100.0%)' in output
+    assert 'episodes=2/2' in output and 'eta=' in output and 'reuse split=train' in output
+
+
+@pytest.mark.parametrize('workers', [None, 2])
+def test_a2_precompute_cli_yaml_override(tmp_path, monkeypatch, workers):
+    from scripts.data import train_a2_anchors
+    from highway_env.planner.anchor_scoring import training, prepare_cache
+    cfg = {'candidate_generation': {'pool_scale': 1}, 'precompute_workers': 3,
+           'dataset_root': str(tmp_path / 'raw'), 'output_dir': str(tmp_path / 'model'),
+           'cache_dir': str(tmp_path / 'cache')}
+    calls = []
+    def prepare(root, split, settings, cache, **kwargs):
+        calls.append((split, settings['precompute_workers']))
+        return cache / split, {}
+    monkeypatch.setattr(training, 'load_scorer_config', lambda path: dict(cfg))
+    monkeypatch.setattr(prepare_cache, 'load_scorer_config', lambda path: dict(cfg))
+    monkeypatch.setattr(training, 'prepare_split_cache', prepare)
+    monkeypatch.setattr(prepare_cache, 'prepare_split_cache', prepare)
+    options = [] if workers is None else ['--precompute-workers', str(workers)]
+    train_a2_anchors.main(['--device', 'cpu', '--prepare-cache-only', *options])
+    prepare_cache.main([*options])
+    assert calls == [('train', workers or 3), ('val', workers or 3)] * 2
+
+
+def test_episode_pool_worker_failure_is_not_swallowed(tmp_path):
+    from types import SimpleNamespace
+    from highway_env.planner.candidate_cache import iter_episode_pools
+    dataset = SimpleNamespace(_index=[(0, 0)], shard_paths=[tmp_path / 'missing.npz'])
+    with pytest.raises(FileNotFoundError):
+        list(iter_episode_pools(dataset, {'pool_scale': 1}, workers=1))
+
+
+def test_episode_pool_submits_only_after_consumer_advances(monkeypatch):
+    from types import SimpleNamespace
+    from concurrent.futures import Future
+    from highway_env.planner import candidate_cache
+    submitted = []
+    class Executor:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def submit(self, fn, path, rows, config):
+            submitted.append(path)
+            future = Future()
+            future.set_result(({}, {}))
+            return future
+    monkeypatch.setattr(candidate_cache, 'ProcessPoolExecutor', Executor)
+    dataset = SimpleNamespace(_index=[(index, 0) for index in range(5)], shard_paths=list(range(5)))
+    stream = candidate_cache.iter_episode_pools(dataset, {}, workers=2)
+    next(stream)
+    assert len(submitted) == 2
+    next(stream)
+    assert len(submitted) == 3
+    assert len(list(stream)) == 3
+    assert submitted == list(range(5))

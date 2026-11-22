@@ -12,6 +12,7 @@ drop_last: false
 
 # Candidate pools and deterministic safety labels are generated once and reused.
 cache_dir: outputs/anchor_ablation/cache_A2
+precompute_workers: 4
 precompute_batch_size: 16
 precompute_device: auto
 max_samples: null

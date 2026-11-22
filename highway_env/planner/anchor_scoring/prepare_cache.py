@@ -20,6 +20,7 @@ def main(argv=None):
     parser.add_argument("--splits", default="train,val")
     parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--precompute-batch-size", type=int, default=None)
+    parser.add_argument("--precompute-workers", type=int, default=None)
     parser.add_argument("--precompute-device", default=None)
     parser.add_argument("--rebuild-cache", action="store_true")
     args = parser.parse_args(argv)
@@ -31,6 +32,8 @@ def main(argv=None):
         cfg["max_samples"] = args.max_samples
     if args.precompute_batch_size is not None:
         cfg["precompute_batch_size"] = args.precompute_batch_size
+    if args.precompute_workers is not None:
+        cfg["precompute_workers"] = args.precompute_workers
     if args.precompute_device:
         cfg["precompute_device"] = args.precompute_device
 
