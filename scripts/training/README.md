@@ -1,24 +1,27 @@
+## A1/A2 共享候选池缓存
+python scripts/data/build_anchor_candidate_cache.py ^
+--dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
+--cache-dir outputs/anchor_ablation/cache_candidates
+
+## 修改yaml配置：
+旧Loss: training_scheme: goal_endpoint
+or
+新的Anchor Loss: training_scheme: anchor_consistent
+## 改yaml后记得改ckpt保存路径
+
 ## Diffusion 训练命令 A0：
 python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a0_fixed.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0_straight
-
-## A1/A2 共享候选池缓存
-python scripts/data/build_anchor_candidate_cache.py ^
---dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
---cache-dir outputs/anchor_ablation/cache_candidates_straight
-
-## 切换不同训练yaml文件：
-diffusion_anchor_consistent.yaml or diffusion.yaml
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A0
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
-  --config configs/train/diffusion_anchor_consistent.yaml ^
+  --config configs/train/diffusion.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1_straight
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/A1
 
 ## Diffusion 训练命令 A2：
 python scripts/training/run_diffusion.py ^
@@ -38,11 +41,6 @@ python scripts/training/run_diffusion.py ^
 
 --resume 恢复模型、优化器、轮次、历史最佳验证损失和早停计数。
 --max-epochs 是总轮次上限；第 8 轮 checkpoint 会从第 9 轮继续。
-
-
-## 训练时保存每轮最佳 checkpoint 
-
-
 
 ## 双轨迹格式 v3
 
