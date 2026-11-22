@@ -39,6 +39,9 @@ collection:
 vehicle_dimensions:
   length_m: 8.0
   width_m: 2.6
+  # Nominal tractor wheelbase shared with TRACE anchor/dynamics configs.
+  # Verify against the selected TruckSim .sim model before data collection.
+  wheelbase_m: 5.5
 road_geometry:
   forward_min_m: 120.0
   forward_max_m: 300.0

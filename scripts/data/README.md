@@ -75,6 +75,14 @@ python scripts/training/run_diffusion.py --config configs/train/ablation/diffusi
 默认新数据集名为 `expert_trucksim_dual_raw_100k_v3`。episode 尾部不足完整 4 秒的
 样本按三车同步帧舍弃，不外推、不补点、不延长 episode；有效样本数会相应减少。
 
+专家控制器的车辆几何参数在 `configs/data/expert_collection.yaml` 中统一配置：
+`vehicle_dimensions.length_m` 和 `width_m` 用于车身包络，`wheelbase_m` 用于
+Pure Pursuit 与路径曲率反算。`wheelbase_m` 不得用车身总长代替，默认 5.5 m 与
+TRACE 锚点/动力学配置一致；正式采集前必须核对所选 TruckSim `.sim` 模型的真实轴距。
+TruckSim 导出的车身纵、横向速度分别转换为 m/s，并投影到目标车道 Frenet 坐标系，
+作为 Polynomial 参考轨迹的初始速度边界条件。修改该控制器几何或初始速度定义后，
+采集器会将其写入 collection contract，避免在同一数据集目录中混合不同配置生成的样本。
+
 训练在 `configs/train/diffusion.yaml` 的 `control.training` 下设置：
 
 ```yaml

@@ -15,7 +15,7 @@ diffusion_anchor_consistent.yaml or diffusion.yaml
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
-  --config configs/train/diffusion.yaml ^
+  --config configs/train/diffusion_anchor_consistent.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
   --output-dir outputs/anchor_ablation/diffusion_ckpt/A1_straight

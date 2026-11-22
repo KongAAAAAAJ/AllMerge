@@ -1587,7 +1587,11 @@ class FOLLOWVehicle(ControlledVehicle):
             1.0,
         )
         curvature = 2.0 * float(local_y) / lookahead_sq
-        wheelbase = float(getattr(self, "LENGTH", 5.0))
+        # Pure Pursuit bicycle geometry uses the axle-to-axle wheelbase.
+        # LENGTH is the full body footprint and must not be substituted here.
+        wheelbase = float(getattr(self, "WHEELBASE", 5.5))
+        if not np.isfinite(wheelbase) or wheelbase <= 0.0:
+            raise ValueError(f"Invalid Pure Pursuit wheelbase: {wheelbase}")
         pure_pursuit = math.atan(wheelbase * curvature)
 
         heading_error = math.atan2(
@@ -1624,6 +1628,14 @@ class FOLLOWVehicle(ControlledVehicle):
             length=self.LENGTH,
             width=self.WIDTH,
         )
+        # The planning proxy is a separate LEADVehicle object. Copy the
+        # configured axle wheelbase and measured TruckSim body velocities so
+        # Polynomial planning starts from the same dynamic boundary state as
+        # the real controlled vehicle.
+        leader_v.WHEELBASE = float(getattr(self, "WHEELBASE", 5.5))
+        if hasattr(self, "body_vx_mps") and hasattr(self, "body_vy_mps"):
+            leader_v.body_vx_mps = float(self.body_vx_mps)
+            leader_v.body_vy_mps = float(self.body_vy_mps)
 
         bind_longitudinal_source(leader_v, self)
 

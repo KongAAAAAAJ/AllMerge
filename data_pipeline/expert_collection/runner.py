@@ -179,18 +179,29 @@ def main(args=None):
 
     # Resume only under the same sampling contract; target size and episode cap may change.
     contract_path = reports / "collection_contract.json"
-    contract = {"schema_version": "trace_expert_raw_k2_v3",
-                "trajectory_sources": ["polynomial", "trucksim_closed_loop"],
-                "execution_target": "future closed-loop execution including replanning",
-                "scenarios": args.scenarios, "cases": cases, "seed": args.start_seed,
-                "start_episode_index": args.start_episode_index, "duration": args.duration,
-                "group_action": args.group_action,
-                "min_contiguous_control_steps": args.min_contiguous_control_steps,
-                "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
-                "road_geometry": args.road_geometry,
-                "split_ratios": [args.train_split_ratio, args.val_split_ratio, args.test_split_ratio],
-                "split_seed": args.split_seed,
-                "koopman_config_sha256": hashlib.sha256(args.koopman_config.read_bytes()).hexdigest()}
+    contract = {
+        "schema_version": "trace_expert_raw_k2_v3",
+        "trajectory_sources": ["polynomial", "trucksim_closed_loop"],
+        "execution_target": "future closed-loop execution including replanning",
+        "scenarios": args.scenarios,
+        "cases": cases,
+        "seed": args.start_seed,
+        "start_episode_index": args.start_episode_index,
+        "duration": args.duration,
+        "group_action": args.group_action,
+        "min_contiguous_control_steps": args.min_contiguous_control_steps,
+        "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
+        "wheelbase_m": float(args.ego_wheelbase_m),
+        "polynomial_controller": {
+            "wheelbase_m": float(args.ego_wheelbase_m),
+            "frenet_velocity_source": "trucksim_body_vx_vy_projected_to_frenet",
+            "pure_pursuit_geometry": "wheelbase_not_body_length",
+        },
+        "road_geometry": args.road_geometry,
+        "split_ratios": [args.train_split_ratio, args.val_split_ratio, args.test_split_ratio],
+        "split_seed": args.split_seed,
+        "koopman_config_sha256": hashlib.sha256(args.koopman_config.read_bytes()).hexdigest(),
+    }
     if contract_path.exists():
         if json.loads(contract_path.read_text(encoding="utf-8")) != contract:
             raise RuntimeError("Raw collection contract differs; choose a new dataset name")
@@ -294,6 +305,11 @@ def main(args=None):
                           for e, (p, n) in sorted(preanchor_by_episode.items())],
         "trucksim_physical_cases": len(cases), "scenarios": args.scenarios,
         "vehicle_dimensions_m": [args.ego_length_m, args.ego_width_m],
+        "wheelbase_m": float(args.ego_wheelbase_m),
+        "polynomial_controller": {
+            "wheelbase_m": float(args.ego_wheelbase_m),
+            "frenet_velocity_source": "trucksim_body_vx_vy",
+        },
         "road_geometry": args.road_geometry,
         "trajectory": {"polynomial_future_xy": [40, 2], "trucksim_future_poses": [40, 3],
                        "dt_s": 0.1, "horizon_s": 4.0},

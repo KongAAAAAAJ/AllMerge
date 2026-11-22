@@ -1,0 +1,25 @@
+{
+  "package": "TRACE_Anchor_Assigned_Loss_Installer_V2_2",
+  "version": "2.2.0",
+  "installed_at": "2026-11-22T16:25:00.437753+08:00",
+  "project_root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "backup_dir": "D:\\KONG_Files\\AllMerge\\all_merge\\.trace_backups\\trace_anchor_assigned_loss_v2_2_20261122_162500_436748",
+  "files": [
+    {
+      "path": "configs/train/diffusion.yaml",
+      "action": "MERGE",
+      "existed_before": true,
+      "original_sha256": "dd352ab8fcf96852cbcad60a60fbc9b1d759abc11da03f2cc57907a8321f1d7c",
+      "installed_sha256": "66a90cfb249ebd852ad88015f7ab8677c90e9ccc6c3d4e65e598a1c1b21be373"
+    },
+    {
+      "path": "tests/test_trace_anchor_loss_strategy_switch.py",
+      "action": "CREATE",
+      "existed_before": false,
+      "original_sha256": null,
+      "installed_sha256": "a4e8e47d957f4105c87d3ba271865141047a10c7ba131817e7909548464c5ca3"
+    }
+  ],
+  "rolled_back": true,
+  "rollback_reason": "installation or post-install verification failed"
+}

@@ -112,9 +112,28 @@ class PolyPlanner:
         heading_error = self._wrap_angle(
             float(self.controlled_vehicle.heading) - lane_heading
         )
-        speed = float(self.controlled_vehicle.speed)
-        s_dot0 = speed * math.cos(heading_error)
-        d_dot0 = speed * math.sin(heading_error)
+        vehicle = self.controlled_vehicle
+        body_vx = getattr(vehicle, "body_vx_mps", None)
+        body_vy = getattr(vehicle, "body_vy_mps", None)
+        if body_vx is not None and body_vy is not None:
+            body_vx = float(body_vx)
+            body_vy = float(body_vy)
+            if not np.isfinite([body_vx, body_vy]).all():
+                raise ValueError("TruckSim body-frame velocity must be finite")
+        else:
+            # Kinematic/non-TruckSim vehicles have no separately modelled
+            # lateral body velocity; their scalar speed is along body x.
+            body_vx = float(vehicle.speed)
+            body_vy = 0.0
+
+        # Rotate the measured body-frame velocity into the target-lane Frenet
+        # frame. e_psi = body heading - lane tangent heading; +d points left.
+        # This retains the TruckSim sideslip contribution instead of assuming
+        # that the velocity vector is aligned with the vehicle body heading.
+        cos_e = math.cos(heading_error)
+        sin_e = math.sin(heading_error)
+        s_dot0 = body_vx * cos_e - body_vy * sin_e
+        d_dot0 = body_vx * sin_e + body_vy * cos_e
         return target_lane, s0, d0, s_dot0, d_dot0
 
     def _frenet_lateral_profile(self, times, d0, d_dot0, t_lc):
@@ -264,9 +283,10 @@ class PolyPlanner:
                 headings_unwrapped[i] - headings_unwrapped[i - 1]
             ) / float(self.DT)
             speed = max(float(speeds[i - 1]), 1e-3)
-            steering = math.atan(
-                float(self.controlled_vehicle.LENGTH) * yaw_rate / speed
-            )
+            wheelbase = float(getattr(self.controlled_vehicle, "WHEELBASE", 5.5))
+            if not np.isfinite(wheelbase) or wheelbase <= 0.0:
+                raise ValueError(f"Invalid vehicle wheelbase for Polynomial path: {wheelbase}")
+            steering = math.atan(wheelbase * yaw_rate / speed)
             steering_angles.append(steering)
 
         return (
@@ -276,7 +296,7 @@ class PolyPlanner:
         )
 
     def _build_frenet_candidate(self, t_lc, total_horizon):
-        target_lane, s0, d0, _, d_dot0 = self._target_lane_frenet_state()
+        target_lane, s0, d0, s_dot0, d_dot0 = self._target_lane_frenet_state()
 
         accelerations, s_speeds, _legacy_x_positions = (
             self.speed_planning(float(total_horizon))
@@ -288,6 +308,9 @@ class PolyPlanner:
             raise RuntimeError(
                 "PolyPlanner.speed_planning returned an empty speed profile"
             )
+        # The first longitudinal sample must satisfy the same measured body-
+        # velocity boundary condition used by the Frenet lateral profile.
+        s_speeds[0] = float(s_dot0)
 
         times = self._frenet_time_grid(len(s_speeds))
         d_positions, d_speeds = self._frenet_lateral_profile(
@@ -452,8 +475,11 @@ class PolyPlanner:
             steering_angles = []
 
             for i in range(1, len(headings)):
+                wheelbase = float(getattr(self.controlled_vehicle, "WHEELBASE", 5.5))
+                if not np.isfinite(wheelbase) or wheelbase <= 0.0:
+                    raise ValueError(f"Invalid vehicle wheelbase for Polynomial path: {wheelbase}")
                 steering = math.atan(
-                    self.controlled_vehicle.LENGTH
+                    wheelbase
                     * (headings[i] - headings[i - 1])
                     / speeds[i - 1]
                     / self.DT
@@ -524,8 +550,11 @@ class PolyPlanner:
                 aligned_steering_angles = []
 
                 for i in range(1, len(aligned_headings)):
+                    wheelbase = float(getattr(self.controlled_vehicle, "WHEELBASE", 5.5))
+                    if not np.isfinite(wheelbase) or wheelbase <= 0.0:
+                        raise ValueError(f"Invalid vehicle wheelbase for Polynomial path: {wheelbase}")
                     steering = math.atan(
-                        self.controlled_vehicle.LENGTH
+                        wheelbase
                         * (
                             aligned_headings[i]
                             - aligned_headings[i - 1]

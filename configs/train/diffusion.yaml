@@ -39,7 +39,16 @@ control:
     model: koopman_k2
     checkpoint: outputs/koopman/checkpoints/v0/k2/best.pt
   losses:
+    # Keep inference-compatible mode selection identical across both objectives.
     mode_selection: goal_endpoint
+    # Shared objective switch inherited by A0/A2 through `extends`.
+    # goal_endpoint: original expert/safety/fuel/progress objective.
+    # anchor_consistent: paired frozen-K2 Anchor execution consistency and relative fuel.
+    training_scheme: goal_endpoint
+    anchor_consistency:
+      # Applied only to valid modes other than the expert-assigned mode.
+      # The expert-assigned mode is supervised by the expert trajectory loss.
+      weight: 0.1
     trajectory:
       weight: 1.0
     background_collision:
@@ -63,7 +72,11 @@ control:
       weight: 0.0
       limit: 0.6
     fuel:
+      # Absolute fuel weight is used by goal_endpoint. The relative weight is
+      # used by anchor_consistent and compares each mode against its own Anchor.
       weight: 200
+      relative_weight: 0.1
+      relative_epsilon: 1.0e-8
       parameters:
         empty_mass_kg: 4455
         rolling_resistance: 0.007

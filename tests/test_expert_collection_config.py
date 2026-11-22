@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+import numpy as np
 
 from data_pipeline.expert_collection.config import ROOT, load_config, collection_args
 from scripts.data.collect_expert_dataset import main
@@ -25,6 +26,7 @@ def test_paths_and_no_cwd_side_effect(tmp_path, monkeypatch):
     assert opts.output_root == ROOT / 'outputs/expert_dataset'
     assert opts.koopman_config == ROOT / 'configs/koopman/collect.yaml'
     assert opts.start_seed == 7
+    assert np.isclose(opts.ego_wheelbase_m, 5.5)
 
 
 @pytest.mark.parametrize('cfg', [
@@ -35,6 +37,7 @@ def test_paths_and_no_cwd_side_effect(tmp_path, monkeypatch):
     {'collection': {'resume': 'false'}},
     {'collection': {'timeout_s': float('nan')}},
     {'collection': {'train_split_ratio': .9}},
+    {'vehicle_dimensions': {'wheelbase_m': 0.0}},
 ])
 def test_invalid_config_rejected(tmp_path, cfg):
     with pytest.raises(ValueError):

@@ -52,6 +52,7 @@ def parse_args(argv=None):
     args.trucksim_koopman_config = Path(cfg["koopman_collection_config"])
     args.ego_length_m = float(cfg["vehicle_dimensions"]["length_m"])
     args.ego_width_m = float(cfg["vehicle_dimensions"]["width_m"])
+    args.ego_wheelbase_m = float(cfg["vehicle_dimensions"]["wheelbase_m"])
     road = cfg["road_geometry"]
     args.road_forward_min_m = float(road["forward_min_m"])
     args.road_forward_max_m = float(road["forward_max_m"])
@@ -178,6 +179,7 @@ def main(argv=None):
     for controlled in env.controlled_vehicles:
         controlled.LENGTH = float(args.ego_length_m)
         controlled.WIDTH = float(args.ego_width_m)
+        controlled.WHEELBASE = float(args.ego_wheelbase_m)
 
     if case is not None:
         from data_pipeline.expert_collection.trucksim import HistoricalContexts, check_context

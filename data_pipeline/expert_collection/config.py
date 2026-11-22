@@ -109,13 +109,13 @@ def load_config(filename=DEFAULT_CONFIG):
     if not isinstance(collection['resume'], bool):
         raise ValueError('collection.resume must be a YAML boolean')
 
-    dims = cfg.setdefault("vehicle_dimensions", {"length_m": 8.0, "width_m": 2.6})
+    dims = cfg.setdefault("vehicle_dimensions", {"length_m": 8.0, "width_m": 2.6, "wheelbase_m": 5.5})
     road = cfg.setdefault("road_geometry", {})
-    dims.setdefault("length_m", 8.0); dims.setdefault("width_m", 2.6)
+    dims.setdefault("length_m", 8.0); dims.setdefault("width_m", 2.6); dims.setdefault("wheelbase_m", 5.5)
     road_defaults = {"forward_min_m": 120.0, "forward_max_m": 300.0,
                      "point_spacing_m": 1.5, "max_lanes": 16, "max_points_per_lane": 256}
     for key, value in road_defaults.items(): road.setdefault(key, value)
-    for key in ("length_m", "width_m"):
+    for key in ("length_m", "width_m", "wheelbase_m"):
         dims[key] = _positive_number(dims[key], f"vehicle_dimensions.{key}")
     for key in ("forward_min_m", "forward_max_m", "point_spacing_m"):
         road[key] = _positive_number(road[key], f"road_geometry.{key}")
@@ -143,6 +143,7 @@ def collection_args(cfg, *, config_path=DEFAULT_CONFIG, check_only=False, overri
         copy_trucksim_dll_instances=bool(cfg["conditions"]["copy_instances_beside_source_dll"]),
         ego_length_m=float(cfg["vehicle_dimensions"]["length_m"]),
         ego_width_m=float(cfg["vehicle_dimensions"]["width_m"]),
+        ego_wheelbase_m=float(cfg["vehicle_dimensions"]["wheelbase_m"]),
         road_geometry=dict(cfg["road_geometry"]),
         dataset_name=c["dataset_name"],
         output_root=Path(c["output_root"]),

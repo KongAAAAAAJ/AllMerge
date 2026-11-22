@@ -1,0 +1,68 @@
+{
+  "patch_id": "trace_polynomial_dynamic_fix_v1",
+  "installed_at_utc": "20261121T160724Z",
+  "target_root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "backup_dir": ".patch_backups/trace_polynomial_dynamic_fix_v1/20261121T160724Z",
+  "files": {
+    "configs/data/expert_collection.yaml": {
+      "backup_exists": true,
+      "backup_sha256": "e57ea93873e2f0bbeb6dfa0963b2a174dea19505f7c751e762f4826feaa77f47",
+      "installed_sha256": "f44bbf8e05d60888a92aebe1fbb4c781b4ed317c489a7443b2fd1d8c5d11e3cc",
+      "status": "three-way-merge"
+    },
+    "data_pipeline/expert_collection/config.py": {
+      "backup_exists": true,
+      "backup_sha256": "7bb6296f5f0172273696fad3a5dd6478a689690e4caec8cc7b580b2e4f63ec6b",
+      "installed_sha256": "5350e817a366cb567b27808828653263b23d77d54b4cc749263e2f44c9a6038b",
+      "status": "update"
+    },
+    "data_pipeline/expert_collection/runner.py": {
+      "backup_exists": true,
+      "backup_sha256": "bb039ecf457677b8fee56a9a6c7ca354d3a1b7215fac77cd18f6aeb072d0dc29",
+      "installed_sha256": "d1c86ebbfe561e23d6b8a8c32cd2480573b334a7042494f79030aa379b77f4cb",
+      "status": "three-way-merge"
+    },
+    "data_pipeline/expert_collection/worker.py": {
+      "backup_exists": true,
+      "backup_sha256": "6d8baa438f14268431fdde66f1d2c008c44fef5bde74274a9c7822a9927f5f0d",
+      "installed_sha256": "72f191f0046f544d8937d89c6912ceb82da592b5bf9fe362291f1b509d0da711",
+      "status": "three-way-merge"
+    },
+    "highway_env/vehicle/controller.py": {
+      "backup_exists": true,
+      "backup_sha256": "41352af15f96f67b4617135039e4179502e02a321bf8e6401afc3fd7233f522e",
+      "installed_sha256": "613f34c70852e5042b6b26895ded89626925e8175a50bfdde27d434ee6535e17",
+      "status": "update"
+    },
+    "highway_env/vehicle/planner.py": {
+      "backup_exists": true,
+      "backup_sha256": "0beff2a1ce73b8a0ff89f291018ffcaa06af1cdf37cc1a8baea0210cb8576888",
+      "installed_sha256": "5b79512094e3d4abc2f6d52df74c88c7639ad81dd9b70d237d8bcccceda07e12",
+      "status": "three-way-merge"
+    },
+    "highway_env/vehicle/trucksim_dynamics.py": {
+      "backup_exists": true,
+      "backup_sha256": "ead95c32653bee8aeab8560f89402b8cbc566e49c82e0762df6f383f33cd74d4",
+      "installed_sha256": "e7a4e6f204302fcd1937722212e41bf6572e6b5f838de25600c82288003c52e2",
+      "status": "update"
+    },
+    "scripts/data/README.md": {
+      "backup_exists": true,
+      "backup_sha256": "e9218d873f1f610ee7b215c426068d37ac6aff9d70b14f79148227aac4ea83bd",
+      "installed_sha256": "3e869bedbcc6e85deb9d81f9a81df66392f6b537aa2a4bed495fc6114fdf1a03",
+      "status": "three-way-merge"
+    },
+    "tests/test_expert_collection_config.py": {
+      "backup_exists": true,
+      "backup_sha256": "d22fcda6757d3d7127d32cd5c7425de494baa3a2bcf3589e52203dae2262dcb6",
+      "installed_sha256": "7ebc1b8ec88e8ac408ccc6f530565524b5a301a95d1e559155c7b6cf8b41ae2c",
+      "status": "update"
+    },
+    "tests/test_polynomial_trucksim_dynamic_state.py": {
+      "backup_exists": false,
+      "backup_sha256": null,
+      "installed_sha256": "0e363f866c6254b66aea3f550c92deec9291cc78eafa3730ed8ab6c44050d78b",
+      "status": "add"
+    }
+  }
+}

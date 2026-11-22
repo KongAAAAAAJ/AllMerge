@@ -142,8 +142,12 @@ class TrucksimVehicle(FOLLOWVehicle):
             raise RuntimeError("TruckSim returned non-finite state")
         if self.control_mode == 'longitudinal':
             self.position = self._native_to_scene_position(export[4:6])
-            self.speed = float(np.hypot(export[2], export[3]) / 3.6)
-            # Body sideslip (Vy/Vx) is not the vehicle yaw angle.
+            # TruckSim exports signed body-frame velocities in km/h. Preserve
+            # both components: the scalar speed magnitude is insufficient for
+            # Frenet initial conditions when the truck has appreciable sideslip.
+            self.body_vx_mps = float(export[2] / 3.6)
+            self.body_vy_mps = float(export[3] / 3.6)
+            self.speed = float(np.hypot(self.body_vx_mps, self.body_vy_mps))
             self.heading = float(np.deg2rad(export[10]) + self.heading_offset)
             self.measured_acceleration = export[:2] * 9.8
             self.front_wheel_angle_deg = float((export[13] + export[14]) / 2)
@@ -151,7 +155,9 @@ class TrucksimVehicle(FOLLOWVehicle):
         else:
             e = self.signal_map['exports']
             self.position = self._native_to_scene_position(export[[e['x_m'], e['y_m']]])
-            self.speed = float(np.hypot(export[e['vx_kmh']], export[e['vy_kmh']]) / 3.6)
+            self.body_vx_mps = float(export[e['vx_kmh']] / 3.6)
+            self.body_vy_mps = float(export[e['vy_kmh']] / 3.6)
+            self.speed = float(np.hypot(self.body_vx_mps, self.body_vy_mps))
             self.heading = float(np.deg2rad(export[e['yaw_deg']]) + self.heading_offset)
             self.measured_acceleration = np.array([export[e['ax_g']], export[e['ay_g']]]) * 9.8
             self.front_wheel_angle_deg = float((export[e['steer_left_deg']] +

@@ -1,0 +1,51 @@
+# The only supported TRACE expert data production pipeline.
+# Polynomial expert and four scenario definitions remain unchanged. Each episode
+# runs in an isolated OS process with three independent TruckSim DLL instances.
+vehicle_model: trucksim
+scenarios: [straight, curved, merge_in, merge_out]
+platoon_egos: 3
+control_mode: longitudinal_lateral
+history_length: 5
+control_history_length: 4
+history_dt_s: 0.1
+expert_horizon_s: 4.0
+expert_dt_s: 0.1
+koopman_collection_config: configs/koopman/collect.yaml
+conditions:
+  selection: round_robin_payload_friction
+  operating_condition_per_episode: true
+  independent_dll_images: true
+  copy_instances_beside_source_dll: true
+collection:
+  dataset_name: expert_trucksim_dual
+  output_root: outputs/expert_dataset
+  target_samples: 100000
+  min_episodes: 0
+  episode_duration_s: 12.0
+  # Defer task-success termination until every ego has this many recorded controls.
+  min_contiguous_control_steps: 60
+  max_episodes: 10000
+  timeout_s: 300
+  worker_retries: 2
+  resume: true
+  start_seed: 2026
+  start_episode_index: 0
+  group_action: 3
+  max_consecutive_empty_episodes: 20
+  train_split_ratio: 0.8
+  val_split_ratio: 0.1
+  test_split_ratio: 0.1
+  split_seed: 0
+vehicle_dimensions:
+  length_m: 8.0
+  width_m: 2.6
+road_geometry:
+  forward_min_m: 120.0
+  forward_max_m: 300.0
+  point_spacing_m: 1.5
+  max_lanes: 16
+  max_points_per_lane: 256
+
+
+
+
