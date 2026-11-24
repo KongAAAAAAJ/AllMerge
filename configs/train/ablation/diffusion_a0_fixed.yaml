@@ -6,8 +6,8 @@ control:
     strategy: fixed
     bank_path: outputs/anchor_ablation/ckpt/dual/A0_anchors/A0_control_anchors.npz
   training:
-    output_dir: outputs/anchor_ablation/diffusion_ckpt/A0
+    output_dir: outputs/anchor_ablation/diffusion_ckpt/dual/A0
 
 runtime:
   checkpoint:
-    control: outputs/anchor_ablation/diffusion_ckpt/A0/best.pt
+    control: outputs/anchor_ablation/diffusion_ckpt/dual/A0/best.pt

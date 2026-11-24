@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-DEFAULT_DATASET = "outputs/expert_dataset/expert_trucksim_50k_straight"
+DEFAULT_DATASET = "outputs/expert_dataset/expert_trucksim_dual_100k_straight"
 CURVATURE_THRESHOLD_1PM = 1e-3
 EXPECTED_EGOS = 3
 
@@ -206,8 +206,8 @@ def main(argv=None):
 
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes.decode("utf-8"))
-    if not manifest.get("complete") or manifest.get("schema_version") != "trace_expert_raw_k2_v2":
-        raise ValueError("Expected a completed trace_expert_raw_k2_v2 raw expert dataset")
+    if not manifest.get("complete") or manifest.get("schema_version") != "trace_expert_raw_k2_v3":
+        raise ValueError("Expected a completed trace_expert_raw_k2_v3 raw expert dataset")
     if not np.isclose(float(manifest["trajectory"]["dt_s"]), 0.1):
         raise ValueError("Expected the TRACE 0.1 s raw expert dataset")
     records = manifest["episode_files"]

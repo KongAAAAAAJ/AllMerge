@@ -248,3 +248,311 @@ def test_best_through_epoch_snapshots(tmp_path, monkeypatch):
     latest = torch.load(output / 'last.pt', map_location='cpu', weights_only=True)
     assert latest['epoch'] == 3
     assert latest['model_state']['weight'].item() == 4.0
+
+
+def test_auto_resume_fresh_processes_and_frozen_parameters(tmp_path, monkeypatch):
+    import json
+    import yaml
+    from scripts.training import run_diffusion as entry
+    cfg = _config()
+    cfg['training']['patience'] = 15
+    cfg['training']['max_epochs'] = 60
+    config_path = tmp_path / 'experiment.yaml'
+    config_path.write_text(yaml.safe_dump(cfg), encoding='utf-8')
+    child = tmp_path / 'fake_training.py'
+    child.write_text("""import argparse, json, sys
+from pathlib import Path
+import torch
+p=argparse.ArgumentParser()
+p.add_argument('--_auto-worker')
+p.add_argument('--resume')
+a=p.parse_args()
+run=json.loads(Path(a._auto_worker).read_text(encoding='utf-8'))
+out=Path(run['train_args']['output_dir'])
+seen_path=out/'seen.json'
+seen=json.loads(seen_path.read_text()) if seen_path.exists() else []
+seen.append({'resume':a.resume, 'config':run['config'], 'args':run['train_args']})
+seen_path.write_text(json.dumps(seen))
+epoch=len(seen)
+torch.save({'epoch':epoch},out/'last.pt')
+sys.exit(1 if epoch==1 else 0)
+""", encoding='utf-8')
+    actual_run = entry._run_attempt
+    commands = []
+    def run(command):
+        commands.append(command[:])
+        replaced = command[:]
+        replaced[2] = str(child)
+        result = actual_run(replaced)
+        config_path.write_text('output_space: invalid', encoding='utf-8')
+        return result
+    monkeypatch.setattr(entry, '_run_attempt', run)
+    sleeps = []
+    monkeypatch.setattr(entry.time, 'sleep', sleeps.append)
+    output = tmp_path / 'output'
+    assert entry.main(['--auto-resume', '--config', str(config_path),
+                       '--dataset-root', str(tmp_path / 'raw'), '--output-dir', str(output),
+                       '--anchor-cache-dir', str(tmp_path / 'cache'), '--device', 'cpu',
+                       '--max-epochs', '2', '--max-steps', '7', '--limit-samples', '5']) == 0
+    seen = json.loads((output / 'seen.json').read_text())
+    assert len(commands) == len(seen) == 2 and sleeps == [10]
+    assert '--auto-resume' not in commands[0]
+    assert seen[0]['resume'] is None
+    assert seen[1]['resume'] == str(output / 'last.pt')
+    assert seen[0]['args'] == seen[1]['args']
+    assert seen[0]['config'] == seen[1]['config']
+    assert seen[0]['config']['training']['patience'] == 15
+    assert seen[0]['args'] == dict(root=str(tmp_path / 'raw'), output_dir=str(output),
+                                  anchor_cache_dir=str(tmp_path / 'cache'), device='cpu',
+                                  max_epochs=2, max_steps=7, limit_samples=5)
+
+
+@pytest.mark.parametrize('scenario, exit_code, expected_calls', [
+    ('no_progress', 1, 3), ('progress_reset', 1, 6),
+    ('patience', 0, 1), ('target_after_error', 0, 1), ('interrupt', 130, 1)])
+def test_auto_resume_exit_rules(tmp_path, monkeypatch, scenario, exit_code, expected_calls):
+    from scripts.training import run_diffusion as entry
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(entry.time, 'sleep', sleeps.append)
+    output = tmp_path / 'output'
+    def run(command):
+        calls.append(command)
+        if scenario == 'interrupt':
+            raise KeyboardInterrupt
+        if scenario == 'patience':
+            torch.save({'epoch': 1}, output / 'last.pt')
+            return 0
+        if scenario == 'target_after_error':
+            torch.save({'epoch': 10}, output / 'last.pt')
+        if scenario == 'progress_reset' and len(calls) == 3:
+            torch.save({'epoch': 1}, output / 'last.pt')
+        return 1
+    monkeypatch.setattr(entry, '_run_attempt', run)
+    assert entry._auto_resume(_config(), dict(output_dir=str(output), max_epochs=10), None) == exit_code
+    assert len(calls) == expected_calls
+    assert len(sleeps) == max(expected_calls - 1, 0)
+
+
+def test_auto_resume_initial_checkpoint_and_existing_output(tmp_path, monkeypatch):
+    from scripts.training import run_diffusion as entry
+    initial = tmp_path / 'initial.pt'
+    torch.save({'epoch': 4}, initial)
+    output = tmp_path / 'output'
+    output.mkdir()
+    torch.save({'epoch': 9}, output / 'last.pt')
+    with pytest.raises(ValueError, match='without checkpoints'):
+        entry._auto_resume(_config(), dict(output_dir=str(output), max_epochs=10), None)
+    calls = []
+    monkeypatch.setattr(entry.time, 'sleep', lambda seconds: None)
+    def fail(command):
+        calls.append(command)
+        return 1
+    monkeypatch.setattr(entry, '_run_attempt', fail)
+    assert entry._auto_resume(_config(), dict(output_dir=str(output), max_epochs=10), str(initial)) == 1
+    assert len(calls) == 3
+    assert all(command[-2:] == ['--resume', str(initial)] for command in calls)
+    calls.clear()
+    assert entry._auto_resume(_config(), dict(output_dir=str(output), max_epochs=4), str(initial)) == 0
+    assert calls == []
+
+
+def test_auto_worker_and_original_entry_do_not_change_training_call(tmp_path, monkeypatch):
+    import json
+    from scripts.training import run_diffusion as entry
+    cfg = _config()
+    cfg['training'].update(dataset_root=str(tmp_path / 'raw'), output_dir=str(tmp_path / 'output'))
+    calls = []
+    monkeypatch.setattr(training, 'train', lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    assert entry.main(['--config', 'unused', '--max-steps', '3']) == 0
+    assert calls[-1][0] == (cfg,)
+    assert calls[-1][1] == dict(root=tmp_path / 'raw', output_dir=tmp_path / 'output',
+                               max_steps=3, max_epochs=None, limit_samples=0,
+                               device=None, resume=None, anchor_cache_dir=None)
+    snapshot = tmp_path / 'snapshot.json'
+    snapshot.write_text(json.dumps({'config': cfg, 'train_args': {'max_epochs': 8}}))
+    def forbidden(path):
+        raise AssertionError('Worker must never reload experiment YAML')
+    monkeypatch.setattr(entry, 'load_mode_yaml', forbidden)
+    assert entry.main(['--_auto-worker', str(snapshot), '--resume', 'fixed.pt']) == 0
+    assert calls[-1] == ((cfg,), {'max_epochs': 8, 'resume': 'fixed.pt'})
+
+
+def test_auto_resume_interrupt_stops_child_tree(monkeypatch):
+    from scripts.training import run_diffusion as entry
+    waits = iter([KeyboardInterrupt(), 0])
+    class Child:
+        pid = 12345
+        def wait(self):
+            value = next(waits)
+            if isinstance(value, BaseException):
+                raise value
+            return value
+    monkeypatch.setattr(entry.subprocess, 'Popen', lambda *a, **k: Child())
+    stopped = []
+    monkeypatch.setattr(entry.subprocess, 'run', lambda command, **kwargs: stopped.append(command))
+    monkeypatch.setattr(entry.os, 'killpg', lambda pid, sig: stopped.append(pid), raising=False)
+    with pytest.raises(KeyboardInterrupt):
+        entry._run_attempt(['fake'])
+    assert len(stopped) == 1
+    if entry.os.name == 'nt':
+        assert stopped[0] == ['taskkill', '/PID', '12345', '/T', '/F']
+    else:
+        assert stopped[0] == 12345
+
+
+def test_atomic_checkpoint_failure_keeps_previous_file(tmp_path, monkeypatch):
+    path = tmp_path / 'last.pt'
+    training._atomic_save_checkpoint({'epoch': 1}, path)
+    original = path.read_bytes()
+    def broken_save(value, temporary):
+        temporary.write_bytes(b'incomplete')
+        raise OSError('simulated write failure')
+    monkeypatch.setattr(training.torch, 'save', broken_save)
+    with pytest.raises(OSError, match='simulated write failure'):
+        training._atomic_save_checkpoint({'epoch': 2}, path)
+    assert path.read_bytes() == original
+    assert not path.with_name('last.pt.tmp').exists()
+
+
+def test_auto_resume_later_uses_first_training_snapshot(tmp_path, monkeypatch):
+    import json
+    from scripts.training import run_diffusion as entry
+    cfg = _config()
+    cfg['training'].update(dataset_root=str(tmp_path / 'raw'), output_dir=str(tmp_path / 'output'))
+    calls = []
+    monkeypatch.setattr(training, 'train', lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    output = tmp_path / 'output'
+    assert entry.main(['--config', 'original.yaml', '--device', 'cpu', '--max-epochs', '60',
+                       '--max-steps', '3', '--limit-samples', '5',
+                       '--anchor-cache-dir', str(tmp_path / 'cache')]) == 0
+    fixed = json.loads((output / 'training_run.json').read_text())
+    torch.save({'epoch': 12}, output / 'last.pt')
+    cfg['losses']['training_scheme'] = 'different'
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    captured = []
+    monkeypatch.setattr(entry, '_auto_resume', lambda *args: captured.append(args) or 0)
+    with pytest.warns(RuntimeWarning, match='Current YAML differs'):
+        assert entry.main(['--auto-resume', '--resume', str(output / 'last.pt'),
+                           '--config', 'edited.yaml', '--max-epochs', '100', '--limit-samples', '999']) == 0
+    assert captured == [(fixed['config'], fixed['train_args'], str(output / 'last.pt'))]
+    assert captured[0][1]['max_epochs'] == 60
+    assert captured[0][1]['max_steps'] == 3
+    assert captured[0][1]['limit_samples'] == 5
+    assert captured[0][1]['anchor_cache_dir'] == str(tmp_path / 'cache')
+    assert 'training_scheme' not in captured[0][0]['losses']
+    assert json.loads((output / 'training_run.json').read_text()) == fixed
+
+
+@pytest.mark.parametrize('automatic', [False, True])
+@pytest.mark.parametrize('new_output', [False, True])
+def test_legacy_resume_without_snapshot_uses_current_options(tmp_path, monkeypatch, automatic, new_output):
+    import json
+    from scripts.training import run_diffusion as entry
+    checkpoint = tmp_path / 'legacy' / 'last.pt'
+    checkpoint.parent.mkdir()
+    torch.save({'epoch': 12}, checkpoint)
+    cfg = _config()
+    cfg['training'].update(dataset_root='unused', output_dir=str(tmp_path / 'wrong_yaml_output'), max_epochs=50)
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    calls = []
+    monkeypatch.setattr(training, 'train', lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(entry, '_auto_resume', lambda *a: calls.append(a) or 0)
+    output = tmp_path / 'new_output' if new_output else checkpoint.parent
+    options = ['--resume', str(checkpoint), '--device', 'cpu', '--max-epochs', '60',
+               '--dataset-root', str(tmp_path / 'data'), '--anchor-cache-dir', str(tmp_path / 'cache'),
+               '--max-steps', '7', '--limit-samples', '5']
+    if automatic:
+        options.append('--auto-resume')
+    if new_output:
+        options.extend(['--output-dir', str(output)])
+    with pytest.warns(RuntimeWarning, match='Missing training_run.json'):
+        assert entry.main(options) == 0
+    run = json.loads((output / 'training_run.json').read_text())
+    expected = dict(root=str(tmp_path / 'data'), output_dir=str(output), max_epochs=60,
+                    max_steps=7, limit_samples=5, device='cpu', anchor_cache_dir=str(tmp_path / 'cache'))
+    assert run['train_args'] == expected
+    assert run['yaml_config'] == cfg
+    if automatic:
+        assert calls == [(run['config'], expected, str(checkpoint))]
+    else:
+        assert calls == [((run['config'],), {**expected, 'resume': str(checkpoint)})]
+    if new_output:
+        assert not (checkpoint.parent / 'training_run.json').exists()
+    # Subsequent resumes consume the new output snapshot, not the edited YAML or overrides.
+    cfg['losses']['trajectory']['weight'] = 99.
+    next_checkpoint = output / 'last.pt'
+    calls.clear()
+    with pytest.warns(RuntimeWarning, match='Current YAML differs'):
+        assert entry.main(['--resume', str(next_checkpoint), '--max-epochs', '100']) == 0
+    assert calls == [((run['config'],), {**expected, 'resume': str(next_checkpoint)})]
+    assert json.loads((output / 'training_run.json').read_text()) == run
+
+
+def test_legacy_resume_still_rejects_incompatible_checkpoint(tmp_path, monkeypatch):
+    import json
+    from scripts.training import run_diffusion as entry
+    monkeypatch.setattr(training, 'ControlDiffusionPlanner', _DummySafetyPlanner)
+    monkeypatch.setattr(training, '_make_loader', lambda *a, **k: _Loader())
+    monkeypatch.setattr(training, '_run_pass', lambda *a, **k: _metrics(.5))
+    cfg = _config()
+    output = tmp_path / 'legacy'
+    training.train(cfg, root=tmp_path, output_dir=output, max_epochs=1, device='cpu')
+    current = copy.deepcopy(cfg)
+    current['training']['dataset_root'] = str(tmp_path)
+    current['losses']['trajectory']['weight'] = 2.
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: current)
+    with pytest.warns(RuntimeWarning, match='Missing training_run.json'):
+        with pytest.raises(ValueError, match='loss_config differs'):
+            entry.main(['--resume', str(output / 'last.pt'), '--device', 'cpu', '--max-epochs', '2'])
+    snapshot = output / 'training_run.json'
+    assert json.loads(snapshot.read_text())['config']['losses']['trajectory']['weight'] == 2.
+    saved_bytes = snapshot.read_bytes()
+    current['losses']['trajectory']['weight'] = 1.
+    with pytest.warns(RuntimeWarning, match='Current YAML differs'):
+        with pytest.raises(ValueError, match='loss_config differs'):
+            entry.main(['--resume', str(output / 'last.pt')])
+    assert snapshot.read_bytes() == saved_bytes
+
+
+def test_manual_resume_uses_first_snapshot_and_warns_for_yaml_change(tmp_path, monkeypatch):
+    import json
+    from scripts.training import run_diffusion as entry
+    cfg = _config()
+    output = tmp_path / 'run'
+    cfg['training'].update(dataset_root=str(tmp_path / 'raw'), output_dir=str(output))
+    calls = []
+    monkeypatch.setattr(training, 'train', lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    assert entry.main(['--device', 'cpu', '--max-epochs', '60', '--max-steps', '2']) == 0
+    fixed = json.loads((output / 'training_run.json').read_text())
+    checkpoint = output / 'last.pt'
+    torch.save({'epoch': 10}, checkpoint)
+    cfg['losses']['training_scheme'] = 'anchor_consistent'
+    with pytest.warns(RuntimeWarning, match='Current YAML differs'):
+        assert entry.main(['--resume', str(checkpoint), '--max-epochs', '100', '--max-steps', '9']) == 0
+    assert calls[-1] == ((fixed['config'],), {**fixed['train_args'], 'resume': str(checkpoint)})
+    assert calls[-1][1]['max_epochs'] == 60
+    assert calls[-1][1]['max_steps'] == 2
+    assert calls[-1][0][0]['training']['patience'] == fixed['config']['training']['patience']
+
+
+def test_legacy_resume_does_not_overwrite_destination_snapshot(tmp_path, monkeypatch):
+    from scripts.training import run_diffusion as entry
+    checkpoint = tmp_path / 'source' / 'last.pt'
+    checkpoint.parent.mkdir()
+    torch.save({'epoch': 1}, checkpoint)
+    output = tmp_path / 'destination'
+    output.mkdir()
+    snapshot = output / 'training_run.json'
+    snapshot.write_text('existing snapshot', encoding='utf-8')
+    cfg = _config()
+    cfg['training']['dataset_root'] = str(tmp_path)
+    monkeypatch.setattr(entry, 'load_mode_yaml', lambda path: cfg)
+    with pytest.warns(RuntimeWarning, match='Missing training_run.json'):
+        with pytest.raises(FileExistsError, match='already exists'):
+            entry.main(['--resume', str(checkpoint), '--output-dir', str(output), '--device', 'cpu'])
+    assert snapshot.read_text(encoding='utf-8') == 'existing snapshot'
+    assert not (checkpoint.parent / 'training_run.json').exists()

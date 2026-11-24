@@ -5,10 +5,10 @@ control:
   anchors:
     strategy: adaptive
     a2_config: configs/anchors/a2.yaml
-    scorer_checkpoint: outputs/anchor_ablation/ckpt/A2_anchors/best.pt
+    scorer_checkpoint: outputs/anchor_ablation/ckpt/dual/A2_anchors/best.pt
   training:
-    output_dir: outputs/anchor_ablation/diffusion_ckpt/A2
+    output_dir: outputs/anchor_ablation/diffusion_ckpt/dual/A2
 
 runtime:
   checkpoint:
-    control: outputs/anchor_ablation/diffusion_ckpt/A2/best.pt
+    control: outputs/anchor_ablation/diffusion_ckpt/dual/A2/best.pt

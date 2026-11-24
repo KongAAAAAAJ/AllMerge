@@ -155,6 +155,16 @@ def _restore_training_state(path, model, optimizer, cfg):
     return saved
 
 
+def _atomic_save_checkpoint(checkpoint, path):
+    """Keep the preceding complete checkpoint until serialization succeeds."""
+    temporary = path.with_name(path.name + '.tmp')
+    try:
+        torch.save(checkpoint, temporary)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _write_history(path, history):
     with path.open('w', newline='', encoding='utf-8') as stream:
         writer = csv.DictWriter(stream, fieldnames=list(history[0]))
@@ -310,9 +320,9 @@ def train(cfg, *, root, output_dir, train_split=None, val_split=None,
             'best_val_loss': best,
             'best_epoch': best_epoch,
         }
-        torch.save(checkpoint, output / 'last.pt')
+        _atomic_save_checkpoint(checkpoint, output / 'last.pt')
         if improved:
-            torch.save(checkpoint, output / 'best.pt')
+            _atomic_save_checkpoint(checkpoint, output / 'best.pt')
         shutil.copy2(output / 'best.pt', output / f'best_through_epoch_{epoch:04d}.pt')
         _write_history(output / 'loss.csv', history)
         print(
