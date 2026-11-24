@@ -120,7 +120,7 @@ def main(argv=None):
     ap.add_argument('--sample-index',type=int,default=0)
     ap.add_argument('--checkpoint',required=True)
     ap.add_argument('--controls-npy',default=None,help='Optional exact [40,2] controls; otherwise use selected checkpoint mode')
-    ap.add_argument('--mode-index',type=int,default=None,help='Optional fixed candidate mode; default is deployed goal-endpoint selection')
+    ap.add_argument('--mode-index',type=int,default=None,help='Optional fixed candidate mode; default is deployed Candidate Scoring selection')
     ap.add_argument('--seed',type=int,default=2048)
     ap.add_argument('--device',default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--trucksim-simfile',default=None)

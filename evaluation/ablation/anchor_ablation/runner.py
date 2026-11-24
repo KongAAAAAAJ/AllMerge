@@ -508,7 +508,8 @@ def _planning_seed_pass(method, model, loader, device, seed,
             if poses_all.ndim != 4 or poses_all.shape[-1] != 3:
                 raise ValueError(f"Expected diffusion K2 poses [B,M,H+1,3], got {tuple(poses_all.shape)}")
 
-            selected, _ = model._select_goal_endpoint_mode(poses_all, prepared)
+            selection = model._select_candidate_mode(controls_all, prediction, prepared, context)
+            selected = selection["selected_mode"]
             sample_indices = torch.arange(controls_all.shape[0], device=device)
             selected_poses = poses_all[sample_indices, selected]
             candidate_xy = poses_all[:, :, 5::5, :2]

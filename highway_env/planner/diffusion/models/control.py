@@ -1,11 +1,12 @@
 """TRACE control-space stochastic diffusion planner with switchable objectives.
 
 Control candidates are refined by DDIM and rolled out by frozen Koopman K2.
-The original goal-endpoint objective is retained as a baseline. The optional
-anchor-assigned objective routes expert supervision through K2-executed Anchor
-ADE, preserves the remaining Anchor modes, and evaluates auxiliary objectives
-over all valid generated modes. Target Point conditioning and inference-time
-goal-endpoint selection are shared by both schemes.
+The baseline objective supervises the candidate selected by shared Candidate
+Scoring. The anchor-assigned objective routes expert supervision through
+K2-executed Anchor ADE, preserves the remaining Anchor modes, and evaluates
+auxiliary objectives over all valid generated modes. Target Point remains a
+scene-encoder condition; the same Candidate Scoring rule selects the final
+candidate during training, inference, and evaluation.
 
 Without clean control labels the objective is trajectory-trained iterative
 diffusion refinement, not standard DDPM noise-prediction supervision.
@@ -26,6 +27,7 @@ from .blocks import CrossAttentionBlock, SinusoidalTimeEmbedding
 from highway_env.planner.diffusion.common.execution import VehicleExecution
 from highway_env.planner.diffusion.common.fuel import FuelParameters, vt_cpfm_from_states
 from highway_env.planner.diffusion.common.progress import centerline_progress
+from highway_env.planner.diffusion.common.candidate_scoring import score_candidate_modes
 from highway_env.planner.diffusion.common.safety_losses import (
     background_constant_velocity_poses,
     pairwise_vehicle_safety,
@@ -111,6 +113,22 @@ class ControlDiffusionPlanner(nn.Module):
             [self.ctrl_cfg.max_accel_mps2, self.ctrl_cfg.max_steer_rad], dtype=torch.float32))
         self.execution_config = dict(execution_config or {'model': 'kinematic'})
         self.loss_config = dict(loss_config or {})
+        self.loss_config.setdefault('safety', {
+            'vehicle_length_m': 8.0, 'vehicle_width_m': 2.6,
+            'collision_margin_m': 0.2, 'ttc_threshold_s': 1.0,
+            'softplus_temperature_m': 0.2, 'collision_distance_scale_m': 1.0,
+            'ttc_distance_scale_m': 5.0, 'road_distance_scale_m': 1.0,
+        })
+        self.loss_config.setdefault('mode_selection', 'candidate_score')
+        # Migrate old checkpoints/configurations away from Target Point endpoint
+        # selection. Target Point remains a scene-encoder condition only.
+        legacy_selection = str(self.loss_config.get('mode_selection', 'candidate_score'))
+        if legacy_selection not in ('goal_endpoint', 'candidate_score'):
+            raise ValueError(f'Unsupported mode_selection={legacy_selection!r}')
+        if legacy_selection == 'goal_endpoint':
+            self.loss_config['legacy_mode_selection_migrated_from'] = 'goal_endpoint'
+        self.loss_config['mode_selection'] = 'candidate_score'
+        self._initialize_candidate_scoring_config()
         self.loss_config.setdefault('mode_selection', 'goal_endpoint')
         self.vehicle_model = VehicleExecution(
             self.execution_config, dt=self.ctrl_cfg.dt,
@@ -152,6 +170,43 @@ class ControlDiffusionPlanner(nn.Module):
                 max_steer_rad=self.ctrl_cfg.max_steer_rad,
             )
             self.anchors_config.update(self.anchor_manager.config)
+    def _initialize_candidate_scoring_config(self):
+        """Freeze the safety-first candidate ranking policy into checkpoints."""
+        from copy import deepcopy
+        from highway_env.planner.diffusion.projection.config import load_jtp_config
+        from highway_env.planner.diffusion.config.experiment import resolve_repo_file
+
+        cfg = deepcopy(self.loss_config.get('candidate_scoring') or {})
+        cfg.setdefault('feasibility_tolerance', 1.0e-4)
+        cfg.setdefault('severity_tie_tolerance', 1.0e-6)
+        cfg.setdefault('include_controlled_agents', True)
+        default_fuel_weight = 1.0 if isinstance((self.loss_config.get('fuel') or {}).get('parameters'), dict) else 0.0
+        cfg.setdefault('efficiency', {'fuel_weight': default_fuel_weight, 'progress_weight': 1.0})
+        cfg.setdefault('severity_weights', {
+            'collision': 1.0, 'ttc': 1.0, 'road': 1.0, 'stability': 1.0,
+        })
+        if 'stability' not in cfg or 'stability_residual_scales' not in cfg:
+            jtp_path = resolve_repo_file(cfg.get('jtp_config', 'configs/projection/jtp.yaml'))
+            jtp = load_jtp_config(jtp_path)
+            cfg.setdefault('stability', deepcopy(jtp['stability']))
+            cfg.setdefault('stability_residual_scales', list(jtp['projection']['residual_scales']['stability']))
+            cfg.setdefault('stability_tolerance', float(jtp['projection']['constraint_tolerance']))
+            cfg['jtp_config_source'] = str(jtp_path)
+        self.loss_config['candidate_scoring'] = cfg
+
+    def _select_candidate_mode(self, controls_all, prediction, features, context=None):
+        """Shared target-point-independent selector for train, inference and evaluation."""
+        fuel_values = (self.loss_config.get('fuel') or {}).get('parameters')
+        fuel_parameters = FuelParameters(**fuel_values) if isinstance(fuel_values, dict) else None
+        return score_candidate_modes(
+            controls_all, prediction, features, context,
+            dt=float(self.ctrl_cfg.dt),
+            safety_config=self.loss_config['safety'],
+            scoring_config=self.loss_config['candidate_scoring'],
+            fuel_parameters=fuel_parameters,
+            execution_kind=self.vehicle_model.kind,
+        )
+
     def _encode_scene(self, features):
         device = features['ego_state'].device
         for attr in ('ego_scale', 'agent_scale', 'map_scale', 'target_point_scale'):
@@ -161,9 +216,15 @@ class ControlDiffusionPlanner(nn.Module):
         return self.scene_encoder(features)
 
     def _prepare_anchors(self, features):
-        """Generate current-scene A0/A1/A2 anchors without semantic mode identities."""
-        return self.anchor_manager.select(features)
-
+        """Generate current-scene anchors and retain road geometry for scoring."""
+        prepared = self.anchor_manager.select(features)
+        for key in (
+            'road_lane_geometry', 'road_lane_point_mask', 'road_lane_mask',
+            'road_lane_connections', 'road_current_lane_slot', 'road_target_lane_slot',
+        ):
+            if key in features and key not in prepared:
+                prepared[key] = features[key]
+        return prepared
     def _sample_controls(self, features, *, generator=None, num_steps=None):
         """Control-space DDIM initialized from current-scene control anchors.
 
@@ -212,8 +273,8 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _validate_objectives(self):
         cfg = self.loss_config
-        if cfg['mode_selection'] != 'goal_endpoint':
-            raise ValueError('Control diffusion requires goal_endpoint mode selection')
+        if cfg['mode_selection'] != 'candidate_score':
+            raise ValueError('Control diffusion requires candidate_score mode selection')
         scheme = self._training_scheme()
         required = ('trajectory', 'background_collision', 'intertruck_collision',
                     'ttc', 'road_boundary', 'ltr', 'fuel', 'progress')
@@ -322,32 +383,14 @@ class ControlDiffusionPlanner(nn.Module):
     def _all_predictions(self, controls, features, context=None):
         return self.vehicle_model(controls, features, context)
 
-    @staticmethod
-    def _select_goal_endpoint_mode(poses_all, features):
-        """Shared train/inference selector: valid terminal XY nearest target_point.
-
-        The score is unnormalized negative squared physical distance (m^2).
-        Ties use torch.argmax's first-index rule in both phases. The discrete
-        mode index itself is not differentiable; gradients flow through the
-        selected trajectory and its executed vehicle states.
-        """
-        valid = features['mode_valid_mask'].bool()
-        if valid.shape != poses_all.shape[:2]:
-            raise ValueError('mode_valid_mask must be [B,num_modes]')
-        if not valid.any(dim=1).all():
-            raise ValueError('Every episode needs at least one valid mode')
-        target = features['target_point'][:, None, :]
-        scores = -(poses_all[:, :, -1, :2] - target).square().sum(dim=-1)
-        selected = scores.masked_fill(~valid, torch.finfo(scores.dtype).min).argmax(dim=1)
-        return selected, scores
 
     @staticmethod
     def _select_anchor_expert_mode(anchor_poses, target_dense_xy, valid_mask):
         """Assign expert supervision to the K2-executed anchor with minimum ADE.
 
         The assignment is training-only and is computed from frozen Anchor K2
-        rollouts. Target Point remains an input condition; inference continues
-        to use _select_goal_endpoint_mode because expert labels are unavailable.
+        rollouts. Target Point remains an input condition; the same Candidate
+        Scoring policy selects the final candidate during training and inference.
         """
         if anchor_poses.ndim != 4 or anchor_poses.shape[-1] != 3:
             raise ValueError('anchor_poses must be [B,M,H+1,3]')
@@ -496,7 +539,7 @@ class ControlDiffusionPlanner(nn.Module):
 
     def _forward_train_goal_endpoint(self, features, target_dense_xy, safety_targets, *,
                                      generator=None, context=None):
-        """Original baseline: goal-endpoint-selected expert and auxiliary losses."""
+        """Original single-mode baseline losses; the supervised candidate is selected by Candidate Scoring."""
         cfg = self.ctrl_cfg
         batch = features['ego_state'].shape[0]
         if target_dense_xy.shape != (batch, cfg.horizon_steps, 2):
@@ -518,7 +561,11 @@ class ControlDiffusionPlanner(nn.Module):
         truth = target_dense_xy[:, None].expand_as(predicted_xy)
         errors = (predicted_xy - truth).square().sum(dim=-1).mean(dim=-1)
 
-        selected, _ = self._select_goal_endpoint_mode(poses_all, features)
+        selection = self._select_candidate_mode(controls_all, pred, features, context)
+
+        selected = selection['selected_mode']
+
+        _ = selection['candidate_scores']
         batch_ix = torch.arange(batch, device=controls_all.device)
         selected_controls = controls_all[batch_ix, selected]
         selected_poses = poses_all[batch_ix, selected]
@@ -683,8 +730,9 @@ class ControlDiffusionPlanner(nn.Module):
         predicted_xy = poses_all[:, :, 1:, :2]
         valid_modes = features['mode_valid_mask'].bool()
         batch_ix = torch.arange(batch, device=controls_all.device)
-        goal_selected, _ = self._select_goal_endpoint_mode(poses_all, features)
-
+        selection = self._select_candidate_mode(controls_all, pred, features, context)
+        goal_selected = selection['selected_mode']
+        _ = selection['candidate_scores']
         anchor_controls = features.get('coarse_controls')
         if anchor_controls is None or anchor_controls.shape != controls_all.shape:
             raise ValueError('anchor_consistent training requires paired coarse_controls [B,M,40,2]')
@@ -833,7 +881,9 @@ class ControlDiffusionPlanner(nn.Module):
                                              num_steps=num_steps)
         pred = self._all_predictions(controls_all, features, context)
         poses_all, speeds_all = pred['poses'], pred['speeds']
-        mode, scores = self._select_goal_endpoint_mode(poses_all, features)
+        selection = self._select_candidate_mode(controls_all, pred, features, context)
+        mode = selection['selected_mode']
+        scores = selection['candidate_scores']
         idx = torch.arange(controls_all.shape[0], device=controls_all.device)
         controls = controls_all[idx, mode]
         poses = poses_all[idx, mode]

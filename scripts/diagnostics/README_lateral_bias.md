@@ -29,7 +29,7 @@ limits when comparing splits.
 ## 2. Same-control execution-model comparison
 
 First choose one raw sample and generate a deterministic Diffusion control
-sequence using the checkpoint's deployed goal-endpoint selector:
+sequence using the checkpoint's deployed Candidate Scoring selector:
 
 ```bash
 python scripts/diagnostics/compare_execution_models.py \
@@ -64,7 +64,7 @@ payload and road friction in TruckSim before interpreting the result.
 Alternatively, pass `--controls-npy path/to/controls.npy` containing exactly
 `[40, 2]` values ordered as `[ax_mps2, front_wheel_delta_rad]` to compare a
 previously saved control sequence. `--mode-index` selects a specific generated
-candidate; omit it to use the deployed goal-endpoint selection.
+candidate; omit it to use the deployed Candidate Scoring selection.
 
 Outputs:
 

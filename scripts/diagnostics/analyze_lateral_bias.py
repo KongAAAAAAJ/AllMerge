@@ -2,7 +2,7 @@
 
 This script never writes checkpoints or modifies training/configuration files.
 It reports dataset statistics and, when a checkpoint is supplied, the selected
-Diffusion trajectory endpoint error under the deployed goal-endpoint selector.
+Diffusion trajectory endpoint error under the deployed Candidate Scoring selector.
 """
 from __future__ import annotations
 

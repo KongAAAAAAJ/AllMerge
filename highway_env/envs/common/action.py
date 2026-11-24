@@ -653,19 +653,20 @@ class MultiAgentAction(ActionType):
             if jtp_enabled:
                 jtp_inputs = live
 
-        # A1 is rebuilt from the current road graph at every online planning
-        # cycle. A1 anchors are generated from the current observed scene.
+        # Control-space Candidate Scoring needs full-resolution live road
+        # geometry for every anchor strategy. A1 uses its recorded sampling
+        # settings for both anchor generation and candidate evaluation.
         a1_road_geometry = None
         anchor_manager = getattr(getattr(runtime, "model", None), "anchor_manager", None)
-        if getattr(anchor_manager, "runtime_kind", None) == "a1":
+        is_control_runtime = getattr(runtime, "output_space", None) == "control"
+        if is_control_runtime:
             feature_builder = getattr(self.env, "planner_feature_builder", None)
             if feature_builder is None:
-                raise RuntimeError("Online A1 requires the live planner feature builder")
-            # Use the same lane sampling/preview settings recorded in the A1
-            # training manifest, rather than RoadGeometryExporter's defaults.
-            feature_builder.config["road_geometry"] = dict(
-                anchor_manager.road_geometry_config
-            )
+                raise RuntimeError("Control-space Candidate Scoring requires the live planner feature builder")
+            if getattr(anchor_manager, "runtime_kind", None) == "a1":
+                feature_builder.config["road_geometry"] = dict(
+                    anchor_manager.road_geometry_config
+                )
             a1_road_geometry = feature_builder.build_road_geometry_batch(
                 target_lane_indices
             )

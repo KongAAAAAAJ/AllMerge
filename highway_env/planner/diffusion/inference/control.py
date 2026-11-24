@@ -133,31 +133,29 @@ class ControlDiffusionRuntime:
         anchor_kind = getattr(anchor_manager, "runtime_kind", None)
         adapter_input = dict(numpy_features)
         features = self.adapter.to_torch(adapter_input)
-        if anchor_kind == "a1":
-            if a1_road_geometry is None:
-                a1_road_geometry = numpy_features
-            if not isinstance(a1_road_geometry, dict):
-                raise RuntimeError(
-                    "A1 is configured for online inference but live full-resolution road geometry "
-                    "was not supplied by the environment."
+        # Full-resolution road geometry is required by Candidate Scoring for
+        # A0/A1/A2. A1 additionally consumes it during anchor generation.
+        road_geometry = a1_road_geometry if a1_road_geometry is not None else numpy_features
+        if not isinstance(road_geometry, dict):
+            raise RuntimeError("Control-space Candidate Scoring requires live road geometry")
+        required = (
+            "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
+            "road_current_lane_slot", "road_target_lane_slot",
+            "road_lane_connections", "road_lane_meta",
+        )
+        missing = [key for key in required if key not in road_geometry]
+        if missing:
+            raise KeyError(f"Control-space Candidate Scoring is missing road geometry fields: {missing}")
+        batch_size = int(features["ego_state"].shape[0])
+        for key in required:
+            value = np.asarray(road_geometry[key])
+            if value.shape[0] != batch_size:
+                raise ValueError(
+                    f"Live road geometry {key} has batch={value.shape[0]}, expected {batch_size}"
                 )
-            required = (
-                "road_lane_geometry", "road_lane_point_mask", "road_lane_mask",
-                "road_current_lane_slot", "road_target_lane_slot",
-                "road_lane_connections", "road_lane_meta",
-            )
-            missing = [key for key in required if key not in a1_road_geometry]
-            if missing:
-                raise KeyError(f"Online A1 road geometry is missing fields: {missing}")
-            batch_size = int(features["ego_state"].shape[0])
-            for key in required:
-                value = np.asarray(a1_road_geometry[key])
-                if value.shape[0] != batch_size:
-                    raise ValueError(
-                        f"Online A1 road geometry {key} has batch={value.shape[0]}, "
-                        f"expected {batch_size}"
-                    )
-                features[key] = torch.as_tensor(value, device=self.device)
+            dtype = (torch.bool if key.endswith("_mask") or key == "road_lane_connections"
+                     else torch.long if key.endswith("_slot") else torch.float32)
+            features[key] = torch.as_tensor(value, device=self.device, dtype=dtype)
         generator = None
         if self.deterministic_seed is not None:
             generator = torch.Generator(device=self.device)

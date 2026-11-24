@@ -46,7 +46,7 @@ Control-space Diffusion uses the raw dataset root configured in `configs/train/d
 Two TRACE training objectives can be selected through YAML:
 
 - `configs/train/diffusion.yaml`: original `goal_endpoint` baseline. Expert trajectory and the existing auxiliary objectives are evaluated on the goal-endpoint-selected generated mode.
-- `configs/train/ablation/diffusion_anchor_consistent.yaml`: anchor-assigned objective. All anchor controls are rolled out by the same frozen K2. The anchor with minimum execution-space ADE to the expert assigns the expert-supervised mode; every other valid mode receives paired K2-anchor consistency. Safety, TTC, road-boundary, LTR, progress, and relative-fuel objectives are evaluated over all valid generated modes. Target Point remains a scene condition in both training and inference; inference retains the goal-endpoint selector.
+- `configs/train/ablation/diffusion_anchor_consistent.yaml`: anchor-assigned objective. All anchor controls are rolled out by the same frozen K2. The anchor with minimum execution-space ADE to the expert assigns the expert-supervised mode; every other valid mode receives paired K2-anchor consistency. Safety, TTC, road-boundary, LTR, progress, and relative-fuel objectives are evaluated over all valid generated modes. Target Point remains a scene-encoder condition. Training, inference, and evaluation use the same safety-first Candidate Scoring rule to select the final mode.
 
 Run the two schemes as separate experiments:
 

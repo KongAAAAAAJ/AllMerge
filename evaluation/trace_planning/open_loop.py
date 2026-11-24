@@ -68,7 +68,8 @@ def _anchor_prediction(model, features, context):
     controls = features['coarse_controls']
     outputs = model._all_predictions(controls, features, context)
     poses = outputs['poses']
-    mode, logits = model._select_goal_endpoint_mode(poses, features)
+    selection = model._select_candidate_mode(controls, outputs, features, context)
+    mode, logits = selection['selected_mode'], selection['candidate_scores']
     idx = torch.arange(controls.shape[0], device=controls.device)
     selected_pose = poses[idx, mode]
     result = {
@@ -82,6 +83,11 @@ def _anchor_prediction(model, features, context):
         'trajectory_candidates': poses[:, :, 5::5, :2],
         'trajectory_mode_idx': mode,
         'trajectory_mode_logits': logits,
+        'candidate_scores': logits,
+        'candidate_safe_mask': selection['candidate_safe_mask'],
+        'candidate_violation_count': selection['candidate_violation_count'],
+        'candidate_violation_severity': selection['candidate_violation_severity'],
+        'candidate_efficiency_score': selection['candidate_efficiency_score'],
         'trajectory_candidate_valid_mask': features['mode_valid_mask'],
         'speeds': outputs['speeds'][idx, mode],
     }
@@ -201,7 +207,8 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
             for features_cpu, targets_cpu, metadata_cpu in loader:
                 feats = {k: v.to(dev, non_blocking=True) for k,v in features_cpu.items()}
                 truth = targets_cpu['trajectory_dense'].to(dev)
-                ctx = {k: targets_cpu[k].to(dev, non_blocking=True) for k in K2_CONTEXT} if fuel is not None else {}
+                use_k2 = model.vehicle_model.kind == 'koopman_k2'
+                ctx = {k: targets_cpu[k].to(dev, non_blocking=True) for k in K2_CONTEXT} if use_k2 else {}
                 # A single anchor selection is shared by the baseline and the
                 # diffusion inference, including adaptive/fixed anchor strategies.
                 prepared = model._prepare_anchors(feats)
@@ -215,11 +222,11 @@ def evaluate(*, checkpoint, config, dataset_root=None, split='val', num_samples=
                 elapsed_times.append(elapsed_ms)
                 metrics = score_open_loop(pred, truth, feats, ctx,
                     dt=model.ctrl_cfg.dt, fuel_parameters=fuel,
-                    stability_config=jtp_cfg, require_k2=fuel is not None,
+                    stability_config=jtp_cfg, require_k2=use_k2,
                     control_limits=model.control_limits)
                 anchor_metrics = score_open_loop(anchor_pred, truth, prepared, ctx,
                     dt=model.ctrl_cfg.dt, fuel_parameters=fuel,
-                    stability_config=jtp_cfg, require_k2=fuel is not None,
+                    stability_config=jtp_cfg, require_k2=use_k2,
                     control_limits=model.control_limits)
                 # Error-by-horizon statistics include every evaluated sample/seed.
                 displacement = torch.linalg.vector_norm(pred['trajectory_dense'] - truth,dim=-1)

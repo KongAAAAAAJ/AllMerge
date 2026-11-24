@@ -69,6 +69,9 @@ def _dataset(root):
         'mode_valid_mask': np.ones((n, 3), dtype=bool),
         'expert_trajectory_xy': np.zeros((n, 8, 2), dtype=np.float32),
         'future_trajectory_dense': np.zeros((n, 40, 2), dtype=np.float32),
+        # V3 raw dual-track labels: local Polynomial XY and executed TruckSim poses.
+        'polynomial_future_xy': np.zeros((n, 40, 2), dtype=np.float32),
+        'trucksim_future_poses': np.zeros((n, 40, 3), dtype=np.float32),
         'target_mode': np.zeros(n, dtype=np.int64),
         'target_semantic': np.zeros(n, dtype=np.int64),
         'dense_dt': np.full(n, .1, dtype=np.float32),
@@ -84,7 +87,15 @@ def _dataset(root):
     fields['ego_state'][:, 0] = 20.
     fields['koopman_state_hist_si'][:, :, 0] = 20.
     fields['target_lane_polyline'][:, :, 0] = np.linspace(-20., 120., 32)
-    fields['future_trajectory_dense'][:, :, 0] = np.arange(1, 41) * 2.
+    future_x = np.arange(1, 41, dtype=np.float32) * 2.0
+    fields['future_trajectory_dense'][:, :, 0] = future_x[None, :]
+    fields['polynomial_future_xy'][:, :, 0] = future_x[None, :]
+    fields['trucksim_future_poses'][:, :, 0] = future_x[None, :]
+    trucksim_y = 0.1 * np.sin(np.linspace(0.0, np.pi, 40, dtype=np.float32))
+    fields['trucksim_future_poses'][:, :, 1] = trucksim_y[None, :]
+    fields['trucksim_future_poses'][:, :, 2] = np.arctan2(
+        np.gradient(trucksim_y), np.gradient(future_x)
+    )[None, :]
     fields['expert_trajectory_xy'][:, :, 0] = np.arange(1, 9) * 10.
     from tests.test_a1_online_runtime import _live_geometry
     fields.update(_live_geometry(batch=n))
@@ -97,7 +108,7 @@ def _dataset(root):
     np.savez(shard_dir / 'episode_000000.npz', **fields)
     import json
     (split_dir / 'manifest.json').write_text(json.dumps(dict(
-        schema_version='trace_expert_raw_k2_v2', complete=True,
+        schema_version='trace_expert_raw_k2_v3', complete=True,
         trajectory={'dt_s': .1}, split_ratios=[0,0,1], split_seed=0,
         episode_files=[dict(name='episode_000000.npz', episode_index=0, samples=n)])))
 
@@ -177,6 +188,39 @@ def _payload_dataset(tmp_path):
     manifest['episode_files'][0]['samples']=len(loads)
     mp.write_text(json.dumps(manifest))
     return fx, root
+
+
+def test_v3_fixture_loads_both_expert_trajectory_sources(tmp_path):
+    _, root = _payload_dataset(tmp_path)
+    import json
+    manifest = json.loads((root / 'reports' / 'manifest.json').read_text(encoding='utf-8'))
+    assert manifest['schema_version'] == 'trace_expert_raw_k2_v3'
+    assert manifest['complete'] is True
+
+    from data_pipeline.expert_collection.trajectories import TRAJECTORY_SOURCES
+    supported_sources = tuple(TRAJECTORY_SOURCES)
+    assert 'polynomial' in supported_sources
+    trucksim_sources = sorted(str(source) for source in supported_sources
+                              if str(source) != 'polynomial')
+    assert trucksim_sources, f'No non-Polynomial trajectory source in {supported_sources!r}'
+    trucksim_source = trucksim_sources[0]
+    polynomial = RawExpertDataset(root, split='test', trajectory_source='polynomial')
+    trucksim = RawExpertDataset(root, split='test', trajectory_source=trucksim_source)
+    assert len(polynomial) == len(trucksim) == 9
+    _, polynomial_targets, _ = polynomial[0]
+    _, trucksim_targets, _ = trucksim[0]
+    assert polynomial_targets['trajectory_poses'].shape == (41, 3)
+    assert trucksim_targets['trajectory_poses'].shape == (41, 3)
+    assert polynomial_targets['trajectory_dense'].shape == (40, 2)
+    assert trucksim_targets['trajectory_dense'].shape == (40, 2)
+    torch.testing.assert_close(
+        polynomial_targets['trajectory_dense'][:, 0],
+        trucksim_targets['trajectory_dense'][:, 0],
+    )
+    assert not torch.allclose(
+        polynomial_targets['trajectory_dense'][:, 1],
+        trucksim_targets['trajectory_dense'][:, 1],
+    )
 
 
 def test_stratified_selection_exact_random_and_missing_groups(tmp_path):

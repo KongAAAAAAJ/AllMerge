@@ -299,8 +299,14 @@ def test_planning_pass_uses_raw_k2_and_never_invokes_jtp(monkeypatch):
             calls['predict'] += 1
             return {"poses": poses}
 
-        def _select_goal_endpoint_mode(self, prediction, features):
-            return torch.zeros(2, dtype=torch.long), None
+        def _select_candidate_mode(self, controls, prediction, features, context):
+            return {
+                "selected_mode": torch.zeros(2, dtype=torch.long),
+                "candidate_scores": torch.zeros(2, 2),
+                "candidate_safe_mask": torch.ones(2, 2, dtype=torch.bool),
+                "candidate_violation_count": torch.zeros(2, 2, dtype=torch.long),
+                "candidate_efficiency_score": torch.zeros(2, 2),
+            }
 
     features = {
         "ego_state": torch.zeros(14),

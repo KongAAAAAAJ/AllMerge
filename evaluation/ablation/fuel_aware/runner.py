@@ -149,8 +149,8 @@ def eval_payload_ablation(checkpoints, *, yaml_config, dataset_root,
                 check_checkpoint_compatibility(reference,meta,f'{method}@{tr}')
             else:
                 reference=meta
-                if meta['mode_selection']!='goal_endpoint':
-                    raise ValueError('Expected goal_endpoint training')
+                if meta['mode_selection']!='candidate_score':
+                    raise ValueError('Expected candidate_score mode selection')
             if method != 'F0':
                 minimum=float(model.loss_config['progress']['minimum_progress_m'])
                 if not math.isclose(minimum,progress_threshold_m,abs_tol=1e-7):

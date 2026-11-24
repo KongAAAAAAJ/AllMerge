@@ -24,7 +24,7 @@ evaluated in the paper evaluation but are excluded from the current lightweight
 JTP update.
 
 ## Projection procedure
-
+ 
 At each adaptive projection iteration, JTP evaluates the nonlinear Koopman
 rollout, normalizes constraint residuals, and selects the most violated
 constraints within each family. It computes Jacobian rows for this active set.

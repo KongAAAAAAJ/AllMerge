@@ -83,5 +83,5 @@ def check_checkpoint_compatibility(reference, current, label):
         raise ValueError(f'{label}: control_config differs from F0')
     if current['k2_signature'] != reference['k2_signature']:
         raise ValueError(f'{label}: frozen K2 weights differ from F0')
-    if current['mode_selection'] != 'goal_endpoint':
-        raise ValueError(f'{label}: expected goal_endpoint training mode')
+    if current['mode_selection'] not in ('candidate_score', 'goal_endpoint'):
+        raise ValueError(f'{label}: unsupported candidate selection policy')

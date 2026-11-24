@@ -16,7 +16,7 @@ python scripts/data/build_a0_fixed_anchors.py --max-accel-mps2 2.5 --max-steer-r
 ## 构建 A1 anchoor：
 A1 在 diffusion 训练、开环/闭环推理及消融评估时根据 raw 场景在线生成，无需单独构建或保存锚点库。数量读取 diffusion.yaml 的 control.model.num_modes，生成参数位于 configs/anchors/a1.yaml。
 
-## 训练 A2 命令：
+## 训练 A2 anchor 命令：
 python scripts/data/train_a2_anchors.py ^
   --config configs/train/a2_scorer.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
@@ -35,19 +35,7 @@ python scripts/data/train_a2_anchors.py ^
   --precompute-workers 4 ^
   --resume outputs/anchor_ablation/ckpt/dual/A2_anchors/last.pt
 
-## Anchor Ablation，评估A0 A1 A2命令：
-开环指标：
-python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2
-开环 + 闭环指标：
-python evaluation/ablation/run_anchor.py ^
-  --stage all ^
-  --methods A0 ^
-  --split test ^
-  --checkpoint-a0 outputs/anchor_ablation/diffusion_ckpt/dual/A0_anchor_assignment/best_through_epoch_0049.pt ^
-  --jtp-config configs/projection/jtp.yaml ^
-  --num-workers 0
 
-  --stage anchors 前四项指标      --stage feasibility Planning minADE 和 Pre-proj. Feas.      --stage all 六项指标；不执行迭代投影，Proj. Corr. 为 --
 
 
 

@@ -41,9 +41,7 @@ The evaluator writes:
 All main displacement errors use 40 steps of 0.1s; `minade_k_m/minfde_k_m`
 minimize independently across the **valid** diffusion candidates. Historical
 `minade8_m/minfde8_m` are retained only as legacy eight-**time-point** metrics,
-not used in the paper table. Selected mode uses the deployment goal-endpoint
-selection rule without GT. The anchor row uses its own goal-endpoint selection
-without GT. The figure compares the corresponding paired anchor for the
+not used in the paper table. Selected mode uses the shared safety-first Candidate Scoring rule without GT or Target Point distance. The anchor row uses the same rule without GT. The figure compares the corresponding paired anchor for the
 **diffusion-selected** mode. Fuel from VT-CPFM and stability from K2 are
 **predictions**, not executed TruckSim measurements. Inference throughput does
 not equal end-to-end closed-loop planning time.

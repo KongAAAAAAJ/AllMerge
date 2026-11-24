@@ -24,12 +24,17 @@ def background_constant_velocity_poses(
     ego_state: torch.Tensor,
     horizon_steps: int,
     dt: float,
+    include_controlled: bool = False,
 ):
-    """Predict uncontrolled background vehicles in the fixed ego-local frame."""
+    """Predict observed surrounding vehicles in the fixed ego-local frame.
+
+    Candidate selection includes currently observed controlled platoon members
+    and uses constant-velocity prediction in both training and inference.
+    """
     controlled = agent_states[..., 10] > 0.5
     valid = (
         agent_valid_mask.bool()
-        & (~controlled)
+        & (torch.ones_like(controlled) if include_controlled else (~controlled))
         & (agent_states[..., 8] > 0)
         & (agent_states[..., 9] > 0)
     )
@@ -153,7 +158,8 @@ def pairwise_vehicle_safety(
         torch.zeros_like(worst_collision_per_time),
     )
     collision_hinge = _smooth_hinge(worst_collision_per_time, softplus_temperature_m)
-    collision_loss = (collision_hinge / collision_distance_scale_m).square().mean()
+    collision_loss_per_sample = (collision_hinge / collision_distance_scale_m).square().mean(dim=1)
+    collision_loss = collision_loss_per_sample.mean()
 
     # A collision can occur within T only if every SAT axis can close within T.
     # The minimum axis margin is therefore the differentiable bottleneck.
@@ -168,7 +174,8 @@ def pairwise_vehicle_safety(
         has_other[:, None], worst_ttc_per_time, torch.zeros_like(worst_ttc_per_time)
     )
     ttc_hinge = _smooth_hinge(worst_ttc_per_time, softplus_temperature_m)
-    ttc_loss = (ttc_hinge / ttc_distance_scale_m).square().mean()
+    ttc_loss_per_sample = (ttc_hinge / ttc_distance_scale_m).square().mean(dim=1)
+    ttc_loss = ttc_loss_per_sample.mean()
 
     sample_collision = ((signed_gap < 0.0) & valid_pair_time).any(dim=(1, 2))
     sample_margin_violation = ((signed_gap < float(collision_margin_m)) & valid_pair_time).any(dim=(1, 2))
@@ -180,10 +187,16 @@ def pairwise_vehicle_safety(
     return {
         'collision_loss': collision_loss,
         'ttc_loss': ttc_loss,
+        'collision_loss_per_sample': collision_loss_per_sample,
+        'ttc_loss_per_sample': ttc_loss_per_sample,
         'collision_rate': sample_collision.float().mean(),
+        'collision_rate_per_sample': sample_collision.float(),
         'collision_margin_violation_rate': sample_margin_violation.float().mean(),
+        'margin_violation_per_sample': sample_margin_violation,
         'ttc_violation_rate': sample_ttc_violation.float().mean(),
+        'ttc_violation_per_sample': sample_ttc_violation,
         'min_gap': min_gap,
+        'min_gap_per_sample': sample_min_gap,
     }
 
 
@@ -341,11 +354,16 @@ def road_boundary_safety_loss(
     footprint_violation = violation.amin(dim=(-1, -2)).amax(dim=-1)
 
     road_hinge = _smooth_hinge(footprint_violation, softplus_temperature_m)
-    loss = (road_hinge / distance_scale_m).square().mean()
+    loss_per_sample = (road_hinge / distance_scale_m).square().mean(dim=1)
+    max_violation_per_sample = footprint_violation.clamp_min(0.0).amax(dim=1)
+    violation_rate_per_sample = (footprint_violation > 0.0).float().mean(dim=1)
     return {
-        'loss': loss,
-        'violation_rate': (footprint_violation > 0.0).float().mean(),
-        'max_violation': footprint_violation.clamp_min(0.0).amax(),
+        'loss': loss_per_sample.mean(),
+        'loss_per_sample': loss_per_sample,
+        'violation_rate': violation_rate_per_sample.mean(),
+        'violation_rate_per_sample': violation_rate_per_sample,
+        'max_violation': max_violation_per_sample.amax(),
+        'max_violation_per_sample': max_violation_per_sample,
         'violation': footprint_violation,
     }
 
