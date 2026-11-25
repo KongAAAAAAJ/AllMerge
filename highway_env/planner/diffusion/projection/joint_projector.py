@@ -1,14 +1,8 @@
-"""Joint Jacobian projection for TRACE.
-
-The projector applies an active-set, violation-weighted minimum-norm
-projection to TRACE control variables and the frozen Koopman execution map.
-It does not build or solve a QP. Only selected violated constraints are
-linearized at each iteration; the nonlinear Koopman rollout is re-evaluated
-for every candidate update.
-"""
+"""Priority-grouped joint trajectory projection with shared K2 linearization."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from os import PathLike
 from typing import Any
 
@@ -24,6 +18,8 @@ from .geometry import (
     intertruck_collision_residual, external_collision_residual,
 )
 from .types import JTPResult, RoadGeometry
+from .linearization import K2StaticCache, shared_linearization
+from .grouped_solver import build_priority_groups, group_maxima, accept_nonlinear, solve_groups
 
 
 @dataclass
@@ -35,12 +31,7 @@ class _Evaluation:
 
 
 class JointTrajectoryProjector:
-    """Adaptive, violation-weighted joint projection in control space.
-
-    The active set jointly includes chassis stability, road geometry, control
-    magnitude/rate, inter-truck collision, and supplied external-actor collision
-    constraints. External actors are held to their supplied prediction paths.
-    """
+    """Grouped LS with linearized protection and full nonlinear verification."""
 
     def __init__(self, execution_model, config=None, *, control_interpolation_matrix=None):
         self.cfg = (load_jtp_config(config)
@@ -159,8 +150,9 @@ class JointTrajectoryProjector:
             result.append(nearest_road_association(centers, road))
         return result
 
-    def _constraint_groups(self, controls, context, roads, associations=None, external_actors=()):
-        rollout = self._rollout(controls, context)
+    def _constraint_groups(self, controls, context, roads, associations=None, external_actors=(), *, rollout=None):
+        if rollout is None:
+            rollout = self._rollout(controls, context)
         if associations is None:
             associations = self._associations(rollout, roads, controls)
         n, k, _ = controls.shape
@@ -233,7 +225,7 @@ class JointTrajectoryProjector:
             "intertruck_collision_violation_count": counts.get("intertruck_collision", 0),
             "external_collision_violation_count": counts.get("external_collision", 0),
             "control_rate_violation_count": counts.get("control_rate", 0),
-            "projector_constraints_satisfied": all(value <= tol for value in maxima.values()),
+            "projector_constraints_satisfied": all(value == 0 for value in counts.values()),
         }
 
     def _evaluate(self, controls, context, roads, associations=None, external_actors=()):
@@ -249,12 +241,6 @@ class JointTrajectoryProjector:
         u_error = controls - controls_nominal
         return (0.5 * (tau_error.square() * wt).sum()
                 + 0.5 * float(opt["lambda_u"]) * (u_error.square() * wu).sum())
-
-    def _merit(self, controls, evaluation, controls_nominal, trajectory_nominal):
-        objective = self._objective(controls, evaluation.rollout, controls_nominal, trajectory_nominal)
-        violation = sum(torch.relu(value).square().sum() for value in evaluation.groups.values())
-        penalty = float(self.cfg["projection"]["merit_penalty"]) * violation
-        return float((objective + penalty).detach().cpu()), float(objective.detach().cpu()), float(violation.detach().cpu())
 
     def _active_indices(self, groups):
         """Select the largest violated residuals and expose active-set truncation."""
@@ -275,97 +261,6 @@ class JointTrajectoryProjector:
             total_counts[name] = total
             truncated_counts[name] = max(0, total - int(ids.numel()))
         return selected, counts, total_counts, truncated_counts
-
-    def _active_residual(self, flat_controls, shape, context, roads, associations, selected,
-                         external_actors=()):
-        controls = flat_controls.reshape(shape)
-        _, groups, _ = self._constraint_groups(
-            controls, context, roads, associations, external_actors)
-        return torch.cat([groups[name][selected[name]] for name in groups if selected[name].numel()])
-
-    @staticmethod
-    def _jacobian(function, point):
-        try:
-            return torch.autograd.functional.jacobian(
-                function, point, create_graph=False, strict=False, vectorize=True)
-        except (RuntimeError, NotImplementedError):
-            return torch.autograd.functional.jacobian(
-                function, point, create_graph=False, strict=False, vectorize=False)
-
-    def _objective_metric(self, controls, context, trajectory_weights):
-        """Local positive-definite metric approximating the TRACE projection cost."""
-        flat = controls.detach().reshape(-1).requires_grad_(True)
-        shape = controls.shape
-        def trajectory_fn(z):
-            return self._rollout(z.reshape(shape), context)["trajectory"].reshape(-1)
-        jac_tau = self._jacobian(trajectory_fn, flat)
-        weights = trajectory_weights.to(jac_tau).repeat(controls.shape[0] * (self.horizon + 1))
-        metric = jac_tau.T @ (weights[:, None] * jac_tau)
-        wu = controls.new_tensor(self.cfg["optimization"]["control_weights"]).repeat(
-            controls.shape[0] * self.control_steps)
-        metric = metric + float(self.cfg["optimization"]["lambda_u"]) * torch.diag(wu)
-        scales = controls.new_tensor(self.cfg["control"]["trust_scale"]).repeat(
-            controls.shape[0] * self.control_steps)
-        reg = float(self.cfg["projection"]["metric_regularization"])
-        metric = metric + reg * torch.diag(1.0 / scales.square().clamp_min(1.0e-8))
-        return 0.5 * (metric + metric.T)
-
-    def _joint_correction(self, controls, context, roads, evaluation, selected,
-                          external_actors=(), damping_multiplier=1.0):
-        flat = controls.detach().reshape(-1).requires_grad_(True)
-        active_fn = lambda z: self._active_residual(
-            z, controls.shape, context, roads, evaluation.associations, selected,
-            external_actors)
-        residual = active_fn(flat)
-        jac = self._jacobian(active_fn, flat)
-        if jac.ndim != 2 or jac.shape[0] == 0:
-            return None, {"reason": "empty_active_jacobian", "active_rows": 0}
-        if not torch.isfinite(jac).all() or not torch.isfinite(residual).all():
-            return None, {"reason": "nonfinite_active_jacobian", "active_rows": int(jac.shape[0])}
-
-        proj_cfg = self.cfg["projection"]
-        beta = float(proj_cfg["violation_weight_beta"])
-        max_v = residual.detach().max().clamp_min(1.0e-8)
-        row_weights = (1.0 + beta * residual.detach().clamp_min(0.0) / max_v).sqrt()
-        weighted_jac = row_weights[:, None] * jac
-        weighted_rhs = row_weights * residual.detach().clamp_min(0.0)
-
-        wt = controls.new_tensor(self.cfg["optimization"]["trajectory_weights"])
-        metric = self._objective_metric(controls, context, wt)
-        metric_chol, info = torch.linalg.cholesky_ex(metric)
-        if int(info.detach().cpu()) != 0:
-            return None, {"reason": "objective_metric_not_positive_definite", "active_rows": int(jac.shape[0])}
-        inv_jt = torch.cholesky_solve(weighted_jac.T, metric_chol)
-        gram = weighted_jac @ inv_jt
-        gram = 0.5 * (gram + gram.T)
-        base = float(proj_cfg["damping"])
-        scale = float(torch.diagonal(gram).mean().detach().abs().cpu()) if gram.numel() else 1.0
-        damping = max(base * max(scale, 1.0e-6) * float(damping_multiplier), 1.0e-8)
-        solved = None
-        for _ in range(int(proj_cfg["damping_retries"])):
-            matrix = gram + damping * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
-            chol, chol_info = torch.linalg.cholesky_ex(matrix)
-            if int(chol_info.detach().cpu()) == 0:
-                solved = torch.cholesky_solve(weighted_rhs[:, None], chol).squeeze(-1)
-                break
-            damping *= 10.0
-        if solved is None:
-            matrix = gram + damping * torch.eye(gram.shape[0], device=gram.device, dtype=gram.dtype)
-            solved = torch.linalg.lstsq(matrix, weighted_rhs[:, None]).solution.squeeze(-1)
-        delta = -(inv_jt @ solved)
-        if not torch.isfinite(delta).all():
-            return None, {"reason": "nonfinite_projection_step", "active_rows": int(jac.shape[0]),
-                          "damping": damping}
-        condition = float(torch.linalg.cond(gram + damping * torch.eye(
-            gram.shape[0], device=gram.device, dtype=gram.dtype)).detach().cpu())
-        return delta.reshape_as(controls), {
-            "active_rows": int(jac.shape[0]),
-            "active_counts": {name: int(ids.numel()) for name, ids in selected.items()},
-            "jacobian_shape": list(jac.shape),
-            "damping": damping,
-            "gram_condition": condition,
-            "max_active_violation": float(residual.detach().max().cpu()),
-        }
 
     def evaluate_preprojection(self, nominal_controls: torch.Tensor, context: dict,
                                 road_geometry, external_actors=()) -> dict:
@@ -435,224 +330,119 @@ class JointTrajectoryProjector:
 
         nominal = nominal_controls.detach().clone()
         controls = nominal.clone()
-        with torch.enable_grad():
-            current = self._evaluate(
-                controls, context, roads, external_actors=external_actors)
-            tau_nominal = current.rollout["trajectory"].detach().clone()
-        history = [{"iteration": 0, **current.metrics, "status": "nominal"}]
-        if current.metrics["projector_constraints_satisfied"]:
-            return JTPResult(
-                controls=controls,
-                trajectories=current.rollout["trajectory"].detach(),
-                states=current.rollout["states"].detach(),
-                ltr=current.rollout["ltr"].detach(),
-                projector_constraints_satisfied=True,
-                status="nominal_already_feasible",
-                iterations=0,
-                diagnostics={
-                    "history": history,
-                    "objective": 0.0,
-                    "projection": [],
-                    "collision_handled_by": "joint_projection",
-                    "external_actor_count": len(external_actors),
-                    "acceptance_policy": "joint_violation_penalty_reduction_with_max_violation_nonworsening",
-                    "control_rate_constraints_enabled": True,
-                    "config_path": self.cfg.get("_config_path"),
-                },
-            )
-
         proj_cfg = self.cfg["projection"]
+        if proj_cfg["solver_method"] != "damped_least_squares":
+            raise NotImplementedError("constrained_qp is reserved for Stage 2; select damped_least_squares")
+        with torch.no_grad():
+            current = self._evaluate(controls, context, roads, external_actors=external_actors)
+        tau_nominal = current.rollout["trajectory"].detach().clone()
+        order, scores = build_priority_groups(current.groups, proj_cfg)
+        history = [{"iteration": 0, **current.metrics, "priority_group_maxima": group_maxima(current.metrics, order), "status": "nominal"}]
+        initial_metrics = current.metrics
+        projection_history = []
         trust = float(proj_cfg["initial_trust_radius"])
         damping_scale = 1.0
-        accepted_iterations = 0
-        projection_history = []
-        status = "maximum_iterations_reached"
-        stalled = 0
-        for iteration in range(1, int(proj_cfg["max_iterations"]) + 1):
-            with torch.enable_grad():
-                current = self._evaluate(
-                    controls, context, roads, external_actors=external_actors)
-                selected, active_counts, active_total_counts, active_truncated_counts = self._active_indices(current.groups)
-                active_rows = sum(active_counts.values())
-                if current.metrics["projector_constraints_satisfied"]:
-                    status = "converged_feasible"
-                    break
-                if active_rows == 0:
-                    status = "no_active_violations"
-                    break
-                delta, jac_diag = self._joint_correction(
-                    controls, context, roads, current, selected,
-                    external_actors=external_actors, damping_multiplier=damping_scale)
-            if delta is None:
-                trust *= float(proj_cfg["trust_shrink_factor"])
-                damping_scale *= 10.0
-                stalled += 1
-                projection_history.append({"iteration": iteration, "accepted": False,
-                                           "trust_radius": trust,
-                                           "active_counts": active_counts,
-                                           "active_total_counts": active_total_counts,
-                                           "active_truncated_counts": active_truncated_counts,
-                                           **jac_diag})
-                if stalled >= int(proj_cfg["max_stalled_iterations"]):
-                    status = f"projection_system_failed:{jac_diag.get('reason', 'unknown')}"
-                    break
-                continue
-
-            control_scale = controls.new_tensor(self.cfg["control"]["trust_scale"]).view(1, 1, 2)
-            normalized_delta = delta / control_scale
-            # Per-node trust clipping avoids shrinking every control update by
-            # sqrt(K), which is especially harmful for long (40-node) horizons.
-            node_norm = torch.linalg.vector_norm(normalized_delta, dim=-1, keepdim=True).clamp_min(1.0e-9)
-            max_step = min(trust, float(proj_cfg["max_step_norm"]))
-            normalized_delta = normalized_delta * torch.clamp(max_step / node_norm, max=1.0)
-            delta = normalized_delta * control_scale
-
-            current_merit, current_objective, current_penalty = self._merit(
-                controls, current, nominal, tau_nominal)
-            alpha = float(proj_cfg["alpha_initial"])
-            accepted = False
-            trial_diag = None
-            while alpha >= float(proj_cfg["alpha_minimum"]):
-                candidate_controls = controls + alpha * delta
-                # Exact box projection is a safety guard; the box residual remains
-                # part of the joint active set so the other constraints are rechecked.
-                lower = candidate_controls.new_tensor([
-                    self.cfg["control"]["acceleration_min_mps2"],
-                    self.cfg["control"]["steering_min_rad"]])
-                upper = candidate_controls.new_tensor([
-                    self.cfg["control"]["acceleration_max_mps2"],
-                    self.cfg["control"]["steering_max_rad"]])
-                candidate_controls = torch.maximum(torch.minimum(candidate_controls, upper), lower)
-                with torch.enable_grad():
-                    candidate = self._evaluate(
-                        candidate_controls, context, roads, external_actors=external_actors)
-                candidate_merit, candidate_objective, candidate_penalty = self._merit(
-                    candidate_controls, candidate, nominal, tau_nominal)
-                merit_reduced = candidate_merit < current_merit - float(proj_cfg["merit_tolerance"])
-                violation_penalty_reduced = (
-                    candidate_penalty < current_penalty - float(proj_cfg["merit_tolerance"])
-                )
-                max_allowance = (
-                    float(proj_cfg["minimum_violation_improvement"])
-                    + float(proj_cfg["max_violation_slack_ratio"])
-                    * current.metrics["max_violation"]
-                )
-                max_nonworsening = (
-                    candidate.metrics["max_violation"] <= current.metrics["max_violation"]
-                    + max_allowance
-                )
-                candidate_feasible = bool(candidate.metrics["projector_constraints_satisfied"])
-                # Do not accept a step solely because the single largest residual
-                # falls when the aggregate joint merit rises. This prevents a
-                # correction of one family from silently trading against several
-                # other active families.
-                if candidate_feasible or (violation_penalty_reduced and max_nonworsening):
-                    controls = candidate_controls.detach()
-                    current = candidate
-                    accepted = True
-                    accepted_iterations += 1
-                    stalled = 0
-                    trial_diag = {
-                        "iteration": iteration, "accepted": True, "alpha": alpha,
-                        "objective": candidate_objective, "merit": candidate_merit,
-                        "penalty": candidate_penalty,
-                        "max_violation": candidate.metrics["max_violation"],
-                        "max_violation_by_group": candidate.metrics["max_violation_by_group"],
-                        "active_counts": active_counts,
-                        "active_total_counts": active_total_counts,
-                        "active_truncated_counts": active_truncated_counts,
-                        "trust_radius": trust,
-                        "candidate_violation_count_by_group": candidate.metrics["violation_count_by_group"],
-                        "candidate_violation_l2_by_group": candidate.metrics["violation_l2_by_group"],
-                        "acceptance_reason": "joint_feasible" if candidate_feasible else "violation_penalty_reduced_max_nonworsening",
-                        "merit_reduced": merit_reduced,
-                        "violation_penalty_reduced": violation_penalty_reduced,
-                        "max_nonworsening": max_nonworsening,
-                        **jac_diag,
-                    }
-                    if alpha >= 0.75 and merit_reduced:
-                        trust = min(float(proj_cfg["maximum_trust_radius"]),
-                                    trust * float(proj_cfg["trust_grow_factor"]))
-                    elif alpha <= 0.25:
-                        trust = max(float(proj_cfg["minimum_trust_radius"]),
-                                    trust * float(proj_cfg["trust_shrink_factor"]))
-                    damping_scale = max(1.0, damping_scale / 2.0)
-                    break
-                alpha *= float(proj_cfg["alpha_shrink_factor"])
-
-            if not accepted:
-                stalled += 1
-                trust *= float(proj_cfg["trust_shrink_factor"])
-                damping_scale *= 10.0
-                trial_diag = {"iteration": iteration, "accepted": False,
-                              "trust_radius": trust, "current_merit": current_merit,
-                              "current_objective": current_objective,
-                              "current_penalty": current_penalty,
-                              "active_counts": active_counts,
-                              "active_total_counts": active_total_counts,
-                              "active_truncated_counts": active_truncated_counts,
-                              "acceptance_reason": "line_search_rejected_or_joint_merit_not_reduced",
-                              **jac_diag}
-            projection_history.append(trial_diag)
-            history.append({"iteration": iteration, **current.metrics,
-                            "status": "accepted" if accepted else "rejected"})
+        accepted_iterations = stalled = validations = linearizations = 0
+        cache = None
+        cache_ms = 0.
+        status = "nominal_already_feasible" if current.metrics["projector_constraints_satisfied"] else "maximum_iterations_reached"
+        def clock():
+            if controls.is_cuda:
+                torch.cuda.synchronize(controls.device)
+            return perf_counter()
+        scale = controls.new_tensor(self.cfg["control"]["trust_scale"])
+        lower = controls.new_tensor([self.cfg["control"]["acceleration_min_mps2"], self.cfg["control"]["steering_min_rad"]])
+        upper = controls.new_tensor([self.cfg["control"]["acceleration_max_mps2"], self.cfg["control"]["steering_max_rad"]])
+        if not current.metrics["projector_constraints_satisfied"] and isinstance(self.rollout_fn, KoopmanExecutionAdapter):
+            tick = clock()
+            cache = K2StaticCache(self.rollout_fn, context, self.control_interpolation)
+            cache_ms = (clock()-tick)*1000
+        for iteration in range(1, int(proj_cfg["max_iterations"])+1):
             if current.metrics["projector_constraints_satisfied"]:
-                status = "converged_feasible"
                 break
-            if trust < float(proj_cfg["minimum_trust_radius"]):
-                status = "stalled_infeasible:minimum_trust_radius"
+            selected, counts, totals, truncated = self._active_indices(current.groups)
+            if not sum(counts.values()):
+                status = "no_active_violations"
                 break
-            if stalled >= int(proj_cfg["max_stalled_iterations"]):
-                status = "stalled_infeasible:no_merit_improvement"
-                break
-
-        with torch.enable_grad():
-            final = self._evaluate(controls, context, roads, external_actors=external_actors)
-        objective = float(self._objective(controls, final.rollout, nominal, tau_nominal).detach().cpu())
-        projector_constraints_satisfied = bool(final.metrics["projector_constraints_satisfied"])
-        if projector_constraints_satisfied:
-            status = "converged_feasible"
-        initial_metrics = history[0]
-        group_progress = {}
-        for group in ("stability", "road", "curvature", "control",
-                      "intertruck_collision", "external_collision", "control_rate"):
-            initial_max = float(initial_metrics.get("max_violation_by_group", {}).get(group, 0.0))
-            final_max = float(final.metrics.get("max_violation_by_group", {}).get(group, 0.0))
-            initial_count = int(initial_metrics.get("violation_count_by_group", {}).get(group, 0))
-            final_count = int(final.metrics.get("violation_count_by_group", {}).get(group, 0))
-            initial_l2 = float(initial_metrics.get("violation_l2_by_group", {}).get(group, 0.0))
-            final_l2 = float(final.metrics.get("violation_l2_by_group", {}).get(group, 0.0))
-            group_progress[group] = {
-                "initial_max_violation": initial_max,
-                "final_max_violation": final_max,
-                "max_violation_reduction": initial_max - final_max,
-                "initial_violation_count": initial_count,
-                "final_violation_count": final_count,
-                "violation_count_reduction": initial_count - final_count,
-                "initial_violation_l2": initial_l2,
-                "final_violation_l2": final_l2,
-                "violation_l2_reduction": initial_l2 - final_l2,
-            }
-        return JTPResult(
-            controls=controls.detach(), trajectories=final.rollout["trajectory"].detach(),
-            states=final.rollout["states"].detach(), ltr=final.rollout["ltr"].detach(),
-            projector_constraints_satisfied=projector_constraints_satisfied, status=status, iterations=len(projection_history),
-            diagnostics={
-                "accepted_iterations": accepted_iterations,
-                "history": history,
-                "projection": projection_history,
-                "objective": objective,
-                "initial_metrics": initial_metrics,
-                "final_metrics": final.metrics,
-                "group_progress": group_progress,
-                "termination_status": status,
-                "final_trust_radius": trust,
-                "collision_handled_by": "joint_projection",
-                "external_actor_count": len(external_actors),
-                "acceptance_policy": "joint_violation_penalty_reduction_with_max_violation_nonworsening",
-                "intertruck_collision_constraints_enabled": True,
-                "external_collision_constraints_enabled": True,
-                "control_rate_constraints_enabled": True,
-                "config_path": self.cfg.get("_config_path"),
-            },
-        )
+            tick = clock()
+            with torch.enable_grad():
+                rows, metric, method = shared_linearization(self, controls, context, roads, current, selected, external_actors, cache)
+            linearizations += 1
+            diag = {"iteration":iteration,"active_counts":counts,"active_total_counts":totals,
+                    "active_truncated_counts":truncated,"linearization_method":method,
+                    "linearization_ms":(clock()-tick)*1000,"trust_radius":trust}
+            tick = clock()
+            if not all(torch.isfinite(j).all() for j in rows.values()):
+                delta, info = None, {"reason":"nonfinite_active_jacobian"}
+            else:
+                with torch.no_grad():
+                    delta, info = solve_groups(controls, current.groups, selected, rows, metric, order, proj_cfg, scale, trust, damping_scale)
+            diag.update(info)
+            diag["grouped_solver_ms"]=(clock()-tick)*1000
+            before=group_maxima(current.metrics,order)
+            diag["priority_group_maxima_before"]=before
+            accepted=False; trials=[]; tick=clock()
+            if delta is not None and bool(delta.abs().max()>0):
+                alpha=float(proj_cfg["alpha_initial"])
+                # Preserve the scalar search direction for nominal in-box
+                # controls. For nominal out-of-box, allow a corrective box
+                # guard but subject the actual guarded candidate to full checks.
+                in_box=bool(((controls>=lower)&(controls<=upper)).all())
+                if in_box:
+                    tiny=torch.finfo(delta.dtype).tiny
+                    cap=torch.where(delta>0,(upper-controls)/delta.clamp_min(tiny),torch.where(delta<0,(lower-controls)/delta.clamp_max(-tiny),torch.full_like(delta,float('inf'))))
+                    alpha=min(alpha,float(cap.min().clamp_min(0)))
+                while alpha>=float(proj_cfg["alpha_minimum"]):
+                    candidate_controls=controls+alpha*delta
+                    guarded=torch.maximum(torch.minimum(candidate_controls,upper),lower)
+                    guard_changed=bool((guarded-candidate_controls).abs().max()>1e-7)
+                    candidate_controls=guarded
+                    with torch.no_grad():
+                        candidate=self._evaluate(candidate_controls,context,roads,external_actors=external_actors)
+                    validations+=1
+                    after=group_maxima(candidate.metrics,order)
+                    feasible=bool(candidate.metrics["projector_constraints_satisfied"])
+                    ok=feasible or accept_nonlinear(before,after,proj_cfg)
+                    trials.append({"alpha":alpha,"priority_group_maxima":after,"accepted":ok,"box_guard_changed":guard_changed})
+                    if ok:
+                        current=candidate; controls=candidate_controls.detach(); accepted=True; accepted_iterations+=1; stalled=0
+                        if alpha>=.75:
+                            trust=min(float(proj_cfg["maximum_trust_radius"]),trust*float(proj_cfg["trust_grow_factor"]))
+                        elif alpha<=.25:
+                            trust=max(float(proj_cfg["minimum_trust_radius"]),trust*float(proj_cfg["trust_shrink_factor"]))
+                        damping_scale=max(1.,damping_scale/2.)
+                        break
+                    alpha*=float(proj_cfg["alpha_shrink_factor"])
+            diag.update({"accepted":accepted,"line_search_trials":trials,"nonlinear_validation_ms":(clock()-tick)*1000,
+                         "priority_group_maxima_after":group_maxima(current.metrics,order),
+                         "max_violation":current.metrics["max_violation"],"max_violation_by_group":current.metrics["max_violation_by_group"],
+                         "candidate_violation_count_by_group":current.metrics["violation_count_by_group"],
+                         "candidate_violation_l2_by_group":current.metrics["violation_l2_by_group"],
+                         "acceptance_reason":("joint_feasible" if current.metrics["projector_constraints_satisfied"] else "group_non_degradation") if accepted else "rejected_or_zero_step"})
+            projection_history.append(diag)
+            history.append({"iteration":iteration,**current.metrics,"priority_group_maxima":group_maxima(current.metrics,order),"status":"accepted" if accepted else "rejected"})
+            if current.metrics["projector_constraints_satisfied"]:
+                status="converged_feasible"; break
+            if not accepted:
+                stalled+=1; trust*=float(proj_cfg["trust_shrink_factor"]); damping_scale*=10.
+            if trust<float(proj_cfg["minimum_trust_radius"]):
+                status="stalled_infeasible:minimum_trust_radius"; break
+            if stalled>=int(proj_cfg["max_stalled_iterations"]):
+                status="stalled_infeasible:no_group_improvement"; break
+        final=current
+        objective=float(self._objective(controls,final.rollout,nominal,tau_nominal))
+        group_progress={}
+        for name in current.groups:
+            d={}
+            for key,metric_name in (("max_violation","max_violation_by_group"),("violation_count","violation_count_by_group"),("violation_l2","violation_l2_by_group")):
+                a=initial_metrics[metric_name][name]; b=final.metrics[metric_name][name]
+                d.update({"initial_"+key:a,"final_"+key:b,key+"_reduction":a-b})
+            group_progress[name]=d
+        return JTPResult(controls=controls.detach(),trajectories=final.rollout["trajectory"].detach(),states=final.rollout["states"].detach(),ltr=final.rollout["ltr"].detach(),
+            projector_constraints_satisfied=bool(final.metrics["projector_constraints_satisfied"]),status=status,iterations=len(projection_history),
+            diagnostics={"accepted_iterations":accepted_iterations,"history":history,"projection":projection_history,"objective":objective,
+            "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,
+            "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
+            "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
+            "acceptance_policy":"all_priority_group_maxima_nonincreasing_and_one_improved_or_feasible","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
+            "control_rate_constraints_enabled":True,"config_path":self.cfg.get("_config_path")})

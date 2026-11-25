@@ -135,12 +135,23 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("runtime.collision.max_external_actors must be nonnegative")
     if float(runtime_collision.get("max_external_distance_m", 0)) <= 0:
         raise ValueError("runtime.collision.max_external_distance_m must be positive")
-    for key in ("damping", "metric_regularization", "merit_penalty", "max_step_norm",
+    for key in ("damping", "metric_regularization", "max_step_norm",
                 "change_tolerance"):
         if float(proj.get(key, 0)) <= 0:
             raise ValueError(f"projection.{key} must be positive")
-    if not 0 <= float(proj.get("max_violation_slack_ratio", -1)) <= 0.05:
-        raise ValueError("projection.max_violation_slack_ratio must be in [0,0.05]")
+    if proj.get("solver_method") not in ("damped_least_squares", "constrained_qp"):
+        raise ValueError("projection.solver_method must be damped_least_squares or constrained_qp")
+    if int(proj.get("group_count", 0)) not in (2, 3):
+        raise ValueError("projection.group_count must be 2 or 3")
+    q = proj.get("priority_weights", {})
+    import math
+    if set(q) != set(active_defaults) or any(not math.isfinite(float(v)) or float(v)<=0 for v in q.values()):
+        raise ValueError("priority_weights must contain positive finite weights for all constraint families")
+    if int(proj.get("protection_max_sweeps", 0)) < 1:
+        raise ValueError("protection_max_sweeps must be positive")
+    for key in ("protection_tolerance", "nondegradation_tolerance", "minimum_violation_improvement"):
+        if not math.isfinite(float(proj.get(key, -1))) or float(proj.get(key, -1)) < 0:
+            raise ValueError(f"projection.{key} must be finite and nonnegative")
     if int(proj.get("damping_retries", 0)) < 1:
         raise ValueError("projection.damping_retries must be positive")
     if not 0 < float(proj.get("trust_shrink_factor", 0)) < 1 or float(proj.get("trust_grow_factor", 0)) <= 1:

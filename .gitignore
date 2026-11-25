@@ -44,3 +44,4 @@ __pycache__/
 !/tests/test_raw_expert_collection_contract.py
 
 !/tests/test_road_area.py
+!/tests/test_jtp_distributions.py

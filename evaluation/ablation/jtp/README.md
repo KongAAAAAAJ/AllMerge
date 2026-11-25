@@ -2,7 +2,7 @@
 
 This evaluation compares **Baseline**, the raw output of one frozen control
 Diffusion/K2 inference, with **Ours**, the result returned by the same inference
-after applying the current Active-set Weighted Joint Jacobian Projection (JTP).
+after applying priority-grouped sequential JTP with the Stage-1 damped LS backend.
 No checkpoint is retrained, and Baseline/Ours use identical nominal controls
 within each synchronized frame and inference seed.
 
@@ -23,7 +23,7 @@ python evaluation/ablation/run_jtp.py \
   --split test
 
 # Verify that partial JTP iterates are retained and exceptions are not hidden
-python -m pytest -q tests/test_jtp_ablation.py
+python -m pytest -q tests/test_joint_trajectory_projection.py tests/test_jtp_grouped_stage1.py
 ```
 
 Use `--config configs/evaluation/jtp_ablation.yaml` or pass different paths
@@ -36,14 +36,11 @@ complete-frame selector.
 
 ## Projection method and output contract
 
-- `joint_projector.py`: active-set, violation-weighted minimum-norm Jacobian
-  projection in the joint control space of all trucks. The local metric
-  approximates trajectory deviation under the frozen Koopman execution map.
-- `constraints.py` and `geometry.py`: full-horizon yaw-rate, sideslip, roll,
-  LTR, road-boundary, curvature, and control-magnitude residuals.
-- External-actor and inter-truck collision avoidance are handled upstream by
-  Adaptive Anchor scoring/selection. Control-rate constraints are not included
-  in the current lightweight JTP update.
+- `joint_projector.py`: priority-grouped outer nonlinear projection. `linearization.py`
+  shares structured K2 sensitivities and `grouped_solver.py` uses damped LS plus
+  verified linear cross-group protection. The QP backend is reserved for Stage 2.
+- All seven constraint families (including inter-truck/external collision and
+  control-rate residuals) participate in projection and independent evaluation.
 - Each sample always uses the controls and Koopman rollout returned by JTP.
   The evaluator never replaces an infeasible or partially improved JTP result
   with the nominal Diffusion output. If projection raises an exception or the
@@ -56,7 +53,7 @@ complete-frame selector.
 - `projection_applied` means that a vehicle's normalized control correction
   exceeds `projection.change_tolerance`. A zero correction can occur when the
   nominal output already satisfies the projector's internal constraints or
-  when no candidate update improves the projection merit.
+  when no candidate passes nonlinear group-wise acceptance.
 
 ## Paper metrics and supplementary diagnostics
 
@@ -76,7 +73,7 @@ The four finalized paper metrics remain unchanged:
    pointwise XY distance at `t=1..H` between the JTP execution trajectory and
    that same sample's nominal K2 execution trajectory. Baseline is N/A.
 
-The method change from SCP-QP to Jacobian projection does **not** change these
+The method change to priority-grouped LS does **not** change these
 outcome metrics. The obsolete **Projection/Solver Success Rate is removed**:
 the current method does not invoke a constrained optimization solver, and
 its internal constraint flag is not equivalent to full-plan feasibility.
@@ -111,7 +108,7 @@ for the four primary paper metrics.
 - `jtp_paired_statistics.json`: paired differences and cluster-bootstrap CIs.
 - `jtp_projection_diagnostics.json`: per-frame projection status, internal
   constraint status, correction magnitudes, iteration counts, and latency.
-- `jtp_solver_summary.json`: termination status, active-set truncation, and
+- `jtp_solver_summary.json`: termination status, grouped solver timing, protection, cache reuse, active-set truncation, and
   group-wise residual/count/L2 progress for stability, road, curvature, control
   magnitude, inter-truck collision, external collision, and control rate.
 - `projection_ablation_table.tex`: four-metric paper table.

@@ -1,82 +1,57 @@
-# TRACE Joint Trajectory Projection (JTP)
+# TRACE Joint Trajectory Projection (Stage 1)
 
-This module implements the **Active-set Weighted Joint Jacobian Projection**
-for control-Diffusion outputs. The projection is computed directly from the
-Jacobian rows of the currently active constraint set. No SCP/QP constrained
-optimization solver, OSQP, or SciPy sparse-matrix backend is used.
+The only runtime projection algorithm is priority-grouped sequential JTP with
+cross-group non-degradation and outer nonlinear validation. All seven constraint
+families remain enabled: stability (yaw, sideslip, roll, LTR), road, curvature,
+control magnitude, inter-truck collision, external-actor collision, control rate.
 
-## Projection variables and constraints
+## Solver configuration
 
-The projection variable is the concatenated control sequence
-`U = [a_x, delta_f]` for all jointly controlled vehicles. The frozen,
-load-conditioned Koopman predictor maps each candidate control sequence to its
-executed trajectories and chassis responses.
+`configs/projection/jtp.yaml`, `projection.solver_method: damped_least_squares`
+is the implemented Stage-1 backend. `constrained_qp` is a reserved Stage-2
+backend: selecting it raises an explicit NotImplementedError. No silent fallback
+or legacy ungrouped solver is provided. `group_count` is 2 or 3. Initial family
+priority is `q * (1 + max(relu(normalized_residual)))`; weights are provisional,
+neutral by default, configurable per family. Sort descending and split into
+near-equal groups, fixed for one project() call. Ties use existing family order.
 
-The JTP projection directly considers these constraint families:
+## Execution
 
-- full-horizon chassis stability: yaw rate, sideslip angle, roll angle, LTR;
-- road geometry: road-corridor boundary clearance and trajectory curvature;
-- control magnitude: longitudinal acceleration and front-wheel steering angle.
+- `linearization.py`: cache conditional A/B, z0, interpolation, and analytic
+  latent sensitivities across the call. Use six batched pointwise decoder VJPs
+  and trapezoidal pose sensitivity. Recompute output/constraint derivatives at
+  the outer working point; freeze road association during linearization only.
+  The existing callable adapter contract uses one shared autograd output Jacobian.
+- `grouped_solver.py`: reuse one objective-metric Cholesky factorization, then
+  solve each group's active residuals by the original weighted damped Gram
+  Cholesky method (lstsq only if factorization fails). After each group, cyclic
+  metric halfspace projections enforce previous selected rows J_H d <= 0
+  within tolerance. If protection cannot be verified, discard that increment.
+  Scale the incremental direction to fit cumulative normalized trust bounds;
+  recheck protection after scaling. No extra K2 calls inside the groups.
+- `joint_projector.py`: full nonlinear validation with refreshed geometry and
+  all constraints after each backtracking trial; accept only when all priority
+  group maximum excesses do not increase within tolerance and one improves,
+  or when all internal constraints satisfy their own tolerances. Return last
+  accepted controls, even if infeasible; no external fallback. Initial out-of-box
+  controls may trigger the existing box guard; the guarded candidate is checked
+  by the same nonlinear rule. In this exceptional case the guard can exceed the
+  local trust step. Nominal-feasible inputs return unchanged.
 
-External-actor and inter-vehicle collision avoidance are handled upstream by
-Adaptive Anchor scoring/selection. Control-rate constraints are independently
-evaluated in the paper evaluation but are excluded from the current lightweight
-JTP update.
-
-## Projection procedure
- 
-At each adaptive projection iteration, JTP evaluates the nonlinear Koopman
-rollout, normalizes constraint residuals, and selects the most violated
-constraints within each family. It computes Jacobian rows for this active set.
-A violation-weighted, damped minimum-norm correction is obtained from the
-regularized active-set Gram system. A per-control-node trust bound and
-backtracking line search regulate the update. Each accepted control update is
-re-evaluated through the original Koopman predictor and the retained nonlinear
-constraints.
-
-The local metric combines the trajectory-deviation curvature induced by the
-Koopman execution Jacobian and the control regularizer. Damping stabilizes the
-Gram system when active constraint gradients are correlated or nearly
-dependent. Iteration is retained because the Koopman execution map and
-geometric residuals are nonlinear; this does not introduce a QP solver.
-
-## Output semantics
-
-`JTPResult.controls`, `trajectories`, `states`, and `ltr` always contain the
-best accepted JTP iterate and its Koopman rollout. The Boolean
-`projector_constraints_satisfied` reports whether all constraint families
-implemented inside this projector satisfy their configured tolerances. It is a
-diagnostic field, not a full-platoon feasibility result. The independent
-synchronized-frame evaluator additionally checks inter-truck/external
-collisions and control rates.
-
-A nominal control sequence that already satisfies the JTP constraint set is a
-valid identity projection. If no candidate update improves the projection
-merit, the best accepted iterate remains the nominal sequence. No external
-fallback or replacement of a returned JTP result is performed.
+The LS backend is approximate and does not exactly minimize total trajectory
+deviation under inequalities. Protection covers selected previous rows in the
+current linearized model; nonlinear acceptance is on group maxima (not every
+individual residual). Active-set caps, trust budget and priority conflicts can
+prevent progress. Neither LS nor local nonlinear checks guarantee feasibility
+of every input or physical TruckSim safety. Independent paper metrics are unchanged.
 
 ## API
 
-```python
-from highway_env.planner.diffusion.projection import (
-    JointTrajectoryProjector, RoadGeometry, load_jtp_config,
-)
+`JointTrajectoryProjector(execution_model, config).project(nominal_controls,
+context, road_geometry, external_actors=()) -> JTPResult` and
+`evaluate_preprojection(...)` retain their existing signatures. No checkpoint,
+K2 network, training or evaluation metric modification is required.
 
-cfg = load_jtp_config("configs/projection/jtp.yaml")
-projector = JointTrajectoryProjector(frozen_koopman_k2, cfg)
-road = RoadGeometry(centerlines_xy=road_xy, left_width_m=6.0, right_width_m=6.0)
-result = projector.project(nominal_controls, synchronized_k2_context, road)
-```
+## Tests
 
-`nominal_controls` has shape `[N, K, 2]` in SI units, with channels
-`[acceleration (m/s^2), front-wheel steering (rad)]`. `RoadGeometry` represents
-the drivable road corridor in world coordinates. The result contains projected
-controls, their Koopman execution trajectories, chassis states, and diagnostics.
-
-All constraint thresholds, normalization scales, active-set sizes, damping,
-trust-region, line-search, and correction-reporting parameters are centralized
-in `configs/projection/jtp.yaml`.
-
-## Dependencies
-
-The JTP projection module requires PyTorch and PyYAML.
+`python -m pytest -q tests/test_joint_trajectory_projection.py tests/test_jtp_grouped_stage1.py`

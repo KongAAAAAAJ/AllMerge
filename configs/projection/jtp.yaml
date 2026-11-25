@@ -56,7 +56,21 @@ optimization:
   control_weights: [0.16, 156.25]
 
 projection:
-  # Active-set weighted joint Jacobian projection.
+  # Priority-grouped sequential projection. QP reserved for Stage 2.
+  solver_method: damped_least_squares
+  group_count: 3
+  # Provisional neutral importance; rank by q * (1 + initial max normalized excess).
+  priority_weights:
+    stability: 1.0
+    road: 1.0
+    curvature: 1.0
+    control: 1.0
+    intertruck_collision: 1.0
+    external_collision: 1.0
+    control_rate: 1.0
+  protection_max_sweeps: 12
+  protection_tolerance: 1.0e-6
+  nondegradation_tolerance: 1.0e-6
   max_iterations: 12
   max_stalled_iterations: 3
   max_active_per_group:
@@ -88,10 +102,7 @@ projection:
   alpha_initial: 1.0
   alpha_minimum: 0.0625
   alpha_shrink_factor: 0.5
-  merit_penalty: 1000.0
-  merit_tolerance: 1.0e-7
   minimum_violation_improvement: 1.0e-6
-  max_violation_slack_ratio: 0.015
   change_tolerance: 1.0e-6  # normalized control correction used only for projection-applied diagnostics
 
 # Online K2 history and road-context construction (shared execution above).

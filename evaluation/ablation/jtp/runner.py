@@ -104,7 +104,9 @@ def _summarize_solver_diagnostics(frame_diagnostics):
         'initial_violation_l2', 'final_violation_l2', 'violation_l2_reduction')}
         for name in ('stability', 'road', 'curvature', 'control', 'intertruck_collision', 'external_collision', 'control_rate')}
     active_total = Counter(); active_selected = Counter(); active_truncated = Counter()
-    iterations = []; accepted_iterations = []; condition_numbers = []
+    iterations = []; accepted_iterations = []
+    linearization_ms = []; solver_ms = []; validation_ms = []; group_steps = []
+    cache_builds = []; linearization_counts = []; validation_counts = []; methods = Counter()
     internal_feasible = 0
     for frame in frame_diagnostics:
         diag = frame.get('active_set_diagnostics') or {}
@@ -118,16 +120,21 @@ def _summarize_solver_diagnostics(frame_diagnostics):
                 for key in group_values[name]:
                     if key in values:
                         group_values[name][key].append(float(values[key]))
+        cache_builds.append(int(diag.get('static_cache_builds', 0)))
+        linearization_counts.append(int(diag.get('linearization_count', 0)))
+        validation_counts.append(int(diag.get('nonlinear_validation_count', 0)))
+        methods[str(diag.get('solver_method', 'unknown'))] += 1
         for step in diag.get('projection', []):
+            linearization_ms.append(float(step.get('linearization_ms', 0)))
+            solver_ms.append(float(step.get('grouped_solver_ms', 0)))
+            validation_ms.append(float(step.get('nonlinear_validation_ms', 0)))
+            group_steps.extend(step.get('groups', []))
             for name, value in (step.get('active_total_counts') or {}).items():
                 active_total[name] += int(value)
             for name, value in (step.get('active_counts') or {}).items():
                 active_selected[name] += int(value)
             for name, value in (step.get('active_truncated_counts') or {}).items():
                 active_truncated[name] += int(value)
-            condition = step.get('gram_condition')
-            if condition is not None and np.isfinite(float(condition)):
-                condition_numbers.append(float(condition))
 
     mean_progress = {name: {key: (float(np.mean(values)) if values else None)
                              for key, values in metrics.items()}
@@ -148,7 +155,16 @@ def _summarize_solver_diagnostics(frame_diagnostics):
         'internal_projector_feasible_pct': 100.0 * internal_feasible / count if count else None,
         'mean_iterations': float(np.mean(iterations)) if iterations else None,
         'mean_accepted_iterations': float(np.mean(accepted_iterations)) if accepted_iterations else None,
-        'mean_gram_condition_number': float(np.mean(condition_numbers)) if condition_numbers else None,
+        'solver_method_counts': dict(methods),
+        'mean_static_cache_builds': float(np.mean(cache_builds)) if cache_builds else None,
+        'mean_linearization_count': float(np.mean(linearization_counts)) if linearization_counts else None,
+        'mean_nonlinear_validation_count': float(np.mean(validation_counts)) if validation_counts else None,
+        'mean_linearization_ms_per_outer': float(np.mean(linearization_ms)) if linearization_ms else None,
+        'mean_grouped_solver_ms_per_outer': float(np.mean(solver_ms)) if solver_ms else None,
+        'mean_nonlinear_validation_ms_per_outer': float(np.mean(validation_ms)) if validation_ms else None,
+        'num_group_solves': len(group_steps),
+        'num_group_protection_or_own_group_rejections': sum(not g.get('protection_ok', False) for g in group_steps),
+        'max_applied_linear_protection_excess': max((g.get('protection_peak', 0.) for g in group_steps), default=0.),
         'mean_group_progress': mean_progress,
         'active_set_truncation': truncation,
     }
@@ -234,7 +250,7 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
 def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
              jtp_config: str, dataset_root: str | None, split: str | None,
              num_frames: int | None, seeds: str | None, device_name: str | None,
-             output_dir: str | None, figure_seed: int | None):
+             output_dir: str | None, figure_seed: int | None, constraint_distributions: bool = False):
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -245,6 +261,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     jtp_path=resolve_repo_file(jtp_config or ev.get('jtp_config','configs/projection/jtp.yaml'))
     jtp_cfg=load_jtp_config(jtp_path)
     validate_evaluation_config(ev,jtp_cfg)
+    recorder = None
+    if constraint_distributions:
+        from .distributions import DistributionRecorder, collect, draw
+        recorder = DistributionRecorder(jtp_cfg, ev)
     checkpoint_path=resolve_repo_file(checkpoint)
     if not checkpoint_path.is_file():raise FileNotFoundError(checkpoint_path)
     root=resolve_repo_file(dataset_root or ev.get('dataset_root') or diffusion_cfg['training']['dataset_root'])
@@ -299,6 +319,14 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
                                  seed=seed,episode=episode,frame=frame,
                                  consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
+            if recorder is not None:
+                for method, control_key, rollout_key, expected_key in (
+                        ('Baseline', 'nominal_u', 'nominal', 'before'),
+                        ('Ours', 'projected_u', 'projected', 'after')):
+                    collected = collect(data[control_key], data[rollout_key], context,
+                                        roads, actors, jtp_cfg, ev)
+                    recorder.add(method, collected, seed, episode, frame,
+                                 [int(item['ego_index']) for item in meta], data[expected_key])
             for i, item in enumerate(meta):
                 base={'seed':seed,'episode_index':episode,'frame_index':frame,
                       'ego_index':int(item['ego_index']),
@@ -378,6 +406,9 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     by_method,deltas,confidence=paired_report(rows,
         bootstrap_repeats=int(ev.get('bootstrap_repeats',2000)),bootstrap_seed=int(ev.get('bootstrap_seed',2026)))
     output.mkdir(parents=True,exist_ok=True)
+    if recorder is not None:
+        distribution_path = recorder.save(output)
+        draw(distribution_path, output)
     write_csv(output/'jtp_per_vehicle.csv',rows)
     write_csv(output/'jtp_per_seed.csv',
         [{**{'seed':seed,'method':method},**paired_report([r for r in rows if r['seed']==seed],
@@ -421,7 +452,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             figure_data.get('road_safety_margin_m', np.nan), dtype=np.float64)
         np.savez_compressed(output/'projection_ablation_figure_data.npz', **figure_arrays)
     manifest={'study':'TRACE Ablation 3: Joint Trajectory Projection',
-              'projection_method':'Active-set Weighted Joint Jacobian Projection',
+              'projection_method':'Priority-grouped non-degradation JTP (structured K2)',
+              'projection_solver_method':jtp_cfg['projection']['solver_method'],
               'projection_output_policy':'Always retain the returned JTP controls and Koopman rollout; no nominal-output fallback. Projection exceptions abort the evaluation.',
                             'projector_constraint_families':['full-horizon yaw-rate, sideslip, roll and LTR stability',
                                                'road-boundary clearance','trajectory curvature',
@@ -474,12 +506,14 @@ def main(argv=None):
     parser.add_argument('--device',default=None)
     parser.add_argument('--output-dir',default=None)
     parser.add_argument('--figure-seed',type=int,default=None)
+    parser.add_argument('--constraint-distributions',action='store_true',help='Save full twelve-constraint distributions and plot two 3x2 figures')
     args=parser.parse_args(argv)
     evaluate(checkpoint=args.checkpoint,diffusion_config=args.diffusion_config,
              evaluation_config=args.config,jtp_config=args.jtp_config,
              dataset_root=args.dataset_root,split=args.split,
              num_frames=args.num_frames,seeds=args.seeds,device_name=args.device,
              output_dir=args.output_dir,figure_seed=args.figure_seed,
+             constraint_distributions=args.constraint_distributions,
 )
     return 0
 

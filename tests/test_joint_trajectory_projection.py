@@ -60,11 +60,12 @@ def _road(width=30.0):
     return RoadGeometry(center, width, width)
 
 
-def test_jtp_config_has_active_projection_and_no_qp_configuration():
+def test_jtp_config_has_grouped_projection_and_reserved_qp_backend():
     cfg = load_jtp_config()
     assert cfg["execution"]["horizon_steps"] == 40
     assert cfg["projection"]["max_active_per_group"]["stability"] > 0
-    assert "qp" not in cfg
+    assert cfg["projection"]["solver_method"] == "damped_least_squares"
+    assert cfg["projection"]["group_count"] in (2, 3)
     assert cfg["collision"]["clearance_m"] > 0
     assert cfg["control"]["acceleration_rate_max_mps3"] > 0
     assert cfg["control"]["steering_rate_max_rad_s"] > 0
@@ -107,7 +108,7 @@ def test_jtp_returns_nominal_when_all_constraints_are_feasible():
     assert result.trajectories.shape == (1, 41, 3)
 
 
-def test_joint_active_projection_corrects_yaw_stability_without_osqp():
+def test_grouped_projection_corrects_yaw_stability_without_osqp():
     cfg = load_jtp_config()
     cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
     cfg["geometry"]["curvature_limit_per_m"] = 0.2
