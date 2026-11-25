@@ -22,7 +22,7 @@ python evaluation/ablation/run_jtp.py ^
   --split test ^
   --num-frames 100 ^
   --seeds "0" ^
-  --output-dir outputs/jtp_ablation/formal_100x5
+  --output-dir outputs/jtp_ablation/A0
 
 
 已成功安装。

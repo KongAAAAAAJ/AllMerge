@@ -15,6 +15,7 @@ invalid_map_policy: error  # 'skip' only for explicitly reported and audited geo
 k2_consistency_tolerance: 0.0001
 max_external_actors: 12
 max_external_distance_m: 150.0
+# These three limits must exactly match configs/projection/jtp.yaml.
 limits:
   collision_clearance_m: 0.35
   acceleration_rate_max_mps3: 2.5

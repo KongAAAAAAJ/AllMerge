@@ -1,0 +1,119 @@
+{
+  "package_id": "TRACE_JTP_COLLISION_RATE_V1_1_20261125",
+  "created_at_utc": "2026-11-25T03:20:03.765045+00:00",
+  "root": "D:\\KONG_Files\\AllMerge\\all_merge",
+  "files": {
+    "JTP_COLLISION_RATE_IMPLEMENTATION.md": {
+      "existed": false,
+      "original_sha256": null,
+      "backup_path": null,
+      "mode": null,
+      "installed_sha256": "e634edc2dd17d6cb13c6e7e14b272ee3f1e313fb1fef19ddf3fdbefe7aa8ddff"
+    },
+    "configs/evaluation/jtp_ablation.yaml": {
+      "existed": true,
+      "original_sha256": "7197d2a35657365d59b8e23f21cd099e8f36c2f6bbcf63647ee3814cbd04ab09",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/configs/evaluation/jtp_ablation.yaml",
+      "mode": 438,
+      "installed_sha256": "fedba453e4f5cb608d5dc9fa3264e6f0d038a5da03a9a491f0f06e79789390d9"
+    },
+    "configs/projection/jtp.yaml": {
+      "existed": true,
+      "original_sha256": "06c35c9be801cd12dcb0504ffc44945a1f543b84df327af947b6c9e001debf2d",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/configs/projection/jtp.yaml",
+      "mode": 438,
+      "installed_sha256": "3177730ecdce0ba186c7ae22be770c2ac70b9a22af03929be9285cff3e2084c9"
+    },
+    "evaluation/ablation/jtp/README.md": {
+      "existed": true,
+      "original_sha256": "0a512ae268f7a70e15f1d31385d64219d7c3b6e8d46b3bb494bb6f439b14534a",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/evaluation/ablation/jtp/README.md",
+      "mode": 438,
+      "installed_sha256": "6c4a4048129368ad65d4152604ca47b16442faa0ca684567d7d82b9ca067215e"
+    },
+    "evaluation/ablation/jtp/metrics.py": {
+      "existed": true,
+      "original_sha256": "3e8dc7256286f9000451aad4119e4abe41ac245ed81b3a31f008a0117d9a4272",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/evaluation/ablation/jtp/metrics.py",
+      "mode": 438,
+      "installed_sha256": "fc1e87540ecbd5ba7437ba36a9610c2c09ee2f90721d105857ed0369f29acd64"
+    },
+    "evaluation/ablation/jtp/runner.py": {
+      "existed": true,
+      "original_sha256": "5e8774122ec3d70fcc0efcc31deaa039e4b0c9ffb8318ff1fc2b668af754d0e5",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/evaluation/ablation/jtp/runner.py",
+      "mode": 438,
+      "installed_sha256": "290eaefda19ca40e515d094824dcf7fb8565563fbdb90cca871007ffc2c9f41b"
+    },
+    "evaluation/ablation/jtp/visualization.py": {
+      "existed": true,
+      "original_sha256": "cdb52a53ebe87d4bb1461bc374036809a75f8e664311fc2364917a9bd82318dd",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/evaluation/ablation/jtp/visualization.py",
+      "mode": 438,
+      "installed_sha256": "6ce0634b13766c2a37f395046e5728fe734227a9b7c37b10133973441ed1a4d5"
+    },
+    "evaluation/ablation/plot_jtp_figure.py": {
+      "existed": false,
+      "original_sha256": null,
+      "backup_path": null,
+      "mode": null,
+      "installed_sha256": "95dc263d0aec9205827bb40eb41dcd99b3d11fde7553650736075006981ac1aa"
+    },
+    "highway_env/planner/diffusion/inference/control.py": {
+      "existed": true,
+      "original_sha256": "de0e4f169d75c417a5d948eb41d30e3debe5aa87c90d9ac5e06c985b23d5be4e",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/inference/control.py",
+      "mode": 438,
+      "installed_sha256": "efc07c72a6d0ce0d9a5bb3199e0c80c437447a6dda64eee18c90d476d4e33879"
+    },
+    "highway_env/planner/diffusion/inference/jtp_context.py": {
+      "existed": true,
+      "original_sha256": "17839efaa2380d2e202b6633e7d1485ded6c97be2fb1038980cf5e816293d741",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/inference/jtp_context.py",
+      "mode": 438,
+      "installed_sha256": "987ec1fd735315a93b30ac511753017712376e4b1104c2204b83c87d2ddc4316"
+    },
+    "highway_env/planner/diffusion/projection/config.py": {
+      "existed": true,
+      "original_sha256": "52f501dd69afe448c42a20d660b50bd223abbcccc0a10b5743d2dc6e8819bc88",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/projection/config.py",
+      "mode": 438,
+      "installed_sha256": "84f566a6749ced1667fddacb74bb914e496a193dd800b3928ffc5aa30ca9b6df"
+    },
+    "highway_env/planner/diffusion/projection/constraints.py": {
+      "existed": true,
+      "original_sha256": "e885c980ef4bdd670a029180086f9cae59b8c38a81c99a4e39eb54d61ca2dac3",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/projection/constraints.py",
+      "mode": 438,
+      "installed_sha256": "8cf0c0205b6b91bf80ed5fe53da0e8f1414cf88e8d555db465148729bdee2f8a"
+    },
+    "highway_env/planner/diffusion/projection/geometry.py": {
+      "existed": true,
+      "original_sha256": "b6d72cefea28cf8b355038ba5789facf438c277cf148bccb6ba2e6b8e6d1cc12",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/projection/geometry.py",
+      "mode": 438,
+      "installed_sha256": "d9a1a09e97987faced6ff7b30cb7f7b5af765ae8c76a2218c1b99a10dcd22349"
+    },
+    "highway_env/planner/diffusion/projection/joint_projector.py": {
+      "existed": true,
+      "original_sha256": "657d6829758fdb6627c590302fcb1461ddab0bf32dbd0e80d3c73d22501a4681",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/highway_env/planner/diffusion/projection/joint_projector.py",
+      "mode": 438,
+      "installed_sha256": "8a5b1a5e465a15b7de9bed30b54f1c21448aea92fa6b4939dcb907998339a224"
+    },
+    "tests/test_joint_trajectory_projection.py": {
+      "existed": true,
+      "original_sha256": "13c67a0db48fbb740ca9c3acc10a746ea7cd391e9d0803cbbc6656688e1b0136",
+      "backup_path": ".trace_backups/jtp_collision_rate_v1_1/20261125_112003_736065/original/tests/test_joint_trajectory_projection.py",
+      "mode": 438,
+      "installed_sha256": "791ab6dddf4c312f2f9f44f6f9ce21cc2c9d7a9c48eff5fe0c5d24cd80a21e0c"
+    },
+    "tests/test_jtp_collision_rate_constraints.py": {
+      "existed": false,
+      "original_sha256": null,
+      "backup_path": null,
+      "mode": null,
+      "installed_sha256": "50757ac052b6dbc220728626d196e39e0e39ec165b8af4bd91e4f6d6554c9d3e"
+    }
+  }
+}

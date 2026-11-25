@@ -111,8 +111,14 @@ for the four primary paper metrics.
 - `jtp_paired_statistics.json`: paired differences and cluster-bootstrap CIs.
 - `jtp_projection_diagnostics.json`: per-frame projection status, internal
   constraint status, correction magnitudes, iteration counts, and latency.
+- `jtp_solver_summary.json`: termination status, active-set truncation, and
+  group-wise residual/count/L2 progress for stability, road, curvature, control
+  magnitude, inter-truck collision, external collision, and control rate.
 - `projection_ablation_table.tex`: four-metric paper table.
-- `projection_ablation.pdf` / `.png`: trajectory and full-horizon response plot.
+- `projection_ablation.pdf` / `.png`: seven-panel trajectory, geometry, and
+  four-channel chassis-response plot.
+- `projection_ablation_figure_data.npz`: pickle-free data for figure regeneration
+  with `python evaluation/ablation/plot_jtp_figure.py`.
 - `jtp_manifest.json`: checkpoint/config hashes, metric definitions, and
   evaluation provenance.
 

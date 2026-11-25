@@ -332,6 +332,50 @@ class LiveK2ContextBuilder:
             right_width_m=torch.as_tensor(np.stack(right_widths), dtype=torch.float32),
         )
 
+    def _build_external_actors(self, env, controlled_vehicles):
+        """Build fixed CV world-frame paths for non-controlled road actors."""
+        road = getattr(env, "road", None)
+        road_vehicles = list(getattr(road, "vehicles", []) or [])
+        controlled_ids = {id(vehicle) for vehicle in controlled_vehicles}
+        controlled_positions = [np.asarray(v.position, dtype=np.float64)[:2]
+                                for v in controlled_vehicles]
+        collision_cfg = (self.config.get("runtime", {}) or {}).get("collision", {}) or {}
+        max_actors = int(collision_cfg.get("max_external_actors", 12))
+        max_distance = float(collision_cfg.get("max_external_distance_m", 150.0))
+        times = np.arange(self.execution_horizon_steps + 1, dtype=np.float64) * self.execution_dt_s
+        candidates = []
+        for actor in road_vehicles:
+            if id(actor) in controlled_ids or not bool(getattr(actor, "collidable", True)):
+                continue
+            position = np.asarray(getattr(actor, "position", []), dtype=np.float64).reshape(-1)
+            if position.size < 2 or not np.isfinite(position[:2]).all():
+                continue
+            distance = min(float(np.linalg.norm(position[:2] - ego)) for ego in controlled_positions)
+            if distance > max_distance:
+                continue
+            heading = float(getattr(actor, "heading", np.nan))
+            if not np.isfinite(heading):
+                continue
+            velocity = getattr(actor, "velocity", None)
+            try:
+                velocity = np.asarray(velocity, dtype=np.float64).reshape(-1)
+            except Exception:
+                velocity = np.empty((0,), dtype=np.float64)
+            if velocity.size < 2 or not np.isfinite(velocity[:2]).all():
+                speed = float(getattr(actor, "speed", 0.0))
+                velocity = speed * np.asarray([np.cos(heading), np.sin(heading)])
+            length = float(getattr(actor, "LENGTH", getattr(actor, "length", 4.5)))
+            width = float(getattr(actor, "WIDTH", getattr(actor, "width", 1.8)))
+            if not np.isfinite([length, width]).all() or length <= 0 or width <= 0:
+                continue
+            poses = np.column_stack((position[0] + times * velocity[0],
+                                     position[1] + times * velocity[1],
+                                     np.full_like(times, heading))).astype(np.float32)
+            candidates.append({"pose": poses, "length_m": length, "width_m": width,
+                               "source": actor.__class__.__name__, "distance_m": distance})
+        candidates.sort(key=lambda item: item["distance_m"])
+        return candidates[:max_actors]
+
     def build(self, env, feature_builder, target_lane_indices, *, include_projection_inputs: bool) -> dict[str, Any]:
         vehicles = list(env.controlled_vehicles)
         if not vehicles:
@@ -394,4 +438,5 @@ class LiveK2ContextBuilder:
                 self._build_road_geometry(env, vehicle, lane_index)
                 for vehicle, lane_index in zip(vehicles, target_lane_indices)
             ]
+            result["external_actors"] = self._build_external_actors(env, vehicles)
         return result

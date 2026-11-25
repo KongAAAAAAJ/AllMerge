@@ -49,3 +49,25 @@ def stability_residual(states: torch.Tensor, ltr: torch.Tensor,
     upper = q - bounds
     lower = -q - bounds
     return torch.cat((upper.reshape(-1), lower.reshape(-1)))
+
+
+def control_rate_residual(controls: torch.Tensor, context: dict, cfg: dict) -> torch.Tensor:
+    """Normalized two-sided acceleration/steering-rate residuals.
+
+    The first difference is measured against the most recently applied control
+    in the synchronized K2 history. Every returned residual must be <= 0.
+    """
+    if controls.ndim != 3 or controls.shape[-1] != 2:
+        raise ValueError("controls must be [N,H,2]")
+    previous = context["koopman_control_hist_si"][:, -1:, :].to(controls)
+    sequence = torch.cat((previous, controls), dim=1)
+    rate = (sequence[:, 1:] - sequence[:, :-1]) / float(cfg["execution"]["dt_s"])
+    control_cfg = cfg["control"]
+    limits = controls.new_tensor([
+        float(control_cfg["acceleration_rate_max_mps3"]),
+        float(control_cfg["steering_rate_max_rad_s"]),
+    ]).clamp_min(1.0e-8)
+    # Upper and lower inequalities preserve the sign-specific Jacobian rows.
+    residual = torch.stack((rate - limits, -rate - limits), dim=0)
+    scales = controls.new_tensor(cfg["projection"]["residual_scales"]["control_rate"]).clamp_min(1.0e-8)
+    return (residual / scales.view(1, 1, 1, 2)).reshape(-1)

@@ -83,6 +83,10 @@ def validate_jtp_config(cfg: dict) -> None:
     if not footprint.get("circle_offsets_m") or float(footprint.get("circle_radius_m", 0)) <= 0:
         raise ValueError("geometry.footprint requires circle_offsets_m and positive circle_radius_m")
 
+    collision = cfg.get("collision")
+    if not isinstance(collision, dict) or float(collision.get("clearance_m", -1)) < 0:
+        raise ValueError("collision.clearance_m must be nonnegative")
+
     control = cfg["control"]
     if float(control.get("acceleration_min_mps2", 0)) >= float(control.get("acceleration_max_mps2", 0)):
         raise ValueError("Invalid acceleration bounds")
@@ -90,6 +94,11 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("Invalid steering bounds")
     if len(control.get("trust_scale", [])) != 2 or min(map(float, control["trust_scale"])) <= 0:
         raise ValueError("control.trust_scale must contain two positive values")
+    for key in ("acceleration_rate_max_mps3", "steering_rate_max_rad_s"):
+        if float(control.get(key, 0)) <= 0:
+            raise ValueError(f"control.{key} must be positive")
+    if float(control.get("rate_tolerance_si", -1)) < 0:
+        raise ValueError("control.rate_tolerance_si must be nonnegative")
 
     opt = cfg["optimization"]
     if float(opt.get("lambda_u", -1)) < 0:
@@ -103,19 +112,35 @@ def validate_jtp_config(cfg: dict) -> None:
     if int(proj.get("max_iterations", 0)) < 1 or int(proj.get("max_stalled_iterations", 0)) < 1:
         raise ValueError("Invalid projection iteration limits")
     active = proj.get("max_active_per_group", {})
-    for key in ("stability", "road", "curvature", "control"):
+    active_defaults = {
+        "stability": 24, "road": 24, "curvature": 16, "control": 32,
+        "intertruck_collision": 64, "external_collision": 64, "control_rate": 64,
+    }
+    # Partial in-memory overrides remain backward compatible with older
+    # experiment scripts that only set the original four active-set caps.
+    for key, default in active_defaults.items():
+        active.setdefault(key, default)
         if int(active.get(key, 0)) < 1:
             raise ValueError(f"projection.max_active_per_group.{key} must be positive")
     scales = proj.get("residual_scales", {})
     if len(scales.get("stability", [])) != 4 or min(map(float, scales["stability"])) <= 0:
         raise ValueError("projection.residual_scales.stability must contain four positive values")
-    for key in ("road_m", "curvature_per_m2"):
+    for key in ("road_m", "curvature_per_m2", "collision_m"):
         if float(scales.get(key, 0)) <= 0:
             raise ValueError(f"projection.residual_scales.{key} must be positive")
+    if len(scales.get("control_rate", [])) != 2 or min(map(float, scales["control_rate"])) <= 0:
+        raise ValueError("projection.residual_scales.control_rate must contain two positive values")
+    runtime_collision = cfg["runtime"].get("collision", {})
+    if int(runtime_collision.get("max_external_actors", 0)) < 0:
+        raise ValueError("runtime.collision.max_external_actors must be nonnegative")
+    if float(runtime_collision.get("max_external_distance_m", 0)) <= 0:
+        raise ValueError("runtime.collision.max_external_distance_m must be positive")
     for key in ("damping", "metric_regularization", "merit_penalty", "max_step_norm",
                 "change_tolerance"):
         if float(proj.get(key, 0)) <= 0:
             raise ValueError(f"projection.{key} must be positive")
+    if not 0 <= float(proj.get("max_violation_slack_ratio", -1)) <= 0.05:
+        raise ValueError("projection.max_violation_slack_ratio must be in [0,0.05]")
     if int(proj.get("damping_retries", 0)) < 1:
         raise ValueError("projection.damping_retries must be positive")
     if not 0 < float(proj.get("trust_shrink_factor", 0)) < 1 or float(proj.get("trust_grow_factor", 0)) <= 1:

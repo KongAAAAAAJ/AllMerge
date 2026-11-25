@@ -108,3 +108,96 @@ def geometry_residual(
     }
 
 
+
+
+def _collision_actor_fields(actor):
+    if isinstance(actor, dict):
+        pose = actor.get("pose")
+        length = actor.get("length_m", actor.get("length"))
+        width = actor.get("width_m", actor.get("width"))
+    else:
+        pose = getattr(actor, "pose", None)
+        length = getattr(actor, "length_m", getattr(actor, "length", None))
+        width = getattr(actor, "width_m", getattr(actor, "width", None))
+    if pose is None or length is None or width is None:
+        raise ValueError("Each external collision actor requires pose, length_m and width_m")
+    return pose, float(length), float(width)
+
+
+def _actor_footprint_centers(pose: torch.Tensor, length_m: float, width_m: float):
+    """Approximate a rectangular actor by overlapping circles along its length.
+
+    This matches the independent JTP evaluator's circle-cover construction.
+    """
+    radius = max(float(width_m) / 2.0, 1.0e-3)
+    start = -float(length_m) / 2.0 + radius
+    stop = float(length_m) / 2.0 - radius
+    if stop < start:
+        offsets = pose.new_zeros((1,))
+    else:
+        import math
+        count = max(2, int(math.ceil((stop - start) / (2.0 * radius))) + 1)
+        offsets = torch.linspace(start, stop, count, device=pose.device, dtype=pose.dtype)
+    return footprint_circle_centers(pose[1:], offsets), radius
+
+
+def intertruck_collision_residual(trajectories: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """Differentiable pairwise footprint-clearance residuals for controlled trucks.
+
+    Input trajectories are world-frame [N,H+1,3]. All circle pairs between
+    different trucks are checked at matching future time steps. Positive
+    residuals indicate overlap of the configured safety envelopes.
+    """
+    if trajectories.ndim != 3 or trajectories.shape[-1] != 3:
+        raise ValueError("trajectories must be [N,H+1,3]")
+    n = trajectories.shape[0]
+    if n < 2:
+        return trajectories.new_empty((0,))
+    footprint = cfg["geometry"]["footprint"]
+    offsets = torch.as_tensor(footprint["circle_offsets_m"], device=trajectories.device,
+                              dtype=trajectories.dtype)
+    radius = float(footprint["circle_radius_m"])
+    clearance = float(cfg["collision"]["clearance_m"])
+    scale = max(float(cfg["projection"]["residual_scales"]["collision_m"]), 1.0e-8)
+    centers = [footprint_circle_centers(trajectories[i, 1:], offsets) for i in range(n)]
+    residuals = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            delta = centers[i][:, :, None, :] - centers[j][:, None, :, :]
+            distance = torch.sqrt(delta.square().sum(dim=-1).clamp_min(1.0e-12))
+            residuals.append((2.0 * radius + clearance - distance).reshape(-1) / scale)
+    return torch.cat(residuals) if residuals else trajectories.new_empty((0,))
+
+
+def external_collision_residual(trajectories: torch.Tensor, actors, cfg: dict) -> torch.Tensor:
+    """Differentiable controlled-truck/external-actor clearance residuals.
+
+    ``actors`` is a sequence of objects or mappings exposing a world-frame
+    ``pose [H+1,3]``, ``length_m`` and ``width_m``. Actor predictions are held
+    fixed during a JTP solve (the evaluator/runtime currently supplies CV paths).
+    """
+    if trajectories.ndim != 3 or trajectories.shape[-1] != 3:
+        raise ValueError("trajectories must be [N,H+1,3]")
+    actors = tuple(actors or ())
+    if not actors:
+        return trajectories.new_empty((0,))
+    n, steps, _ = trajectories.shape
+    footprint = cfg["geometry"]["footprint"]
+    offsets = torch.as_tensor(footprint["circle_offsets_m"], device=trajectories.device,
+                              dtype=trajectories.dtype)
+    truck_radius = float(footprint["circle_radius_m"])
+    clearance = float(cfg["collision"]["clearance_m"])
+    scale = max(float(cfg["projection"]["residual_scales"]["collision_m"]), 1.0e-8)
+    truck_centers = [footprint_circle_centers(trajectories[i, 1:], offsets) for i in range(n)]
+    residuals = []
+    for actor in actors:
+        pose_raw, length, width = _collision_actor_fields(actor)
+        pose = torch.as_tensor(pose_raw, device=trajectories.device, dtype=trajectories.dtype)
+        if pose.shape != (steps, 3) or not torch.isfinite(pose).all():
+            raise ValueError(f"External actor pose must be finite [{steps},3], got {tuple(pose.shape)}")
+        actor_centers, actor_radius = _actor_footprint_centers(pose, length, width)
+        for i in range(n):
+            delta = truck_centers[i][:, :, None, :] - actor_centers[:, None, :, :]
+            distance = torch.sqrt(delta.square().sum(dim=-1).clamp_min(1.0e-12))
+            residuals.append((truck_radius + actor_radius + clearance - distance).reshape(-1) / scale)
+    return torch.cat(residuals) if residuals else trajectories.new_empty((0,))

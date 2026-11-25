@@ -65,8 +65,11 @@ def test_jtp_config_has_active_projection_and_no_qp_configuration():
     assert cfg["execution"]["horizon_steps"] == 40
     assert cfg["projection"]["max_active_per_group"]["stability"] > 0
     assert "qp" not in cfg
-    assert "collision" not in cfg
-    assert "control_rate_max" not in cfg["control"]
+    assert cfg["collision"]["clearance_m"] > 0
+    assert cfg["control"]["acceleration_rate_max_mps3"] > 0
+    assert cfg["control"]["steering_rate_max_rad_s"] > 0
+    assert cfg["projection"]["max_active_per_group"]["external_collision"] > 0
+    assert cfg["projection"]["max_active_per_group"]["control_rate"] > 0
 
 
 def test_road_and_curvature_constraints_are_differentiable():
@@ -122,7 +125,8 @@ def test_joint_active_projection_corrects_yaw_stability_without_osqp():
     assert torch.isfinite(result.controls).all()
     assert (result.controls[..., 1] >= cfg["control"]["steering_min_rad"] - 1e-6).all()
     assert (result.controls[..., 1] <= cfg["control"]["steering_max_rad"] + 1e-6).all()
-    assert result.diagnostics["collision_handled_by"] == "adaptive_anchor"
+    assert result.diagnostics["collision_handled_by"] == "joint_projection"
+    assert result.diagnostics["control_rate_constraints_enabled"] is True
 
 
 def test_control_box_is_enforced_as_hard_guard():

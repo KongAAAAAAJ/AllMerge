@@ -20,6 +20,7 @@ from highway_env.planner.diffusion.config.experiment import resolve_repo_file, l
 from highway_env.planner.diffusion.training.control import load_control_checkpoint
 from highway_env.planner.diffusion.projection import JointTrajectoryProjector, load_jtp_config
 from highway_env.planner.diffusion.projection.constraints import stability_limits
+from highway_env.planner.diffusion.projection.geometry import geometry_residual
 from .data import (selected_frames, collate_frame, build_road_geometry,
                    build_external_traffic, local_to_world)
 from .metrics import evaluate_group, trajectory_deviation_m, validate_evaluation_config
@@ -50,6 +51,107 @@ def _sync(device):
 def _seed_for_frame(seed, episode, frame):
     payload = f'JTP:{seed}:{episode}:{frame}'.encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8],'big') % (2**63-1)
+
+
+
+
+def _road_residual_by_time(trajectory, road, jtp_cfg):
+    """Worst signed road-boundary residual per future time step (m).
+
+    Positive values indicate violation; negative values indicate remaining
+    clearance. The reduction is over all longitudinal footprint circles and
+    both road sides, matching the geometric residual used by JTP.
+    """
+    residual, meta = geometry_residual(trajectory, road, jtp_cfg)
+    horizon = int(jtp_cfg['execution']['horizon_steps'])
+    circle_count = len(jtp_cfg['geometry']['footprint']['circle_offsets_m'])
+    road_count = int(meta['road_count'])
+    expected = horizon * circle_count * 2
+    if road_count != expected:
+        raise ValueError(
+            f'Road residual layout mismatch: expected {expected}, got {road_count}')
+    return residual[:road_count].reshape(horizon, circle_count, 2).amax(dim=(1, 2))
+
+
+def _road_safety_edges_world(road_meta, pose0, safety_margin_m):
+    """Inset the measured road edges by the configured footprint safety margin."""
+    center = np.asarray(road_meta['center_local'], dtype=np.float64)
+    half_width = np.asarray(road_meta['half_width_m'], dtype=np.float64)
+    left = np.asarray(road_meta['left_edge_local'], dtype=np.float64)
+    right = np.asarray(road_meta['right_edge_local'], dtype=np.float64)
+    ratio = np.divide(float(safety_margin_m), half_width,
+                      out=np.full_like(half_width, np.nan), where=half_width > 1.0e-9)
+    # A non-positive residual corridor is represented as NaN and is not drawn
+    # as a feasible safety envelope. This avoids visually inventing safe space.
+    valid = ratio < 1.0
+    ratio = np.where(valid, ratio, np.nan)
+    safe_left = left + ratio[:, None] * (center - left)
+    safe_right = right + ratio[:, None] * (center - right)
+    zeros = np.zeros((len(center), 1), dtype=np.float64)
+    safe_left_world = local_to_world(np.column_stack((safe_left, zeros[:, 0])), pose0)[:, :2]
+    safe_right_world = local_to_world(np.column_stack((safe_right, zeros[:, 0])), pose0)[:, :2]
+    return safe_left_world, safe_right_world, bool(np.all(valid))
+
+
+def _summarize_solver_diagnostics(frame_diagnostics):
+    """Aggregate termination, active-set truncation, and group-wise progress."""
+    from collections import Counter
+
+    status_counts = Counter()
+    group_values = {name: {key: [] for key in (
+        'initial_max_violation', 'final_max_violation', 'max_violation_reduction',
+        'initial_violation_count', 'final_violation_count', 'violation_count_reduction',
+        'initial_violation_l2', 'final_violation_l2', 'violation_l2_reduction')}
+        for name in ('stability', 'road', 'curvature', 'control', 'intertruck_collision', 'external_collision', 'control_rate')}
+    active_total = Counter(); active_selected = Counter(); active_truncated = Counter()
+    iterations = []; accepted_iterations = []; condition_numbers = []
+    internal_feasible = 0
+    for frame in frame_diagnostics:
+        diag = frame.get('active_set_diagnostics') or {}
+        status = str(frame.get('projection_status', 'unknown'))
+        status_counts[status] += 1
+        internal_feasible += int(bool(frame.get('projector_constraints_satisfied', False)))
+        iterations.append(int(frame.get('iterations', 0)))
+        accepted_iterations.append(int(diag.get('accepted_iterations', 0)))
+        for name, values in (diag.get('group_progress') or {}).items():
+            if name in group_values:
+                for key in group_values[name]:
+                    if key in values:
+                        group_values[name][key].append(float(values[key]))
+        for step in diag.get('projection', []):
+            for name, value in (step.get('active_total_counts') or {}).items():
+                active_total[name] += int(value)
+            for name, value in (step.get('active_counts') or {}).items():
+                active_selected[name] += int(value)
+            for name, value in (step.get('active_truncated_counts') or {}).items():
+                active_truncated[name] += int(value)
+            condition = step.get('gram_condition')
+            if condition is not None and np.isfinite(float(condition)):
+                condition_numbers.append(float(condition))
+
+    mean_progress = {name: {key: (float(np.mean(values)) if values else None)
+                             for key, values in metrics.items()}
+                     for name, metrics in group_values.items()}
+    truncation = {}
+    for name in ('stability', 'road', 'curvature', 'control', 'intertruck_collision', 'external_collision', 'control_rate'):
+        total = int(active_total[name]); selected = int(active_selected[name])
+        truncation[name] = {
+            'violated_constraints_considered': total,
+            'active_constraints_selected': selected,
+            'active_constraints_truncated': int(active_truncated[name]),
+            'truncation_rate_pct': (100.0 * active_truncated[name] / total) if total else 0.0,
+        }
+    count = len(frame_diagnostics)
+    return {
+        'num_frame_seed_projections': count,
+        'termination_status_counts': dict(status_counts),
+        'internal_projector_feasible_pct': 100.0 * internal_feasible / count if count else None,
+        'mean_iterations': float(np.mean(iterations)) if iterations else None,
+        'mean_accepted_iterations': float(np.mean(accepted_iterations)) if accepted_iterations else None,
+        'mean_gram_condition_number': float(np.mean(condition_numbers)) if condition_numbers else None,
+        'mean_group_progress': mean_progress,
+        'active_set_truncation': truncation,
+    }
 
 
 def _projection_pair(model, projector, features, context, roads, actors, cfg, ev_cfg,
@@ -87,7 +189,7 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
     # A returned JTP iterate is always evaluated, regardless of whether all
     # projector-internal constraints reached their tolerances. Exceptions are
     # surfaced and abort the evaluation; there is no nominal-trajectory fallback.
-    result = projector.project(nominal_u, context, roads)
+    result = projector.project(nominal_u, context, roads, external_actors=actors)
     _sync(device)
     latency_ms = (time.perf_counter() - start) * 1000.0
 
@@ -189,10 +291,11 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 raise RuntimeError(
                     f'Invalid road frame {key}; every selected synchronized frame must produce a JTP result. '
                     f'{error}') from exc
+            collision_runtime = jtp_cfg.get('runtime', {}).get('collision', {})
             actors=build_external_traffic(features,context,int(jtp_cfg['execution']['horizon_steps']),
                                           float(jtp_cfg['execution']['dt_s']),
-                                          max_actors=int(ev.get('max_external_actors',12)),
-                                          max_distance_m=float(ev.get('max_external_distance_m',150.)))
+                                          max_actors=int(collision_runtime['max_external_actors']),
+                                          max_distance_m=float(collision_runtime['max_external_distance_m']))
             data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
                                  seed=seed,episode=episode,frame=frame,
                                  consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
@@ -234,6 +337,18 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
                     bounds_b.append(stability_limits(post['states'][i,1:,0].detach(),
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
+                nominal_road_residual=[]; projected_road_residual=[]
+                for i in range(len(entries)):
+                    nominal_road_residual.append(
+                        _road_residual_by_time(nom['trajectory'][i], roads[i], jtp_cfg)
+                        .detach().cpu().numpy())
+                    projected_road_residual.append(
+                        _road_residual_by_time(post['trajectory'][i], roads[i], jtp_cfg)
+                        .detach().cpu().numpy())
+                safety_margin=float(jtp_cfg['geometry']['road_clearance_m']) + float(
+                    jtp_cfg['geometry']['footprint']['circle_radius_m'])
+                safety_edge_pairs=[_road_safety_edges_world(m, pose0[i], safety_margin)
+                                   for i,m in enumerate(roads_meta)]
                 figure_data={'seed':seed,'episode_index':episode,'frame_index':frame,
                     'nominal_world':nom['trajectory'].detach().cpu().numpy(),
                     'projected_world':post['trajectory'].detach().cpu().numpy(),
@@ -243,12 +358,18 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'projected_ltr':post['ltr'].detach().cpu().numpy(),
                     'nominal_stability_bounds':np.stack(bounds_a),
                     'projected_stability_bounds':np.stack(bounds_b),
+                    'nominal_road_residual':np.stack(nominal_road_residual),
+                    'projected_road_residual':np.stack(projected_road_residual),
                     'road_edge_world':[local_to_world(np.column_stack((m['left_edge_local'],
                                                 np.zeros(len(m['left_edge_local'])))),pose0[i])[:,:2]
                                        for i,m in enumerate(roads_meta)]+
                                       [local_to_world(np.column_stack((m['right_edge_local'],
                                                 np.zeros(len(m['right_edge_local'])))),pose0[i])[:,:2]
                                        for i,m in enumerate(roads_meta)],
+                    'road_safety_edge_world':[pair[0] for pair in safety_edge_pairs]+
+                                             [pair[1] for pair in safety_edge_pairs],
+                    'road_safety_envelope_valid_by_vehicle':[pair[2] for pair in safety_edge_pairs],
+                    'road_safety_margin_m':safety_margin,
                     'external_actors':[a.pose for a in actors]}
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
@@ -265,6 +386,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_paired_statistics.json',{'difference_ours_minus_baseline_pp':deltas,
                                                     'paired_cluster_bootstrap':confidence})
     write_json(output/'jtp_projection_diagnostics.json',frame_diagnostics)
+    solver_summary = _summarize_solver_diagnostics(frame_diagnostics)
+    write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
     (output/'projection_ablation_table.tex').write_text(
         paper_table(by_method),encoding='utf-8')
@@ -272,16 +395,41 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         draw_projection_figure(output/'projection_ablation.pdf', figure_data,
              dt=float(jtp_cfg['execution']['dt_s']),
              kappa_lim=float(jtp_cfg['geometry']['curvature_limit_per_m']))
-        np.savez_compressed(output/'projection_ablation_figure_data.npz',
-            **{k:v for k,v in figure_data.items() if isinstance(v,np.ndarray)})
+        figure_arrays = {k:v for k,v in figure_data.items() if isinstance(v,np.ndarray)}
+        # Preserve ragged map polylines without pickle so the paper figure can
+        # be regenerated from this NPZ without rerunning the 500 frame-seed pass.
+        for key in ('road_edge_world', 'road_safety_edge_world'):
+            values = figure_data.get(key, [])
+            if values:
+                lengths = np.asarray([len(value) for value in values], dtype=np.int32)
+                width = int(lengths.max())
+                packed = np.full((len(values), width, 2), np.nan, dtype=np.float64)
+                for index, value in enumerate(values):
+                    array = np.asarray(value, dtype=np.float64)
+                    packed[index, :len(array)] = array
+            else:
+                lengths = np.zeros((0,), dtype=np.int32)
+                packed = np.zeros((0, 0, 2), dtype=np.float64)
+            figure_arrays[key] = packed
+            figure_arrays[f'{key}_lengths'] = lengths
+        actors = figure_data.get('external_actors', [])
+        figure_arrays['external_actors'] = (np.stack(actors).astype(np.float64)
+                                            if actors else np.zeros((0, int(jtp_cfg['execution']['horizon_steps']) + 1, 3)))
+        figure_arrays['road_safety_envelope_valid_by_vehicle'] = np.asarray(
+            figure_data.get('road_safety_envelope_valid_by_vehicle', []), dtype=bool)
+        figure_arrays['road_safety_margin_m'] = np.asarray(
+            figure_data.get('road_safety_margin_m', np.nan), dtype=np.float64)
+        np.savez_compressed(output/'projection_ablation_figure_data.npz', **figure_arrays)
     manifest={'study':'TRACE Ablation 3: Joint Trajectory Projection',
               'projection_method':'Active-set Weighted Joint Jacobian Projection',
               'projection_output_policy':'Always retain the returned JTP controls and Koopman rollout; no nominal-output fallback. Projection exceptions abort the evaluation.',
-              'projector_constraint_families':['full-horizon yaw-rate, sideslip, roll and LTR stability',
+                            'projector_constraint_families':['full-horizon yaw-rate, sideslip, roll and LTR stability',
                                                'road-boundary clearance','trajectory curvature',
-                                               'acceleration and steering magnitude'],
-              'collision_handling':'external-actor and inter-truck collision are handled upstream by Adaptive Anchor and independently re-evaluated over the full horizon',
-              'control_rate_handling':'not part of the lightweight JTP projection update; independently re-evaluated over the full horizon',
+                                               'acceleration and steering magnitude',
+                                               'inter-truck and external-actor collision clearance',
+                                               'acceleration and steering control rates'],
+              'collision_handling':'inter-truck and constant-velocity external-actor collision constraints are included in the JTP active-set projection and independently re-evaluated over the full horizon',
+              'control_rate_handling':'acceleration and steering first-difference rates, including the previous applied control, are included in the JTP active-set projection and independently re-evaluated over the full horizon',
               'projector_constraints_satisfied_definition':'diagnostic flag for only the constraint families implemented inside JTP; not used as paper joint feasibility',
               'projection_applied_definition':'per-vehicle normalized control correction L2 norm exceeds configs/projection/jtp.yaml projection.change_tolerance',
               'reference_trajectories':'single shared frozen K2 inference per synchronized frame and seed',
@@ -304,7 +452,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
               'configs':{'diffusion':str(diffusion_path),'jtp':str(jtp_path),
                          'jtp_sha256':_sha256(jtp_path),'evaluation':str(config_path),
                          'evaluation_sha256':_sha256(config_path)},
-              'summary':by_method,'paired_deltas':deltas}
+              'summary':by_method,'paired_deltas':deltas,
+              'solver_summary':solver_summary}
     write_json(output/'jtp_manifest.json',manifest)
     print(f'[COMPLETE] {output}; '
           f'joint feasibility {by_method["Baseline"]["joint_feasibility_pct"]:.2f}% -> '

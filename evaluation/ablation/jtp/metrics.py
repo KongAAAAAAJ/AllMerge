@@ -28,6 +28,25 @@ def validate_evaluation_config(config: dict, jtp_config: dict):
         value = config.get('tolerances', {}).get(key)
         if value is None or float(value) < 0 or not math.isfinite(float(value)):
             raise ValueError(f'Invalid or missing tolerances.{key}')
+    shared_limits = {
+        'collision_clearance_m': float(jtp_config['collision']['clearance_m']),
+        'acceleration_rate_max_mps3': float(jtp_config['control']['acceleration_rate_max_mps3']),
+        'steering_rate_max_rad_s': float(jtp_config['control']['steering_rate_max_rad_s']),
+    }
+    for key, expected in shared_limits.items():
+        if not math.isclose(float(ev[key]), expected, rel_tol=0.0, abs_tol=1.0e-9):
+            raise ValueError(
+                f'Independent evaluation limits.{key}={ev[key]} must match the '
+                f'JTP projection value {expected}; keep projection and evaluation constraints identical')
+    if not math.isclose(float(config.get('tolerances', {}).get('control_si', -1)),
+                        float(jtp_config['control']['rate_tolerance_si']),
+                        rel_tol=0.0, abs_tol=1.0e-12):
+        raise ValueError('tolerances.control_si must match JTP control.rate_tolerance_si')
+    runtime_collision = jtp_config.get('runtime', {}).get('collision', {})
+    for key in ('max_external_actors', 'max_external_distance_m'):
+        if key not in config or key not in runtime_collision or not math.isclose(
+                float(config[key]), float(runtime_collision[key]), rel_tol=0.0, abs_tol=1.0e-9):
+            raise ValueError(f'{key} must match runtime.collision.{key} so online/offline actor sets use the same limits')
     if jtp_config['execution']['horizon_steps'] != jtp_config['execution']['control_steps']:
         raise ValueError('Current diffusion JTP evaluation requires K=H with identity interpolation')
     if config.get('invalid_map_policy', 'error') != 'error':

@@ -17,9 +17,12 @@ import torch
 from highway_env.planner.diffusion.common.execution import K2_CONTEXT, VehicleExecution
 
 from .config import load_jtp_config, validate_jtp_config
-from .constraints import stability_residual
+from .constraints import stability_residual, control_rate_residual
 from .execution_adapter import KoopmanExecutionAdapter
-from .geometry import geometry_residual, nearest_road_association, footprint_circle_centers
+from .geometry import (
+    geometry_residual, nearest_road_association, footprint_circle_centers,
+    intertruck_collision_residual, external_collision_residual,
+)
 from .types import JTPResult, RoadGeometry
 
 
@@ -34,8 +37,9 @@ class _Evaluation:
 class JointTrajectoryProjector:
     """Adaptive, violation-weighted joint projection in control space.
 
-    External-actor collision avoidance is intentionally excluded. It is handled
-    upstream by Adaptive Anchor scoring and selection.
+    The active set jointly includes chassis stability, road geometry, control
+    magnitude/rate, inter-truck collision, and supplied external-actor collision
+    constraints. External actors are held to their supplied prediction paths.
     """
 
     def __init__(self, execution_model, config=None, *, control_interpolation_matrix=None):
@@ -155,7 +159,7 @@ class JointTrajectoryProjector:
             result.append(nearest_road_association(centers, road))
         return result
 
-    def _constraint_groups(self, controls, context, roads, associations=None):
+    def _constraint_groups(self, controls, context, roads, associations=None, external_actors=()):
         rollout = self._rollout(controls, context)
         if associations is None:
             associations = self._associations(rollout, roads, controls)
@@ -183,31 +187,58 @@ class JointTrajectoryProjector:
         control_scale = controls.new_tensor(self.cfg["control"]["trust_scale"]).clamp_min(1.0e-6)
         control_box = torch.cat(((lower - controls) / control_scale,
                                  (controls - upper) / control_scale), dim=0)
+        intertruck_collision = intertruck_collision_residual(rollout["trajectory"], self.cfg)
+        external_collision = external_collision_residual(
+            rollout["trajectory"], external_actors, self.cfg)
+        control_rate = control_rate_residual(controls, context, self.cfg)
         groups = {
             "stability": torch.cat([x.reshape(-1) for x in stability]),
             "road": torch.cat([x.reshape(-1) for x in road_values]),
             "curvature": torch.cat([x.reshape(-1) for x in curve_values]),
             "control": control_box.reshape(-1),
+            "intertruck_collision": intertruck_collision.reshape(-1),
+            "external_collision": external_collision.reshape(-1),
+            "control_rate": control_rate.reshape(-1),
         }
         return rollout, groups, associations
 
     def _metrics(self, groups):
         tol = float(self.cfg["projection"]["constraint_tolerance"])
-        maxima = {key: (float(torch.relu(value).max().detach().cpu()) if value.numel() else 0.0)
-                  for key, value in groups.items()}
-        counts = {key: int((value > tol).sum().detach().cpu()) for key, value in groups.items()}
+        thresholds = {key: torch.full_like(value, tol) for key, value in groups.items()}
+        # Match the independent evaluator's SI control-rate tolerance exactly.
+        # The residual vector is flattened from [upper/lower, N, H, accel/steer].
+        rate_values = groups.get("control_rate")
+        if rate_values is not None and rate_values.numel():
+            rate_scale = self.cfg["projection"]["residual_scales"]["control_rate"]
+            tol_si = float(self.cfg["control"]["rate_tolerance_si"])
+            channel_tol = rate_values.new_tensor([
+                tol_si / float(rate_scale[0]), tol_si / float(rate_scale[1])])
+            n = rate_values.numel() // (2 * self.horizon * 2)
+            thresholds["control_rate"] = channel_tol.view(1, 1, 1, 2).expand(
+                2, n, self.horizon, 2).reshape(-1)
+        positive = {key: torch.relu(value - thresholds[key]) for key, value in groups.items()}
+        maxima = {key: (float(value.max().detach().cpu()) if value.numel() else 0.0)
+                  for key, value in positive.items()}
+        counts = {key: int((value > thresholds[key]).sum().detach().cpu()) for key, value in groups.items()}
+        l2 = {key: float(torch.linalg.vector_norm(value).detach().cpu())
+              for key, value in positive.items()}
         return {
             "max_violation": max(maxima.values(), default=0.0),
             "max_violation_by_group": maxima,
             "violation_count_by_group": counts,
+            "violation_l2_by_group": l2,
             "stability_violation_count": counts["stability"],
             "geometry_violation_count": counts["road"] + counts["curvature"],
             "control_box_violation_count": counts["control"],
+            "intertruck_collision_violation_count": counts.get("intertruck_collision", 0),
+            "external_collision_violation_count": counts.get("external_collision", 0),
+            "control_rate_violation_count": counts.get("control_rate", 0),
             "projector_constraints_satisfied": all(value <= tol for value in maxima.values()),
         }
 
-    def _evaluate(self, controls, context, roads, associations=None):
-        rollout, groups, associations = self._constraint_groups(controls, context, roads, associations)
+    def _evaluate(self, controls, context, roads, associations=None, external_actors=()):
+        rollout, groups, associations = self._constraint_groups(
+            controls, context, roads, associations, external_actors)
         return _Evaluation(rollout, groups, associations, self._metrics(groups))
 
     def _objective(self, controls, rollout, controls_nominal, trajectory_nominal):
@@ -226,22 +257,30 @@ class JointTrajectoryProjector:
         return float((objective + penalty).detach().cpu()), float(objective.detach().cpu()), float(violation.detach().cpu())
 
     def _active_indices(self, groups):
+        """Select the largest violated residuals and expose active-set truncation."""
         cfg = self.cfg["projection"]
         selected = {}
         counts = {}
+        total_counts = {}
+        truncated_counts = {}
         for name, values in groups.items():
             ids = torch.nonzero(values.detach() > float(cfg["active_tolerance"]), as_tuple=False).reshape(-1)
+            total = int(ids.numel())
             cap = int(cfg["max_active_per_group"][name])
-            if ids.numel() > cap:
+            if total > cap:
                 local = torch.topk(values.detach()[ids], k=cap, largest=True, sorted=False).indices
                 ids = ids[local]
             selected[name] = ids
             counts[name] = int(ids.numel())
-        return selected, counts
+            total_counts[name] = total
+            truncated_counts[name] = max(0, total - int(ids.numel()))
+        return selected, counts, total_counts, truncated_counts
 
-    def _active_residual(self, flat_controls, shape, context, roads, associations, selected):
+    def _active_residual(self, flat_controls, shape, context, roads, associations, selected,
+                         external_actors=()):
         controls = flat_controls.reshape(shape)
-        _, groups, _ = self._constraint_groups(controls, context, roads, associations)
+        _, groups, _ = self._constraint_groups(
+            controls, context, roads, associations, external_actors)
         return torch.cat([groups[name][selected[name]] for name in groups if selected[name].numel()])
 
     @staticmethod
@@ -271,10 +310,12 @@ class JointTrajectoryProjector:
         metric = metric + reg * torch.diag(1.0 / scales.square().clamp_min(1.0e-8))
         return 0.5 * (metric + metric.T)
 
-    def _joint_correction(self, controls, context, roads, evaluation, selected, damping_multiplier=1.0):
+    def _joint_correction(self, controls, context, roads, evaluation, selected,
+                          external_actors=(), damping_multiplier=1.0):
         flat = controls.detach().reshape(-1).requires_grad_(True)
         active_fn = lambda z: self._active_residual(
-            z, controls.shape, context, roads, evaluation.associations, selected)
+            z, controls.shape, context, roads, evaluation.associations, selected,
+            external_actors)
         residual = active_fn(flat)
         jac = self._jacobian(active_fn, flat)
         if jac.ndim != 2 or jac.shape[0] == 0:
@@ -327,14 +368,14 @@ class JointTrajectoryProjector:
         }
 
     def evaluate_preprojection(self, nominal_controls: torch.Tensor, context: dict,
-                                road_geometry) -> dict:
+                                road_geometry, external_actors=()) -> dict:
         """Evaluate nominal controls with the exact JTP constraints, without projection.
 
         The method shares the same K2 rollout, road geometry, residuals,
         normalization, and tolerance as :meth:`project`. It never modifies
         the supplied controls and never performs a solver iteration.
-        External/inter-truck collision checks remain the responsibility of
-        the synchronized Anchor Ablation evaluator.
+        Supplied external-actor predictions and inter-truck collision are
+        evaluated using the same residuals as the iterative projection.
         """
         if (not torch.is_tensor(nominal_controls) or nominal_controls.ndim != 3
                 or nominal_controls.shape[-1] != 2):
@@ -344,6 +385,7 @@ class JointTrajectoryProjector:
         n, k, _ = nominal_controls.shape
         if k != self.control_steps:
             raise ValueError(f"Expected K={self.control_steps} control nodes, got {k}")
+        external_actors = tuple(external_actors or ())
         self._ensure_execution_device(nominal_controls.device, nominal_controls.dtype)
         ctx = self._to_context(
             context, n=n, device=nominal_controls.device, dtype=nominal_controls.dtype
@@ -352,7 +394,8 @@ class JointTrajectoryProjector:
             road_geometry, n, device=nominal_controls.device, dtype=nominal_controls.dtype
         )
         with torch.no_grad():
-            evaluated = self._evaluate(nominal_controls.detach(), ctx, roads)
+            evaluated = self._evaluate(
+                nominal_controls.detach(), ctx, roads, external_actors=external_actors)
         return {
             "controls": nominal_controls.detach(),
             "trajectories": evaluated.rollout["trajectory"].detach(),
@@ -368,14 +411,15 @@ class JointTrajectoryProjector:
         }
 
     def project(self, nominal_controls: torch.Tensor, context: dict,
-                road_geometry: RoadGeometry | list[RoadGeometry]) -> JTPResult:
+                road_geometry: RoadGeometry | list[RoadGeometry],
+                external_actors=()) -> JTPResult:
         """Project nominal controls while preserving Koopman execution consistency.
 
         The returned controls are always the best accepted JTP projection iterate.
         ``projector_constraints_satisfied`` reports only the constraint families
         implemented inside this projector; full paper feasibility is evaluated
-        independently by the synchronized-frame evaluation module.
-        Collision avoidance is handled upstream by Adaptive Anchor.
+        independently by the synchronized-frame evaluation module. External
+        actors must be supplied as world-frame predicted paths when available.
         """
         if not torch.is_tensor(nominal_controls) or nominal_controls.ndim != 3 or nominal_controls.shape[-1] != 2:
             raise ValueError("nominal_controls must be a torch tensor [N,K,2]")
@@ -384,6 +428,7 @@ class JointTrajectoryProjector:
         n, k, _ = nominal_controls.shape
         if k != self.control_steps:
             raise ValueError(f"Expected K={self.control_steps} control nodes, got {k}")
+        external_actors = tuple(external_actors or ())
         self._ensure_execution_device(nominal_controls.device, nominal_controls.dtype)
         context = self._to_context(context, n=n, device=nominal_controls.device, dtype=nominal_controls.dtype)
         roads = self._road_list(road_geometry, n, device=nominal_controls.device, dtype=nominal_controls.dtype)
@@ -391,7 +436,8 @@ class JointTrajectoryProjector:
         nominal = nominal_controls.detach().clone()
         controls = nominal.clone()
         with torch.enable_grad():
-            current = self._evaluate(controls, context, roads)
+            current = self._evaluate(
+                controls, context, roads, external_actors=external_actors)
             tau_nominal = current.rollout["trajectory"].detach().clone()
         history = [{"iteration": 0, **current.metrics, "status": "nominal"}]
         if current.metrics["projector_constraints_satisfied"]:
@@ -407,7 +453,10 @@ class JointTrajectoryProjector:
                     "history": history,
                     "objective": 0.0,
                     "projection": [],
-                    "collision_handled_by": "adaptive_anchor",
+                    "collision_handled_by": "joint_projection",
+                    "external_actor_count": len(external_actors),
+                    "acceptance_policy": "joint_violation_penalty_reduction_with_max_violation_nonworsening",
+                    "control_rate_constraints_enabled": True,
                     "config_path": self.cfg.get("_config_path"),
                 },
             )
@@ -421,8 +470,9 @@ class JointTrajectoryProjector:
         stalled = 0
         for iteration in range(1, int(proj_cfg["max_iterations"]) + 1):
             with torch.enable_grad():
-                current = self._evaluate(controls, context, roads)
-                selected, active_counts = self._active_indices(current.groups)
+                current = self._evaluate(
+                    controls, context, roads, external_actors=external_actors)
+                selected, active_counts, active_total_counts, active_truncated_counts = self._active_indices(current.groups)
                 active_rows = sum(active_counts.values())
                 if current.metrics["projector_constraints_satisfied"]:
                     status = "converged_feasible"
@@ -430,14 +480,19 @@ class JointTrajectoryProjector:
                 if active_rows == 0:
                     status = "no_active_violations"
                     break
-                delta, jac_diag = self._joint_correction(controls, context, roads, current, selected,
-                                                       damping_multiplier=damping_scale)
+                delta, jac_diag = self._joint_correction(
+                    controls, context, roads, current, selected,
+                    external_actors=external_actors, damping_multiplier=damping_scale)
             if delta is None:
                 trust *= float(proj_cfg["trust_shrink_factor"])
                 damping_scale *= 10.0
                 stalled += 1
                 projection_history.append({"iteration": iteration, "accepted": False,
-                                           "trust_radius": trust, **jac_diag})
+                                           "trust_radius": trust,
+                                           "active_counts": active_counts,
+                                           "active_total_counts": active_total_counts,
+                                           "active_truncated_counts": active_truncated_counts,
+                                           **jac_diag})
                 if stalled >= int(proj_cfg["max_stalled_iterations"]):
                     status = f"projection_system_failed:{jac_diag.get('reason', 'unknown')}"
                     break
@@ -469,12 +524,29 @@ class JointTrajectoryProjector:
                     self.cfg["control"]["steering_max_rad"]])
                 candidate_controls = torch.maximum(torch.minimum(candidate_controls, upper), lower)
                 with torch.enable_grad():
-                    candidate = self._evaluate(candidate_controls, context, roads)
+                    candidate = self._evaluate(
+                        candidate_controls, context, roads, external_actors=external_actors)
                 candidate_merit, candidate_objective, candidate_penalty = self._merit(
                     candidate_controls, candidate, nominal, tau_nominal)
-                max_reduced = candidate.metrics["max_violation"] < current.metrics["max_violation"] - float(proj_cfg["minimum_violation_improvement"])
                 merit_reduced = candidate_merit < current_merit - float(proj_cfg["merit_tolerance"])
-                if merit_reduced or max_reduced or candidate.metrics["projector_constraints_satisfied"]:
+                violation_penalty_reduced = (
+                    candidate_penalty < current_penalty - float(proj_cfg["merit_tolerance"])
+                )
+                max_allowance = (
+                    float(proj_cfg["minimum_violation_improvement"])
+                    + float(proj_cfg["max_violation_slack_ratio"])
+                    * current.metrics["max_violation"]
+                )
+                max_nonworsening = (
+                    candidate.metrics["max_violation"] <= current.metrics["max_violation"]
+                    + max_allowance
+                )
+                candidate_feasible = bool(candidate.metrics["projector_constraints_satisfied"])
+                # Do not accept a step solely because the single largest residual
+                # falls when the aggregate joint merit rises. This prevents a
+                # correction of one family from silently trading against several
+                # other active families.
+                if candidate_feasible or (violation_penalty_reduced and max_nonworsening):
                     controls = candidate_controls.detach()
                     current = candidate
                     accepted = True
@@ -487,7 +559,15 @@ class JointTrajectoryProjector:
                         "max_violation": candidate.metrics["max_violation"],
                         "max_violation_by_group": candidate.metrics["max_violation_by_group"],
                         "active_counts": active_counts,
+                        "active_total_counts": active_total_counts,
+                        "active_truncated_counts": active_truncated_counts,
                         "trust_radius": trust,
+                        "candidate_violation_count_by_group": candidate.metrics["violation_count_by_group"],
+                        "candidate_violation_l2_by_group": candidate.metrics["violation_l2_by_group"],
+                        "acceptance_reason": "joint_feasible" if candidate_feasible else "violation_penalty_reduced_max_nonworsening",
+                        "merit_reduced": merit_reduced,
+                        "violation_penalty_reduced": violation_penalty_reduced,
+                        "max_nonworsening": max_nonworsening,
                         **jac_diag,
                     }
                     if alpha >= 0.75 and merit_reduced:
@@ -508,7 +588,11 @@ class JointTrajectoryProjector:
                               "trust_radius": trust, "current_merit": current_merit,
                               "current_objective": current_objective,
                               "current_penalty": current_penalty,
-                              "active_counts": active_counts, **jac_diag}
+                              "active_counts": active_counts,
+                              "active_total_counts": active_total_counts,
+                              "active_truncated_counts": active_truncated_counts,
+                              "acceptance_reason": "line_search_rejected_or_joint_merit_not_reduced",
+                              **jac_diag}
             projection_history.append(trial_diag)
             history.append({"iteration": iteration, **current.metrics,
                             "status": "accepted" if accepted else "rejected"})
@@ -523,11 +607,32 @@ class JointTrajectoryProjector:
                 break
 
         with torch.enable_grad():
-            final = self._evaluate(controls, context, roads)
+            final = self._evaluate(controls, context, roads, external_actors=external_actors)
         objective = float(self._objective(controls, final.rollout, nominal, tau_nominal).detach().cpu())
         projector_constraints_satisfied = bool(final.metrics["projector_constraints_satisfied"])
         if projector_constraints_satisfied:
             status = "converged_feasible"
+        initial_metrics = history[0]
+        group_progress = {}
+        for group in ("stability", "road", "curvature", "control",
+                      "intertruck_collision", "external_collision", "control_rate"):
+            initial_max = float(initial_metrics.get("max_violation_by_group", {}).get(group, 0.0))
+            final_max = float(final.metrics.get("max_violation_by_group", {}).get(group, 0.0))
+            initial_count = int(initial_metrics.get("violation_count_by_group", {}).get(group, 0))
+            final_count = int(final.metrics.get("violation_count_by_group", {}).get(group, 0))
+            initial_l2 = float(initial_metrics.get("violation_l2_by_group", {}).get(group, 0.0))
+            final_l2 = float(final.metrics.get("violation_l2_by_group", {}).get(group, 0.0))
+            group_progress[group] = {
+                "initial_max_violation": initial_max,
+                "final_max_violation": final_max,
+                "max_violation_reduction": initial_max - final_max,
+                "initial_violation_count": initial_count,
+                "final_violation_count": final_count,
+                "violation_count_reduction": initial_count - final_count,
+                "initial_violation_l2": initial_l2,
+                "final_violation_l2": final_l2,
+                "violation_l2_reduction": initial_l2 - final_l2,
+            }
         return JTPResult(
             controls=controls.detach(), trajectories=final.rollout["trajectory"].detach(),
             states=final.rollout["states"].detach(), ltr=final.rollout["ltr"].detach(),
@@ -537,11 +642,17 @@ class JointTrajectoryProjector:
                 "history": history,
                 "projection": projection_history,
                 "objective": objective,
-                "initial_metrics": history[0],
+                "initial_metrics": initial_metrics,
                 "final_metrics": final.metrics,
+                "group_progress": group_progress,
+                "termination_status": status,
                 "final_trust_radius": trust,
-                "collision_handled_by": "adaptive_anchor",
-                "control_rate_constraints_enabled": False,
+                "collision_handled_by": "joint_projection",
+                "external_actor_count": len(external_actors),
+                "acceptance_policy": "joint_violation_penalty_reduction_with_max_violation_nonworsening",
+                "intertruck_collision_constraints_enabled": True,
+                "external_collision_constraints_enabled": True,
+                "control_rate_constraints_enabled": True,
                 "config_path": self.cfg.get("_config_path"),
             },
         )

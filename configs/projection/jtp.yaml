@@ -39,8 +39,16 @@ control:
   acceleration_max_mps2: 2.5
   steering_min_rad: -0.08
   steering_max_rad: 0.08
+  # First differences include the previously applied control at t=0.
+  acceleration_rate_max_mps3: 2.5
+  steering_rate_max_rad_s: 0.12
+  rate_tolerance_si: 0.00001
   # Characteristic scales used to normalize control-space updates.
   trust_scale: [2.5, 0.08]
+
+collision:
+  # Clearance is shared by inter-truck and external-actor footprint checks.
+  clearance_m: 0.35
 
 optimization:
   lambda_u: 0.10
@@ -56,12 +64,17 @@ projection:
     road: 24
     curvature: 16
     control: 32
+    intertruck_collision: 64
+    external_collision: 64
+    control_rate: 64
   active_tolerance: 1.0e-6
   constraint_tolerance: 1.0e-4
   residual_scales:
     stability: [0.5, 0.0872665, 0.0872665, 0.80]
     road_m: 0.5
     curvature_per_m2: 0.000625
+    collision_m: 0.5
+    control_rate: [2.5, 0.12]
   violation_weight_beta: 2.0
   damping: 1.0e-4
   damping_retries: 6
@@ -78,6 +91,7 @@ projection:
   merit_penalty: 1000.0
   merit_tolerance: 1.0e-7
   minimum_violation_improvement: 1.0e-6
+  max_violation_slack_ratio: 0.015
   change_tolerance: 1.0e-6  # normalized control correction used only for projection-applied diagnostics
 
 # Online K2 history and road-context construction (shared execution above).
@@ -94,3 +108,6 @@ runtime:
     forward_range_m: 180.0
     include_connected_road_segments: true
     search_lateral_range_m: 40.0
+  collision:
+    max_external_actors: 12
+    max_external_distance_m: 150.0
