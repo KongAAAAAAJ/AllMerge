@@ -15,7 +15,8 @@ python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a0_fixed.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A0_anchor_assignment
+  --auto-resume ^
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A0_anchor_assignment_new
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^
@@ -24,7 +25,7 @@ python scripts/training/run_diffusion.py ^
   --anchor-cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment_new
 
 ## Diffusion 训练命令 A2：
 python scripts/training/run_diffusion.py ^
@@ -33,7 +34,7 @@ python scripts/training/run_diffusion.py ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment_new
 
 ## 从已保存的 A0 checkpoint 续训：
 python scripts/training/run_diffusion.py ^
