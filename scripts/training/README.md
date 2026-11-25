@@ -34,7 +34,7 @@ python scripts/training/run_diffusion.py ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment_new
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2_new
 
 ## 从已保存的 A0 checkpoint 续训：
 python scripts/training/run_diffusion.py ^
@@ -50,19 +50,20 @@ python scripts/training/run_diffusion.py ^
   --config configs/train/diffusion.yaml ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --anchor-cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
-  --resume outputs/anchor_ablation/diffusion_ckpt/dual/A1/last.pt ^
+  --resume outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment_new/last.pt ^
   --max-epochs 60 ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1
+  --auto-resume ^
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment_new
 
 ## 从已保存的 A2 checkpoint 续训：
 python scripts/training/run_diffusion.py ^
   --config configs/train/ablation/diffusion_a2_adaptive.yaml ^
   --anchor-cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
-  --resume outputs/anchor_ablation/diffusion_ckpt/dual/A2/last.pt ^
+  --resume outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment_new/last.pt ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment_new
 
 --resume 恢复模型、优化器、轮次、历史最佳验证损失和早停计数。
 --max-epochs 是总轮次上限；第 8 轮 checkpoint 会从第 9 轮继续。

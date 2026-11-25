@@ -15,7 +15,7 @@
 | 控制 `control` | 纵向加速度 `a_x`（m/s²） | `-4.0` | `+2.5` | 对所有车辆、所有控制节点施加幅值约束；默认控制节点数 `K = H = 40`。 | [joint_projector.py](joint_projector.py)：`_constraint_groups` |
 | 控制 `control` | 前轮转向角 `delta_f`（rad） | `-0.08`（约 `-4.58°`） | `+0.08`（约 `+4.58°`） | 对所有车辆、所有控制节点施加幅值约束；约束的是前轮转向角。 | [joint_projector.py](joint_projector.py)：`_constraint_groups` |
 
-## JTP 求解伪代码
+## JTP 求解伪代码（旧）
 
 **算法 1：基于活跃集加权 Jacobian 的联合轨迹投影**
 
@@ -56,4 +56,3 @@ $$
 以上为约束目标边界。实现先对残差归一化，再以 `projection.constraint_tolerance = 1e-4` 判定是否满足；该容差不是所有物理量统一增加 `1e-4`。求解最多迭代 12 次，返回结果是否满足全部已实现约束由 `projector_constraints_satisfied` 报告。
 
 当前 JTP 未单独加入车速上下限、侧倾角速度、加速度变化率（jerk）、转向变化率、车间碰撞或外部车辆碰撞约束。模块 [README.md](README.md) 说明：碰撞规避由上游 Adaptive Anchor 评分/选择处理，碰撞与控制变化率还由独立评估器检查。信赖域、步长、阻尼和线搜索参数属于投影求解设置，不属于上表中的车辆物理约束。
-
