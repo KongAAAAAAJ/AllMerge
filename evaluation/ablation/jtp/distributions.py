@@ -129,7 +129,7 @@ def draw(data_path, output_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
-    from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, VPacker
+    from matplotlib.patches import FancyBboxPatch
     path, output = Path(data_path), Path(output_dir)
     if not path.is_file() or not path.with_suffix('.json').is_file():
         raise ValueError('Missing full distribution data/metadata; rerun run_jtp.py with --constraint-distributions. Summary CSV cannot reconstruct these distributions.')
@@ -155,8 +155,8 @@ def draw(data_path, output_dir):
                     # 用两种方法合并数据的0.5%～99.5%分位数确定绘图范围
                     low, high = np.quantile(combined, [0.005, 0.995])
                     pad = max((high - low) * .03, max(abs(low), abs(high), 1.) * 1e-6)
-                    bins = np.linspace(low - pad, high + pad, 61)
-                    notes = []
+                    bins = np.linspace(low - pad, high + pad, 41)
+                    violation_rates = []
                     for m, color in zip(metadata['methods'], ('#0072BD', '#EDB120')):
                         v, b = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad'))
                         if len(v):
@@ -165,13 +165,22 @@ def draw(data_path, output_dir):
                             centers = (bins[:-1] + bins[1:]) / 2
                             ax.bar(centers, density, width=widths*.9, color=color,
                                    alpha=.5, linewidth=0, label=m, zorder=2)
-                            notes.append(TextArea(f'Violations: step {100*b.mean():.2f}%',
-                                                  textprops={'color': color, 'fontsize': 14}))
-                    annotation = AnchoredOffsetbox(loc='upper left',
-                        child=VPacker(children=notes, align='left', pad=0, sep=2),
-                        pad=.3, borderpad=.5, frameon=True)
-                    annotation.patch.set(facecolor='lightgray', alpha=.5, edgecolor='none')
-                    ax.add_artist(annotation)
+                            violation_rates.append((100*b.mean(), color))
+                    annotation = ax.inset_axes([.02, .77, .38, .20])
+                    annotation.set_axis_off()
+                    annotation.add_patch(FancyBboxPatch(
+                        (-.03, -.03), 1.06, 1.06, transform=annotation.transAxes,
+                        boxstyle='round,pad=0.015,rounding_size=0.06',
+                        facecolor='lightgray', alpha=.1, edgecolor='none',
+                        clip_on=False, zorder=0))
+                    annotation.set_xlim(0, 1.65)
+                    annotation.set_ylim(-.5, 2.1)
+                    annotation.text(.825, 2.05, 'Violations', ha='center', va='top', fontsize=14)
+                    maximum_rate = max(rate for rate, _ in violation_rates)
+                    for y, (rate, color) in zip((1, 0), violation_rates):
+                        length = rate/maximum_rate if maximum_rate else 0
+                        annotation.barh(y, length, height=.35, color=color, alpha=.5, linewidth=0)
+                        annotation.text(length+.04, y, f'{rate:.2f}%', va='center', fontsize=14)
                 else:
                     message = 'No eligible collision objects' if k in ('intertruck', 'external') else 'No evaluable prediction intervals'
                     ax.text(.5, .5, message+'\nn=0; violation rates N/A', ha='center', transform=ax.transAxes)

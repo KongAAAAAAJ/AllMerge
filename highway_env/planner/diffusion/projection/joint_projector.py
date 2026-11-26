@@ -239,9 +239,9 @@ class JointTrajectoryProjector:
             "projector_constraints_satisfied": all(value == 0 for value in counts.values()),
         }
 
-    def _evaluate(self, controls, context, roads, associations=None, external_actors=()):
+    def _evaluate(self, controls, context, roads, associations=None, external_actors=(), *, rollout=None):
         rollout, groups, associations = self._constraint_groups(
-            controls, context, roads, associations, external_actors)
+            controls, context, roads, associations, external_actors, rollout=rollout)
         return _Evaluation(rollout, groups, associations, self._metrics(groups))
 
     def _objective(self, controls, rollout, controls_nominal, trajectory_nominal):
@@ -412,24 +412,51 @@ class JointTrajectoryProjector:
                     candidate_controls = controls + alpha * delta
                     with torch.no_grad():
                         candidate = self._evaluate(
-                            candidate_controls, context, roads, external_actors=external_actors)
+                            candidate_controls, context, roads,
+                            associations=current.associations,
+                            external_actors=external_actors)
                     validations += 1
                     after = group_maxima(candidate.metrics, order)
                     hard_feasible_after = bool(candidate.metrics["control_box_feasible"])
                     hard_restoration = not hard_feasible_before and hard_feasible_after
-                    state_improvement = accept_nonlinear(before, after, proj_cfg)
-                    ok = hard_feasible_after and (hard_restoration or state_improvement)
-                    trials.append({"alpha": alpha, "priority_group_maxima": after,
-                                   "hard_control_feasible": hard_feasible_after,
-                                   "accepted": ok,
-                                   "acceptance_reason": ("hard_control_restoration" if hard_restoration
-                                                         else "state_group_improvement" if state_improvement
-                                                         else "rejected")})
+                    acceptance = accept_nonlinear(
+                        current.groups, candidate.groups, thresholds, order, proj_cfg)
+                    state_safe = (acceptance["nondegradation_ok"]
+                                  and acceptance["violation_count_nonincrease_ok"])
+                    state_improvement = bool(acceptance["state_progress"])
+                    ok = hard_feasible_after and state_safe and (hard_restoration or state_improvement)
+                    if not hard_feasible_after:
+                        acceptance_reason = "hard_control_box_violation"
+                    elif not acceptance["nondegradation_ok"]:
+                        acceptance_reason = "state_constraint_regression"
+                    elif not acceptance["violation_count_nonincrease_ok"]:
+                        acceptance_reason = "priority_group_violation_count_increased"
+                    elif hard_restoration:
+                        acceptance_reason = "hard_control_restoration"
+                    elif state_improvement:
+                        acceptance_reason = "per_constraint_state_improvement"
+                    else:
+                        acceptance_reason = "no_state_improvement"
+                    trials.append({
+                        "alpha": alpha,
+                        "priority_group_maxima": after,
+                        "hard_control_feasible": hard_feasible_after,
+                        "state_non_degradation": acceptance["nondegradation_ok"],
+                        "group_violation_counts_nonincreasing": acceptance["violation_count_nonincrease_ok"],
+                        "state_progress": state_improvement,
+                        "acceptance_diagnostics": acceptance,
+                        "accepted": ok,
+                        "acceptance_reason": acceptance_reason,
+                    })
                     if ok:
-                        current = candidate
                         controls = candidate_controls.detach()
+                        # Refresh nearest-road associations only after the frozen-association
+                        # line search has accepted the candidate. Reuse its K2 rollout.
+                        current = self._evaluate(
+                            controls, context, roads, external_actors=external_actors,
+                            rollout=candidate.rollout)
                         accepted = True
-                        accepted_reason = trials[-1]["acceptance_reason"]
+                        accepted_reason = acceptance_reason
                         accepted_iterations += 1
                         stalled = 0
                         if alpha >= .75:
@@ -477,6 +504,6 @@ class JointTrajectoryProjector:
             "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,
             "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
-            "acceptance_policy":"hard_control_box_plus_priority_group_maxima_nonincreasing_and_one_improved","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
+            "acceptance_policy":"hard_control_box_plus_per_constraint_non_degradation_and_group_violation_count_nonincrease","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
             "control_rate_constraints_enabled":True,
             "config_path":self.cfg.get("_config_path")})

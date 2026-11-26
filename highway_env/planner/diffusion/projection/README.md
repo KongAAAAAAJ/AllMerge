@@ -1,4 +1,4 @@
-# TRACE Joint Trajectory Projection (Stage 1)
+# TRACE Joint Trajectory Projection (Stage 2)
 
 The runtime projection algorithm is priority-grouped damped least squares with
 fixed hard control bounds, cross-group protection, and outer nonlinear
@@ -10,7 +10,7 @@ not included in priority scoring or state active-set caps.
 ## Solver configuration
 
 `configs/projection/jtp.yaml`, `projection.solver_method: damped_least_squares`
-is the implemented Stage-1 backend. `constrained_qp` remains reserved for a
+is the implemented Stage-2 backend. `constrained_qp` remains reserved for a
 later solver study and selecting it raises `NotImplementedError`. `group_count`
 is 2 or 3. The six state families are ranked by
 `q * (1 + max(relu(normalized_residual - tolerance)))`, split into near-equal
@@ -41,16 +41,17 @@ metrics. Control magnitude bounds have zero feasibility slack.
   the current box. No post-solve elementwise clipping or scalar trust scaling is
   applied.
 - `joint_projector.py`: nonlinear backtracking evaluates the unmodified
-  candidate controls. A candidate must satisfy the hard control box. Ordinary
-  state projection retains the Stage-1 acceptance rule based on priority-group
-  maximum excesses; an initially infeasible control box is restored as a hard
-  feasibility step. The stricter per-constraint non-degradation rule is planned
-  for Stage 2.
+  candidate controls. Road associations are frozen within one line search and
+  refreshed after an accepted candidate. A candidate must satisfy the hard
+  control box; every state-constraint row must have non-increasing tolerance
+  excess, and each priority group must have a non-increasing violation count.
+  At least one state constraint must improve materially, unless the candidate
+  restores an initially infeasible hard control box without state regression.
 
 The road model, five-circle footprint, collision model, K2 execution model,
-independent paper metrics, and evaluation interfaces are unchanged in Stage 1.
-Road active-set sampling and its cap are unchanged; road active-set reduction
-is reserved for Stage 3.
+independent paper metrics, and evaluation interfaces remain unchanged.
+Road active-set sampling and its cap remain unchanged in Stage 2; road active-set
+reduction is reserved for Stage 3.
 
 ## API
 

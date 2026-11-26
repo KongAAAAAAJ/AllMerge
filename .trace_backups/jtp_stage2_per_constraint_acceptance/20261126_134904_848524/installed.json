@@ -1,0 +1,44 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/grouped_solver.py",
+    "old": "d9aba690ffb0471bb5217d73a19f061b504d108a7fe9386267502ab2d44e8167",
+    "new": "5bcee922d34c6b1f7e7ee32fdd264cd673a5284ec2fdd0c64091bac8d0924616",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old": "6f59f0fe893f8c6c62341f6567a247ac60acd34ef323faf6e2903e8d8ddfc928",
+    "new": "1b404392d61a672a0762e0b41f2eb3a067da361a056b020cf098e2a3607f2b9c",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_grouped_stage1.py",
+    "old": "d7b3907034160be394089e84566af196e56c0619e2bf9c725825c74190d578be",
+    "new": "bdb3d0b513f9754291b53a3693a86c6fb748dea974de868144c85faa75091d64",
+    "optional": false
+  },
+  {
+    "path": "tests/test_joint_trajectory_projection.py",
+    "old": "75f2a13a7db7d284ceaff97a333e9d6fadfa5ac03e6076d4e86a6b2555dbb9a1",
+    "new": "1a8b05c9acf99757762ebc36dd103a3a2fa073436a5774576b6e8b3adfacf5a8",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/README.md",
+    "old": "c0697f2427a5bf93513d50ccaeb311978c1b92fc197907d28dfa78f22f5d1a20",
+    "new": "676d1838555ce96c4e7388c2c066392f795615b708fdb7f3ee94a9d140da28fd",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP伪代码.md",
+    "old": "aad7228494e756b6ecf5b632870f1a25d351a2e8246a38bcbea1718eb6cffe45",
+    "new": "d0aeb3087e5d0c55c62cf6c52966aa66591ccb83c18d8ce20d444f8df7011ac4",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP约束定义.md",
+    "old": "8dc44a0e94bbdb7a8a937b087957898bd26d7339f506d10966c5b092e6fae9f2",
+    "new": "cca2f705e98fbf9d3750555d9442e4df76cfde7896864cebc0839fb788af0b03",
+    "optional": true
+  }
+]

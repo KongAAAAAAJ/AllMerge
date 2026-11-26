@@ -1,7 +1,6 @@
 """Priority-grouped damped LS with fixed control-box constraints."""
 from __future__ import annotations
 
-import math
 import torch
 
 
@@ -24,13 +23,87 @@ def group_maxima(metrics, priority_groups):
             for group in priority_groups]
 
 
-def accept_nonlinear(before, after, cfg):
-    if any(not math.isfinite(x) for x in (*before, *after)):
-        return False
+def accept_nonlinear(before_groups, after_groups, thresholds, priority_groups, cfg):
+    """Evaluate full-resolution nonlinear acceptance for every state constraint row.
+
+    A candidate is state-safe only when every row's tolerance-excess is
+    non-increasing and each priority group has a non-increasing violation count.
+    At least one row must improve materially, or a group must lose violations.
+    """
     tolerance = float(cfg["nondegradation_tolerance"])
     improvement = float(cfg["minimum_violation_improvement"])
-    return (all(new <= old + tolerance for old, new in zip(before, after))
-            and any(new < old - improvement for old, new in zip(before, after)))
+    group_details = {}
+    all_non_degraded = True
+    all_counts_nonincreasing = True
+    state_progress = False
+
+    for group_index, families in enumerate(priority_groups):
+        before_parts = []
+        after_parts = []
+        for name in families:
+            before_excess = (before_groups[name] - thresholds[name]).clamp_min(0.0)
+            after_excess = (after_groups[name] - thresholds[name]).clamp_min(0.0)
+            if before_excess.shape != after_excess.shape:
+                raise ValueError(
+                    f"Constraint row shape changed during line search for {name}: "
+                    f"{tuple(before_excess.shape)} vs {tuple(after_excess.shape)}"
+                )
+            before_parts.append(before_excess.reshape(-1))
+            after_parts.append(after_excess.reshape(-1))
+
+        before = torch.cat(before_parts) if before_parts else torch.empty(0)
+        after = torch.cat(after_parts) if after_parts else torch.empty(0)
+        if not torch.isfinite(before).all() or not torch.isfinite(after).all():
+            group_details[f"group_{group_index + 1}"] = {
+                "families": list(families),
+                "finite": False,
+                "nondegradation_ok": False,
+                "violation_count_nonincrease_ok": False,
+                "violation_count_before": None,
+                "violation_count_after": None,
+                "nondegradation_failure_count": None,
+                "improved_constraint_count": 0,
+            }
+            all_non_degraded = False
+            all_counts_nonincreasing = False
+            continue
+
+        regressions = after > before + tolerance
+        count_before = int((before > 0.0).sum().detach().cpu())
+        count_after = int((after > 0.0).sum().detach().cpu())
+        nondegradation_ok = not bool(regressions.any())
+        count_nonincrease_ok = count_after <= count_before
+        improved = before - after > improvement
+        improved_count = int(improved.sum().detach().cpu())
+        count_reduction = count_after < count_before
+        state_progress = state_progress or improved_count > 0 or count_reduction
+
+        group_details[f"group_{group_index + 1}"] = {
+            "families": list(families),
+            "finite": True,
+            "constraint_count": int(before.numel()),
+            "nondegradation_ok": nondegradation_ok,
+            "violation_count_nonincrease_ok": count_nonincrease_ok,
+            "violation_count_before": count_before,
+            "violation_count_after": count_after,
+            "violation_count_delta": count_after - count_before,
+            "nondegradation_failure_count": int(regressions.sum().detach().cpu()),
+            "improved_constraint_count": improved_count,
+            "max_excess_before": float(before.max().detach().cpu()) if before.numel() else 0.0,
+            "max_excess_after": float(after.max().detach().cpu()) if after.numel() else 0.0,
+            "l2_excess_before": float(torch.linalg.vector_norm(before).detach().cpu()),
+            "l2_excess_after": float(torch.linalg.vector_norm(after).detach().cpu()),
+        }
+        all_non_degraded = all_non_degraded and nondegradation_ok
+        all_counts_nonincreasing = all_counts_nonincreasing and count_nonincrease_ok
+
+    return {
+        "nondegradation_ok": all_non_degraded,
+        "violation_count_nonincrease_ok": all_counts_nonincreasing,
+        "state_progress": state_progress,
+        "accepted": all_non_degraded and all_counts_nonincreasing and state_progress,
+        "groups": group_details,
+    }
 
 
 def _weighted_system(jac, residual, cfg):

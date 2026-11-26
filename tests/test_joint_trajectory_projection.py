@@ -119,9 +119,21 @@ def test_grouped_projection_corrects_yaw_stability_without_osqp():
     cfg["projection"]["max_active_per_group"]["stability"] = 40
     cfg["projection"]["max_step_norm"] = 0.5
     projector = JointTrajectoryProjector(StraightLineExecution(), cfg)
+    association_modes = []
+    original_evaluate = projector._evaluate
+
+    def tracked_evaluate(controls, context, roads, associations=None, external_actors=(), *, rollout=None):
+        association_modes.append(associations is not None)
+        return original_evaluate(
+            controls, context, roads, associations, external_actors, rollout=rollout)
+
+    projector._evaluate = tracked_evaluate
     controls = torch.zeros(1, 40, 2)
     result = projector.project(controls, _context(yaw_rate=0.60), _road(100.0))
     assert result.iterations > 0
+    assert result.diagnostics["accepted_iterations"] > 0
+    assert True in association_modes
+    assert association_modes.count(False) >= 2
     assert result.diagnostics["projection"]
     assert result.diagnostics["projection"][0]["jacobian_shape"][0] > 0
     assert result.diagnostics["final_metrics"]["max_violation"] < result.diagnostics["initial_metrics"]["max_violation"]
