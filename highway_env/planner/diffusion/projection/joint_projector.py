@@ -187,6 +187,7 @@ class JointTrajectoryProjector:
             "stability": torch.cat([x.reshape(-1) for x in stability]),
             "road": torch.cat([x.reshape(-1) for x in road_values]),
             "curvature": torch.cat([x.reshape(-1) for x in curve_values]),
+            # Retained for metrics only; grouped_solver enforces this as a fixed box.
             "control": control_box.reshape(-1),
             "intertruck_collision": intertruck_collision.reshape(-1),
             "external_collision": external_collision.reshape(-1),
@@ -194,11 +195,14 @@ class JointTrajectoryProjector:
         }
         return rollout, groups, associations
 
-    def _metrics(self, groups):
+    def _constraint_thresholds(self, groups):
+        """Return the single tolerance tensor used by activity and evaluation."""
         tol = float(self.cfg["projection"]["constraint_tolerance"])
         thresholds = {key: torch.full_like(value, tol) for key, value in groups.items()}
-        # Match the independent evaluator's SI control-rate tolerance exactly.
-        # The residual vector is flattened from [upper/lower, N, H, accel/steer].
+        # Control range is a hard constraint and has no feasibility slack.
+        if "control" in thresholds:
+            thresholds["control"] = torch.zeros_like(groups["control"])
+        # Control-rate limits retain their channel-specific SI tolerance after normalization.
         rate_values = groups.get("control_rate")
         if rate_values is not None and rate_values.numel():
             rate_scale = self.cfg["projection"]["residual_scales"]["control_rate"]
@@ -208,12 +212,18 @@ class JointTrajectoryProjector:
             n = rate_values.numel() // (2 * self.horizon * 2)
             thresholds["control_rate"] = channel_tol.view(1, 1, 1, 2).expand(
                 2, n, self.horizon, 2).reshape(-1)
+        return thresholds
+
+    def _metrics(self, groups):
+        thresholds = self._constraint_thresholds(groups)
         positive = {key: torch.relu(value - thresholds[key]) for key, value in groups.items()}
         maxima = {key: (float(value.max().detach().cpu()) if value.numel() else 0.0)
                   for key, value in positive.items()}
-        counts = {key: int((value > thresholds[key]).sum().detach().cpu()) for key, value in groups.items()}
+        counts = {key: int((value > thresholds[key]).sum().detach().cpu())
+                  for key, value in groups.items()}
         l2 = {key: float(torch.linalg.vector_norm(value).detach().cpu())
               for key, value in positive.items()}
+        control_feasible = counts["control"] == 0
         return {
             "max_violation": max(maxima.values(), default=0.0),
             "max_violation_by_group": maxima,
@@ -222,6 +232,7 @@ class JointTrajectoryProjector:
             "stability_violation_count": counts["stability"],
             "geometry_violation_count": counts["road"] + counts["curvature"],
             "control_box_violation_count": counts["control"],
+            "control_box_feasible": control_feasible,
             "intertruck_collision_violation_count": counts.get("intertruck_collision", 0),
             "external_collision_violation_count": counts.get("external_collision", 0),
             "control_rate_violation_count": counts.get("control_rate", 0),
@@ -243,18 +254,22 @@ class JointTrajectoryProjector:
                 + 0.5 * float(opt["lambda_u"]) * (u_error.square() * wu).sum())
 
     def _active_indices(self, groups):
-        """Select the largest violated residuals and expose active-set truncation."""
+        """Select violated state-constraint rows using evaluation tolerances."""
         cfg = self.cfg["projection"]
+        thresholds = self._constraint_thresholds(groups)
         selected = {}
         counts = {}
         total_counts = {}
         truncated_counts = {}
         for name, values in groups.items():
-            ids = torch.nonzero(values.detach() > float(cfg["active_tolerance"]), as_tuple=False).reshape(-1)
+            if name == "control":
+                continue
+            ids = torch.nonzero(values.detach() > thresholds[name], as_tuple=False).reshape(-1)
             total = int(ids.numel())
             cap = int(cfg["max_active_per_group"][name])
             if total > cap:
-                local = torch.topk(values.detach()[ids], k=cap, largest=True, sorted=False).indices
+                local = torch.topk(values.detach()[ids] - thresholds[name][ids],
+                                   k=cap, largest=True, sorted=False).indices
                 ids = ids[local]
             selected[name] = ids
             counts[name] = int(ids.numel())
@@ -336,7 +351,8 @@ class JointTrajectoryProjector:
         with torch.no_grad():
             current = self._evaluate(controls, context, roads, external_actors=external_actors)
         tau_nominal = current.rollout["trajectory"].detach().clone()
-        order, scores = build_priority_groups(current.groups, proj_cfg)
+        thresholds = self._constraint_thresholds(current.groups)
+        order, scores = build_priority_groups(current.groups, proj_cfg, thresholds)
         history = [{"iteration": 0, **current.metrics, "priority_group_maxima": group_maxima(current.metrics, order), "status": "nominal"}]
         initial_metrics = current.metrics
         projection_history = []
@@ -361,7 +377,7 @@ class JointTrajectoryProjector:
             if current.metrics["projector_constraints_satisfied"]:
                 break
             selected, counts, totals, truncated = self._active_indices(current.groups)
-            if not sum(counts.values()):
+            if not sum(counts.values()) and current.metrics["control_box_feasible"]:
                 status = "no_active_violations"
                 break
             tick = clock()
@@ -369,67 +385,73 @@ class JointTrajectoryProjector:
                 rows, metric, method = shared_linearization(self, controls, context, roads, current, selected, external_actors, cache)
             linearizations += 1
             diag = {"iteration":iteration,"active_counts":counts,"active_total_counts":totals,
-                    "active_truncated_counts":truncated,"linearization_method":method,
+                    "active_truncated_counts":truncated,
+                    "hard_control_violation_count_before":current.metrics["control_box_violation_count"],
+                    "linearization_method":method,
                     "linearization_ms":(clock()-tick)*1000,"trust_radius":trust}
             tick = clock()
             if not all(torch.isfinite(j).all() for j in rows.values()):
                 delta, info = None, {"reason":"nonfinite_active_jacobian"}
             else:
                 with torch.no_grad():
-                    delta, info = solve_groups(controls, current.groups, selected, rows, metric, order, proj_cfg, scale, trust, damping_scale)
+                    delta, info = solve_groups(
+                        controls, current.groups, selected, rows, thresholds, metric, order,
+                        proj_cfg, scale, trust, damping_scale, lower, upper)
             diag.update(info)
             diag["grouped_solver_ms"]=(clock()-tick)*1000
             before=group_maxima(current.metrics,order)
             diag["priority_group_maxima_before"]=before
-            accepted=False; trials=[]; tick=clock()
-            diag["global_box_cap_disabled"] = True
-            diag["would_be_alpha_box_cap"] = None
-            diag["would_be_alpha_box_blocked"] = None
-            if delta is not None and bool(delta.abs().max()>0):
-                alpha=float(proj_cfg["alpha_initial"])
-                # The former global box cap is disabled. Its hypothetical value
-                # is retained for diagnostics only and never modifies alpha.
-                in_box=bool(((controls>=lower)&(controls<=upper)).all())
-                if in_box:
-                    tiny=torch.finfo(delta.dtype).tiny
-                    cap=torch.where(delta>0,(upper-controls)/delta.clamp_min(tiny),torch.where(delta<0,(lower-controls)/delta.clamp_max(-tiny),torch.full_like(delta,float('inf'))))
-                    would_be_alpha_box_cap=float(cap.min().clamp_min(0))
-                    diag["would_be_alpha_box_cap"] = would_be_alpha_box_cap
-                    diag["would_be_alpha_box_blocked"] = would_be_alpha_box_cap < float(proj_cfg["alpha_minimum"])
-                while alpha>=float(proj_cfg["alpha_minimum"]):
-                    candidate_controls=controls+alpha*delta
-                    guarded=torch.maximum(torch.minimum(candidate_controls,upper),lower)
-                    guard_delta=guarded-candidate_controls
-                    guard_abs=guard_delta.abs()
-                    guard_max_correction=float(guard_abs.max())
-                    guard_changed=guard_max_correction>1e-7
-                    guard_changed_count=int((guard_abs>1e-7).sum())
-                    candidate_controls=guarded
+            accepted = False
+            accepted_reason = None
+            trials = []
+            tick = clock()
+            if delta is not None and bool(delta.abs().max() > 0):
+                alpha = float(proj_cfg["alpha_initial"])
+                hard_feasible_before = bool(current.metrics["control_box_feasible"])
+                while alpha >= float(proj_cfg["alpha_minimum"]):
+                    candidate_controls = controls + alpha * delta
                     with torch.no_grad():
-                        candidate=self._evaluate(candidate_controls,context,roads,external_actors=external_actors)
-                    validations+=1
-                    after=group_maxima(candidate.metrics,order)
-                    feasible=bool(candidate.metrics["projector_constraints_satisfied"])
-                    ok=feasible or accept_nonlinear(before,after,proj_cfg)
-                    trials.append({"alpha":alpha,"priority_group_maxima":after,"accepted":ok,
-                                   "box_guard_changed":guard_changed,
-                                   "box_guard_changed_count":guard_changed_count,
-                                   "box_guard_max_correction":guard_max_correction})
+                        candidate = self._evaluate(
+                            candidate_controls, context, roads, external_actors=external_actors)
+                    validations += 1
+                    after = group_maxima(candidate.metrics, order)
+                    hard_feasible_after = bool(candidate.metrics["control_box_feasible"])
+                    hard_restoration = not hard_feasible_before and hard_feasible_after
+                    state_improvement = accept_nonlinear(before, after, proj_cfg)
+                    ok = hard_feasible_after and (hard_restoration or state_improvement)
+                    trials.append({"alpha": alpha, "priority_group_maxima": after,
+                                   "hard_control_feasible": hard_feasible_after,
+                                   "accepted": ok,
+                                   "acceptance_reason": ("hard_control_restoration" if hard_restoration
+                                                         else "state_group_improvement" if state_improvement
+                                                         else "rejected")})
                     if ok:
-                        current=candidate; controls=candidate_controls.detach(); accepted=True; accepted_iterations+=1; stalled=0
-                        if alpha>=.75:
-                            trust=min(float(proj_cfg["maximum_trust_radius"]),trust*float(proj_cfg["trust_grow_factor"]))
-                        elif alpha<=.25:
-                            trust=max(float(proj_cfg["minimum_trust_radius"]),trust*float(proj_cfg["trust_shrink_factor"]))
-                        damping_scale=max(1.,damping_scale/2.)
+                        current = candidate
+                        controls = candidate_controls.detach()
+                        accepted = True
+                        accepted_reason = trials[-1]["acceptance_reason"]
+                        accepted_iterations += 1
+                        stalled = 0
+                        if alpha >= .75:
+                            trust = min(float(proj_cfg["maximum_trust_radius"]),
+                                        trust * float(proj_cfg["trust_grow_factor"]))
+                        elif alpha <= .25:
+                            trust = max(float(proj_cfg["minimum_trust_radius"]),
+                                        trust * float(proj_cfg["trust_shrink_factor"]))
+                        damping_scale = max(1.0, damping_scale / 2.0)
                         break
-                    alpha*=float(proj_cfg["alpha_shrink_factor"])
+                    if not hard_feasible_before and not hard_feasible_after:
+                        # A smaller fraction of a hard-feasibility restoration
+                        # cannot enter the box when the active-set solution ends
+                        # on its nearest bound.
+                        break
+                    alpha *= float(proj_cfg["alpha_shrink_factor"])
             diag.update({"accepted":accepted,"line_search_trials":trials,"nonlinear_validation_ms":(clock()-tick)*1000,
                          "priority_group_maxima_after":group_maxima(current.metrics,order),
                          "max_violation":current.metrics["max_violation"],"max_violation_by_group":current.metrics["max_violation_by_group"],
                          "candidate_violation_count_by_group":current.metrics["violation_count_by_group"],
                          "candidate_violation_l2_by_group":current.metrics["violation_l2_by_group"],
-                         "acceptance_reason":("joint_feasible" if current.metrics["projector_constraints_satisfied"] else "group_non_degradation") if accepted else "rejected_or_zero_step"})
+                         "acceptance_reason": accepted_reason if accepted else "rejected_or_zero_step"})
             projection_history.append(diag)
             history.append({"iteration":iteration,**current.metrics,"priority_group_maxima":group_maxima(current.metrics,order),"status":"accepted" if accepted else "rejected"})
             if current.metrics["projector_constraints_satisfied"]:
@@ -455,6 +477,6 @@ class JointTrajectoryProjector:
             "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,
             "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
-            "acceptance_policy":"all_priority_group_maxima_nonincreasing_and_one_improved_or_feasible","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
-            "control_rate_constraints_enabled":True,"global_box_step_cap_enabled":False,
+            "acceptance_policy":"hard_control_box_plus_priority_group_maxima_nonincreasing_and_one_improved","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
+            "control_rate_constraints_enabled":True,
             "config_path":self.cfg.get("_config_path")})

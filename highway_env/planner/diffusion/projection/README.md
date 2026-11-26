@@ -1,19 +1,26 @@
 # TRACE Joint Trajectory Projection (Stage 1)
 
-The only runtime projection algorithm is priority-grouped sequential JTP with
-cross-group non-degradation and outer nonlinear validation. All seven constraint
-families remain enabled: stability (yaw, sideslip, roll, LTR), road, curvature,
-control magnitude, inter-truck collision, external-actor collision, control rate.
+The runtime projection algorithm is priority-grouped damped least squares with
+fixed hard control bounds, cross-group protection, and outer nonlinear
+validation. The six state-constraint families are stability, road, curvature,
+inter-truck collision, external-actor collision, and control rate. Acceleration
+and steering magnitude limits form a separate fixed hard constraint and are
+not included in priority scoring or state active-set caps.
 
 ## Solver configuration
 
 `configs/projection/jtp.yaml`, `projection.solver_method: damped_least_squares`
-is the implemented Stage-1 backend. `constrained_qp` is a reserved Stage-2
-backend: selecting it raises an explicit NotImplementedError. No silent fallback
-or legacy ungrouped solver is provided. `group_count` is 2 or 3. Initial family
-priority is `q * (1 + max(relu(normalized_residual)))`; weights are provisional,
-neutral by default, configurable per family. Sort descending and split into
-near-equal groups, fixed for one project() call. Ties use existing family order.
+is the implemented Stage-1 backend. `constrained_qp` remains reserved for a
+later solver study and selecting it raises `NotImplementedError`. `group_count`
+is 2 or 3. The six state families are ranked by
+`q * (1 + max(relu(normalized_residual - tolerance)))`, split into near-equal
+groups, and fixed for one `project()` call. Control magnitude bounds are not
+ranked and are imposed in every group subproblem.
+
+`constraint_tolerance` is the common normalized tolerance for state families.
+Control-rate SI tolerance is converted to its normalized channel tolerance by
+the same threshold builder used for active-row selection and nonlinear
+metrics. Control magnitude bounds have zero feasibility slack.
 
 ## Execution
 
@@ -21,36 +28,36 @@ near-equal groups, fixed for one project() call. Ties use existing family order.
   latent sensitivities across the call. Use six batched pointwise decoder VJPs
   and trapezoidal pose sensitivity. Recompute output/constraint derivatives at
   the outer working point; freeze road association during linearization only.
-  The existing callable adapter contract uses one shared autograd output Jacobian.
-- `grouped_solver.py`: reuse one objective-metric Cholesky factorization, then
-  solve each group's active residuals by the original weighted damped Gram
-  Cholesky method (lstsq only if factorization fails). After each group, cyclic
-  metric halfspace projections enforce previous selected rows J_H d <= 0
-  within tolerance. If protection cannot be verified, discard that increment.
-  Scale the incremental direction to fit cumulative normalized trust bounds;
-  recheck protection after scaling. No extra K2 calls inside the groups.
-- `joint_projector.py`: full nonlinear validation with refreshed geometry and
-  all constraints after each backtracking trial; accept only when all priority
-  group maximum excesses do not increase within tolerance and one improves,
-  or when all internal constraints satisfy their own tolerances. Return last
-  accepted controls, even if infeasible; no external fallback. Initial out-of-box
-  controls may trigger the existing box guard; the guarded candidate is checked
-  by the same nonlinear rule. In this exceptional case the guard can exceed the
-  local trust step. Nominal-feasible inputs return unchanged.
+  The callable adapter contract uses one shared autograd output Jacobian. An
+  empty state active set still builds the objective metric for hard-box repair.
+- `grouped_solver.py`: reuse one objective-metric Cholesky factorization. First
+  find the metric-minimum correction that enters the hard control box when the
+  nominal controls are outside it. Every state-group LS subproblem then solves
+  under the same final-control box and cumulative normalized trust box. The
+  unconstrained step uses the weighted Gram Cholesky formulation; trust overflow
+  triggers a small number of internal damping retries, followed by a reduced
+  primal Cholesky active-set solve for remaining box-active variables. Previous
+  selected rows are protected by metric half-space projection while retaining
+  the current box. No post-solve elementwise clipping or scalar trust scaling is
+  applied.
+- `joint_projector.py`: nonlinear backtracking evaluates the unmodified
+  candidate controls. A candidate must satisfy the hard control box. Ordinary
+  state projection retains the Stage-1 acceptance rule based on priority-group
+  maximum excesses; an initially infeasible control box is restored as a hard
+  feasibility step. The stricter per-constraint non-degradation rule is planned
+  for Stage 2.
 
-The LS backend is approximate and does not exactly minimize total trajectory
-deviation under inequalities. Protection covers selected previous rows in the
-current linearized model; nonlinear acceptance is on group maxima (not every
-individual residual). Active-set caps, trust budget and priority conflicts can
-prevent progress. Neither LS nor local nonlinear checks guarantee feasibility
-of every input or physical TruckSim safety. Independent paper metrics are unchanged.
+The road model, five-circle footprint, collision model, K2 execution model,
+independent paper metrics, and evaluation interfaces are unchanged in Stage 1.
+Road active-set sampling and its cap are unchanged; road active-set reduction
+is reserved for Stage 3.
 
 ## API
 
 `JointTrajectoryProjector(execution_model, config).project(nominal_controls,
 context, road_geometry, external_actors=()) -> JTPResult` and
 `evaluate_preprojection(...)` retain their existing signatures. No checkpoint,
-K2 network, training or evaluation metric modification is required.
+K2 network, training code, or evaluation metric modification is required.
 
 ## Tests
 

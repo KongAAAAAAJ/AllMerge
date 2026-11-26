@@ -64,11 +64,10 @@ projection:
     stability: 1.0
     road: 1.0
     curvature: 1.0
-    control: 1.0
     intertruck_collision: 1.0
     external_collision: 1.0
     control_rate: 1.0
-  protection_max_sweeps: 12
+  protection_max_sweeps: 32
   protection_tolerance: 1.0e-6
   nondegradation_tolerance: 1.0e-6
   max_iterations: 12
@@ -77,11 +76,9 @@ projection:
     stability: 24
     road: 24
     curvature: 16
-    control: 32
     intertruck_collision: 64
     external_collision: 64
     control_rate: 64
-  active_tolerance: 1.0e-6
   constraint_tolerance: 1.0e-4
   residual_scales:
     stability: [0.5, 0.0872665, 0.0872665, 0.80]
@@ -92,6 +89,7 @@ projection:
   violation_weight_beta: 2.0
   damping: 1.0e-4
   damping_retries: 6
+  trust_damping_retries: 2
   metric_regularization: 1.0e-5
   initial_trust_radius: 0.25
   minimum_trust_radius: 0.01

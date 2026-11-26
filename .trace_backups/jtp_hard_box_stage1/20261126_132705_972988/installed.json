@@ -1,0 +1,68 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old": "8149b31215115e4ae530b3c445ece34939921b7e78c499fffc3de611721e8404",
+    "new": "6f59f0fe893f8c6c62341f6567a247ac60acd34ef323faf6e2903e8d8ddfc928",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/grouped_solver.py",
+    "old": "ef7afd89afd066d13cfdd0dd45d42be50d10d117a3870055617e8a8760349e0a",
+    "new": "d9aba690ffb0471bb5217d73a19f061b504d108a7fe9386267502ab2d44e8167",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/linearization.py",
+    "old": "cce61107d8ab01bd6bb83e87ff43f0ad200951d1b339e87adfc85caf2db01a00",
+    "new": "3efdb4a611a3ccf382d0dc438227a115dcc8b9f24210280088c5422be4c73c51",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/config.py",
+    "old": "58d0299bd11236a1871d3cf3f7f1bc00eb2487b288534cbfba51f48b203a2a3a",
+    "new": "7640ac86e8764b1b1984aa2245d6bb66b22905ee6eaa4b9f57b06418ab43f338",
+    "optional": false
+  },
+  {
+    "path": "configs/projection/jtp.yaml",
+    "old": "1f75780c6dc8fe09a45aab6d773995b75e818a23a33be6b5d1564da79af4d53f",
+    "new": "ae66b5e8b5a6595e4d73398f18665cf72480c7d1950cf78376fe6ebc3b2d2445",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/README.md",
+    "old": "606b1207a9bcbc4686d3cd2fc6967d75982279a1fa8989cb055236e37338ebef",
+    "new": "c0697f2427a5bf93513d50ccaeb311978c1b92fc197907d28dfa78f22f5d1a20",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP伪代码.md",
+    "old": "6fe763497d9394f316583b105af586bab8fb668d522f56ef7daaab0b98ac8fe2",
+    "new": "aad7228494e756b6ecf5b632870f1a25d351a2e8246a38bcbea1718eb6cffe45",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP约束定义.md",
+    "old": "76dd94a088812527424a2576b6e2c26739e171761a81f4e6f1244987f8c0a47b",
+    "new": "8dc44a0e94bbdb7a8a937b087957898bd26d7339f506d10966c5b092e6fae9f2",
+    "optional": true
+  },
+  {
+    "path": "tests/test_joint_trajectory_projection.py",
+    "old": "81dd3b5ce30357c4677024ab404a7f0c69165afad81e0ab74682dbb0c2a9cffd",
+    "new": "75f2a13a7db7d284ceaff97a333e9d6fadfa5ac03e6076d4e86a6b2555dbb9a1",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_grouped_stage1.py",
+    "old": "573f243c04f097f52a1916a3f6d2976813e1c0032a564d17de9abb28685b8d95",
+    "new": "d7b3907034160be394089e84566af196e56c0619e2bf9c725825c74190d578be",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_global_box_cap.py",
+    "old": "47eecec566d8660a47acda6eaadfb66652582394137bbff572415692d1991b2a",
+    "new": null,
+    "optional": false
+  }
+]

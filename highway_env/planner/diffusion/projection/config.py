@@ -113,7 +113,7 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("Invalid projection iteration limits")
     active = proj.get("max_active_per_group", {})
     active_defaults = {
-        "stability": 24, "road": 24, "curvature": 16, "control": 32,
+        "stability": 24, "road": 24, "curvature": 16,
         "intertruck_collision": 64, "external_collision": 64, "control_rate": 64,
     }
     # Partial in-memory overrides remain backward compatible with older
@@ -146,7 +146,11 @@ def validate_jtp_config(cfg: dict) -> None:
     q = proj.get("priority_weights", {})
     import math
     if set(q) != set(active_defaults) or any(not math.isfinite(float(v)) or float(v)<=0 for v in q.values()):
-        raise ValueError("priority_weights must contain positive finite weights for all constraint families")
+        raise ValueError("priority_weights must contain positive finite weights for all state-constraint families")
+    if "control" in active:
+        raise ValueError("Control range is a fixed hard constraint and must not have a priority active-set cap")
+    if "active_tolerance" in proj:
+        raise ValueError("projection.active_tolerance is removed; use constraint_tolerance")
     if int(proj.get("protection_max_sweeps", 0)) < 1:
         raise ValueError("protection_max_sweeps must be positive")
     for key in ("protection_tolerance", "nondegradation_tolerance", "minimum_violation_improvement"):
@@ -154,6 +158,8 @@ def validate_jtp_config(cfg: dict) -> None:
             raise ValueError(f"projection.{key} must be finite and nonnegative")
     if int(proj.get("damping_retries", 0)) < 1:
         raise ValueError("projection.damping_retries must be positive")
+    if not 0 <= int(proj.get("trust_damping_retries", -1)) <= int(proj["damping_retries"]):
+        raise ValueError("projection.trust_damping_retries must be between zero and damping_retries")
     if not 0 < float(proj.get("trust_shrink_factor", 0)) < 1 or float(proj.get("trust_grow_factor", 0)) <= 1:
         raise ValueError("Invalid adaptive trust factors")
     if not 0 < float(proj.get("alpha_shrink_factor", 0)) < 1:

@@ -152,9 +152,10 @@ def draw(data_path, output_dir):
                 combined = np.concatenate([data[f'{m}_{k}_values'] for m in metadata['methods']])
                 thresholds = spec['thresholds']
                 if len(combined):
-                    low, high = min(combined.min(), min(thresholds, default=combined.min())), max(combined.max(), max(thresholds, default=combined.max()))
-                    pad = max((high-low)*.03, max(abs(low), abs(high), 1.)*1e-6)
-                    bins = np.linspace(low-pad, high+pad, 61)
+                    # 用两种方法合并数据的0.5%～99.5%分位数确定绘图范围
+                    low, high = np.quantile(combined, [0.005, 0.995])
+                    pad = max((high - low) * .03, max(abs(low), abs(high), 1.) * 1e-6)
+                    bins = np.linspace(low - pad, high + pad, 61)
                     notes = []
                     for m, color in zip(metadata['methods'], ('#0072BD', '#EDB120')):
                         v, b = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad'))
@@ -180,32 +181,6 @@ def draw(data_path, output_dir):
                        ylabel='Density' if ax.get_subplotspec().is_first_col() else '')
                 ax.set_axisbelow(True)
                 ax.grid(alpha=.2)
-
-
-                # # 手动设置子图的x-y显示范围
-                # if k == 'acceleration_rate':
-                #     ax.set_xlim(-10, 10)   # 横坐标范围
-                #     ax.set_ylim(0, 0.8)    # 纵坐标范围
-
-                # elif k == 'steering_rate':
-                #     ax.set_xlim(-1.5, 1.5)
-                #     ax.set_ylim(0, 4.5)
-
-                # elif k == 'intertruck':
-                #     ax.set_xlim(-2, 20)
-                #     ax.set_ylim(0, 1.1)
-
-                # elif k == 'external':
-                #     ax.set_xlim(-5, 50)
-                #     ax.set_ylim(0, 0.13)
-
-                # elif k == 'acceleration':
-                #     ax.set_xlim(-4.5, 3)
-                #     ax.set_ylim(0, 6.5)
-
-                # elif k == 'steering':
-                #     ax.set_xlim(-0.09, 0.09)
-                #     ax.set_ylim(0, 40)
 
 
             fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center',

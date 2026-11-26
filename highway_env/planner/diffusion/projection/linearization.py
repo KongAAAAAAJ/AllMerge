@@ -95,12 +95,17 @@ def shared_linearization(projector, controls, context, roads, current, selected,
         outj = {key: part.reshape(*current.rollout[key].shape,flat.numel()) for key,part in zip(keys,j.split(sizes,0))}
         method = 'callable_autograd'
     active_names = [name for name, ids in selected.items() if ids.numel()]
-    def residual(v):
-        dv = v - flat.detach()
-        out = {key: current.rollout[key].detach() + (j.reshape(-1,flat.numel()) @ dv).reshape_as(current.rollout[key]) for key,j in outj.items()}
-        _, groups, _ = projector._constraint_groups(v.reshape_as(controls),context,roads,current.associations,actors,rollout=out)
-        return torch.cat([groups[name][selected[name]] for name in active_names])
-    j = jacobian(residual, flat)
+    if active_names:
+        def residual(v):
+            dv = v - flat.detach()
+            out = {key: current.rollout[key].detach() + (j.reshape(-1,flat.numel()) @ dv).reshape_as(current.rollout[key]) for key,j in outj.items()}
+            _, groups, _ = projector._constraint_groups(v.reshape_as(controls),context,roads,current.associations,actors,rollout=out)
+            return torch.cat([groups[name][selected[name]] for name in active_names])
+        j = jacobian(residual, flat)
+        sizes = [selected[name].numel() for name in active_names]
+        rows = dict(zip(active_names, j.split(sizes, 0)))
+    else:
+        rows = {}
     jtau = outj['trajectory'].reshape(-1,flat.numel())
     weights = controls.new_tensor(projector.cfg['optimization']['trajectory_weights']).repeat(controls.shape[0]*(projector.horizon+1))
     opt=projector.cfg['optimization']; cfg=projector.cfg['projection']
@@ -108,6 +113,4 @@ def shared_linearization(projector, controls, context, roads, current, selected,
     scales=controls.new_tensor(projector.cfg['control']['trust_scale']).repeat(controls.numel()//2)
     metric=jtau.T @ (weights[:,None]*jtau)+torch.diag(float(opt['lambda_u'])*wu+float(cfg['metric_regularization'])/scales.square())
     metric=(metric+metric.T)*.5
-    sizes=[selected[name].numel() for name in active_names]
-    rows=dict(zip(active_names,j.split(sizes,0)))
     return rows,metric,method

@@ -71,6 +71,9 @@ def test_jtp_config_has_grouped_projection_and_reserved_qp_backend():
     assert cfg["control"]["steering_rate_max_rad_s"] > 0
     assert cfg["projection"]["max_active_per_group"]["external_collision"] > 0
     assert cfg["projection"]["max_active_per_group"]["control_rate"] > 0
+    assert "control" not in cfg["projection"]["priority_weights"]
+    assert "control" not in cfg["projection"]["max_active_per_group"]
+    assert "active_tolerance" not in cfg["projection"]
 
 
 def test_road_and_curvature_constraints_are_differentiable():
@@ -130,15 +133,32 @@ def test_grouped_projection_corrects_yaw_stability_without_osqp():
     assert result.diagnostics["control_rate_constraints_enabled"] is True
 
 
-def test_control_box_is_enforced_as_hard_guard():
+def test_control_box_is_enforced_by_bounded_group_solver():
     cfg = load_jtp_config()
     cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
     projector = JointTrajectoryProjector(StraightLineExecution(), cfg)
     controls = torch.zeros(1, 40, 2)
     controls[..., 0] = 10.0
     result = projector.project(controls, _context(), _road())
-    assert (result.controls[..., 0] <= cfg["control"]["acceleration_max_mps2"] + 1e-6).all()
-    assert (result.controls[..., 0] >= cfg["control"]["acceleration_min_mps2"] - 1e-6).all()
+    assert (result.controls[..., 0] <= cfg["control"]["acceleration_max_mps2"]).all()
+    assert (result.controls[..., 0] >= cfg["control"]["acceleration_min_mps2"]).all()
+    assert result.diagnostics["projection"][0]["hard_box_restoration_norm"] > 0
+
+
+
+def test_hard_control_restoration_runs_when_no_state_constraint_is_active():
+    cfg = load_jtp_config()
+    cfg["control"]["acceleration_rate_max_mps3"] = 1000.0
+    cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
+    projector = JointTrajectoryProjector(StraightLineExecution(), cfg)
+    controls = torch.zeros(1, 40, 2)
+    controls[..., 0] = 10.0
+    result = projector.project(controls, _context(), _road(100.0))
+    assert result.diagnostics["projection"][0]["active_counts"] == {
+        "stability": 0, "road": 0, "curvature": 0,
+        "intertruck_collision": 0, "external_collision": 0, "control_rate": 0}
+    assert result.diagnostics["projection"][0]["hard_box_restoration_norm"] > 0
+    assert (result.controls[..., 0] <= cfg["control"]["acceleration_max_mps2"]).all()
 
 
 def test_projector_does_not_import_osqp_or_scipy_sparse():
