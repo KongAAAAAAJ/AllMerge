@@ -69,7 +69,7 @@ def draw_projection_figures(output_dir: Path, cases: dict):
         }):
             if kind == 'geometry':
                 fig, overall = plt.subplots(figsize=(12, 6.5))
-                zoom = overall.inset_axes([.56, .52, .42, .43])
+                zoom = overall.inset_axes([.1, .52, .42, .43])  # 主图绘图区的比例：[左侧位置, 底部位置, 宽度, 高度]
 
                 # (a) Draw the road corridor and its actual configured safety inset.
                 road_edges = figure.get('road_edge_world')
@@ -126,12 +126,6 @@ def draw_projection_figures(output_dir: Path, cases: dict):
                         overall.plot(actor[:, 0], actor[:, 1], ls='-.', c='#737373',
                                      alpha=0.42, lw=0.9, zorder=2)
 
-                overall.add_patch(plt.Rectangle(
-                    (min(a[focus, 0], b[focus, 0]) - 1.0,
-                     min(a[focus, 1], b[focus, 1]) - 0.65),
-                    abs(a[focus, 0] - b[focus, 0]) + 2.0,
-                    abs(a[focus, 1] - b[focus, 1]) + 1.3,
-                    fill=False, ls=':', lw=1.15, ec='#111827', zorder=7))
                 overall.set(title='Trajectory and road constraints', xlabel='World X (m)', ylabel='World Y (m)')
                 overall.grid(alpha=0.2)
                 fig.legend(handles=[
@@ -174,6 +168,8 @@ def draw_projection_figures(output_dir: Path, cases: dict):
                 y_margin = max(0.18, 0.22 * y_range)
                 zoom.set_xlim(float(local_xy[:, 0].min() - x_margin), float(local_xy[:, 0].max() + x_margin))
                 zoom.set_ylim(float(local_xy[:, 1].min() - y_margin), float(local_xy[:, 1].max() + y_margin))
+                overall.indicate_inset_zoom(zoom, edgecolor='#6b7280', linewidth=1,
+                                           linestyle='--', alpha=.8, zorder=4)
                 zoom.set(title=f'Local refinement (truck {exemplar})',
                          xlabel='World X (m)', ylabel='World Y (m)')
                 zoom.grid(alpha=0.22)
