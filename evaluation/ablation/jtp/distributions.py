@@ -129,12 +129,22 @@ def draw(data_path, output_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.offsetbox import AnchoredOffsetbox, TextArea, VPacker
     path, output = Path(data_path), Path(output_dir)
     if not path.is_file() or not path.with_suffix('.json').is_file():
         raise ValueError('Missing full distribution data/metadata; rerun run_jtp.py with --constraint-distributions. Summary CSV cannot reconstruct these distributions.')
     metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
     output.mkdir(parents=True, exist_ok=True)
-    with np.load(path, allow_pickle=False) as data:
+
+    # 绘图字体配置：
+    with matplotlib.rc_context({
+        'font.family': 'Times New Roman',
+        'font.size': 14,
+        'axes.labelsize': 16,
+        'xtick.labelsize': 14,
+        'ytick.labelsize': 14,
+        'legend.fontsize': 16,
+    }), np.load(path, allow_pickle=False) as data:
         for name, keys in (('geometry_stability', KEYS[:6]), ('control_safety', KEYS[6:])):
             fig, axes = plt.subplots(3, 2, figsize=(12, 12))
             for ax, k in zip(axes.flat, keys):
@@ -146,36 +156,61 @@ def draw(data_path, output_dir):
                     pad = max((high-low)*.03, max(abs(low), abs(high), 1.)*1e-6)
                     bins = np.linspace(low-pad, high+pad, 61)
                     notes = []
-                    for method_index, (m, color) in enumerate(zip(metadata['methods'], ('tab:blue', 'tab:orange'))):
-                        v, b, ids = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad', 'ids'))
+                    for m, color in zip(metadata['methods'], ('#0072BD', '#EDB120')):
+                        v, b = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad'))
                         if len(v):
                             density, _ = np.histogram(v, bins=bins, density=True)
                             widths = np.diff(bins)
-                            # Two opaque bars share each bin without occluding each other.
                             centers = (bins[:-1] + bins[1:]) / 2
-                            ax.bar(centers + (method_index-.5)*widths*.44,
-                                   density, width=widths*.44, color=color,
-                                   alpha=1., linewidth=0, label=m, zorder=2)
-                            _, inverse = np.unique(ids[:, :4], axis=0, return_inverse=True)
-                            trajectory_bad = np.zeros(inverse.max()+1, dtype=bool)
-                            np.logical_or.at(trajectory_bad, inverse, b)
-                            notes.append(f'{m}: {len(trajectory_bad):,} trajectories, {len(v):,} steps\n'
-                                         f'  Violations: step {100*b.mean():.2f}%; trajectory '
-                                         f'{trajectory_bad.sum():,}/{len(trajectory_bad):,} ({100*trajectory_bad.mean():.2f}%)')
-                    ax.text(.02, .98, '\n'.join(notes), transform=ax.transAxes, va='top', fontsize=8,
-                            bbox={'facecolor': 'white', 'alpha': .8, 'edgecolor': 'none'})
-                    ax.legend(loc='upper right', fontsize=8, bbox_to_anchor=(1, .72))
+                            ax.bar(centers, density, width=widths*.9, color=color,
+                                   alpha=.5, linewidth=0, label=m, zorder=2)
+                            notes.append(TextArea(f'Violations: step {100*b.mean():.2f}%',
+                                                  textprops={'color': color, 'fontsize': 14}))
+                    annotation = AnchoredOffsetbox(loc='upper left',
+                        child=VPacker(children=notes, align='left', pad=0, sep=2),
+                        pad=.3, borderpad=.5, frameon=True)
+                    annotation.patch.set(facecolor='lightgray', alpha=.5, edgecolor='none')
+                    ax.add_artist(annotation)
                 else:
                     message = 'No eligible collision objects' if k in ('intertruck', 'external') else 'No evaluable prediction intervals'
                     ax.text(.5, .5, message+'\nn=0; violation rates N/A', ha='center', transform=ax.transAxes)
                 for threshold in thresholds:
                     ax.axvline(threshold, color='black', linestyle='--', linewidth=1, zorder=3)
-                if spec['dynamic_threshold']:
-                    ax.text(.02, .04, 'Threshold varies with operating conditions', transform=ax.transAxes, fontsize=8)
-                ax.set(title=spec['label'], xlabel=spec['label'], ylabel='Density')
+                ax.set(xlabel=spec['label'],
+                       ylabel='Density' if ax.get_subplotspec().is_first_col() else '')
                 ax.set_axisbelow(True)
                 ax.grid(alpha=.2)
-            fig.tight_layout()
+
+
+                # # 手动设置子图的x-y显示范围
+                # if k == 'acceleration_rate':
+                #     ax.set_xlim(-10, 10)   # 横坐标范围
+                #     ax.set_ylim(0, 0.8)    # 纵坐标范围
+
+                # elif k == 'steering_rate':
+                #     ax.set_xlim(-1.5, 1.5)
+                #     ax.set_ylim(0, 4.5)
+
+                # elif k == 'intertruck':
+                #     ax.set_xlim(-2, 20)
+                #     ax.set_ylim(0, 1.1)
+
+                # elif k == 'external':
+                #     ax.set_xlim(-5, 50)
+                #     ax.set_ylim(0, 0.13)
+
+                # elif k == 'acceleration':
+                #     ax.set_xlim(-4.5, 3)
+                #     ax.set_ylim(0, 6.5)
+
+                # elif k == 'steering':
+                #     ax.set_xlim(-0.09, 0.09)
+                #     ax.set_ylim(0, 40)
+
+
+            fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center',
+                       bbox_to_anchor=(.5, .01), ncol=2, frameon=False)
+            fig.tight_layout(rect=(0, .05, 1, 1))
             for extension in ('pdf', 'png'):
                 fig.savefig(output / f'jtp_distributions_{name}.{extension}', dpi=300)
             plt.close(fig)
