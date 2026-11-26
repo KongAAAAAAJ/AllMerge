@@ -1,6 +1,7 @@
 """Configuration loading and validation for TRACE Joint Trajectory Projection."""
 from __future__ import annotations
 from copy import deepcopy
+import math
 from pathlib import Path
 from typing import Any
 import yaml
@@ -135,16 +136,50 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("runtime.collision.max_external_actors must be nonnegative")
     if float(runtime_collision.get("max_external_distance_m", 0)) <= 0:
         raise ValueError("runtime.collision.max_external_distance_m must be positive")
-    for key in ("damping", "metric_regularization", "max_step_norm",
-                "change_tolerance"):
-        if float(proj.get(key, 0)) <= 0:
-            raise ValueError(f"projection.{key} must be positive")
-    if proj.get("solver_method") not in ("damped_least_squares", "constrained_qp"):
+    if float(proj.get("change_tolerance", 0)) <= 0:
+        raise ValueError("projection.change_tolerance must be positive")
+    solver_method = proj.get("solver_method")
+    if solver_method not in ("damped_least_squares", "constrained_qp"):
         raise ValueError("projection.solver_method must be damped_least_squares or constrained_qp")
+    if solver_method == "damped_least_squares":
+        for key in ("damping", "metric_regularization", "max_step_norm"):
+            if float(proj.get(key, 0)) <= 0:
+                raise ValueError(f"projection.{key} must be positive")
+        if int(proj.get("damping_retries", 0)) < 1:
+            raise ValueError("projection.damping_retries must be positive")
+        if not 0 <= int(proj.get("trust_damping_retries", -1)) <= int(proj["damping_retries"]):
+            raise ValueError("projection.trust_damping_retries must be between zero and damping_retries")
+        if not 0 < float(proj.get("trust_shrink_factor", 0)) < 1 or float(proj.get("trust_grow_factor", 0)) <= 1:
+            raise ValueError("Invalid adaptive trust factors")
+        if not 0 < float(proj.get("minimum_trust_radius", 0)) <= float(proj.get("initial_trust_radius", 0)) <= float(proj.get("maximum_trust_radius", 0)):
+            raise ValueError("Invalid projection trust-radius bounds")
+    else:
+        qp = proj.get("qp", {})
+        if qp.get("backend") != "osqp":
+            raise ValueError("projection.qp.backend must be osqp")
+        control_correction_weight = float(qp.get("control_correction_weight", 0))
+        if not math.isfinite(control_correction_weight) or control_correction_weight <= 0:
+            raise ValueError("projection.qp.control_correction_weight must be positive and finite")
+        control_weights = list(map(float, opt["control_weights"]))
+        if any(not math.isfinite(value) or value <= 0 for value in control_weights):
+            raise ValueError("optimization.control_weights must be positive and finite for constrained_qp")
+        for section in ("state_slack", "protection_slack"):
+            penalties = qp.get(section, {})
+            linear = float(penalties.get("linear_penalty", 0))
+            quadratic = float(penalties.get("quadratic_penalty", 0))
+            if (not math.isfinite(linear) or not math.isfinite(quadratic)
+                    or linear <= 0 or quadratic <= 0):
+                raise ValueError(f"projection.qp.{section} penalties must be positive and finite")
+        eps_abs = float(qp.get("eps_abs", 0))
+        eps_rel = float(qp.get("eps_rel", 0))
+        if (not math.isfinite(eps_abs) or not math.isfinite(eps_rel)
+                or eps_abs <= 0 or eps_rel <= 0):
+            raise ValueError("projection.qp.eps_abs and eps_rel must be positive and finite")
+        if int(qp.get("max_iter", 0)) < 1:
+            raise ValueError("projection.qp.max_iter must be positive")
     if int(proj.get("group_count", 0)) not in (2, 3):
         raise ValueError("projection.group_count must be 2 or 3")
     q = proj.get("priority_weights", {})
-    import math
     if set(q) != set(active_defaults) or any(not math.isfinite(float(v)) or float(v)<=0 for v in q.values()):
         raise ValueError("priority_weights must contain positive finite weights for all state-constraint families")
     if "control" in active:
@@ -156,15 +191,7 @@ def validate_jtp_config(cfg: dict) -> None:
     for key in ("protection_tolerance", "nondegradation_tolerance", "minimum_violation_improvement"):
         if not math.isfinite(float(proj.get(key, -1))) or float(proj.get(key, -1)) < 0:
             raise ValueError(f"projection.{key} must be finite and nonnegative")
-    if int(proj.get("damping_retries", 0)) < 1:
-        raise ValueError("projection.damping_retries must be positive")
-    if not 0 <= int(proj.get("trust_damping_retries", -1)) <= int(proj["damping_retries"]):
-        raise ValueError("projection.trust_damping_retries must be between zero and damping_retries")
-    if not 0 < float(proj.get("trust_shrink_factor", 0)) < 1 or float(proj.get("trust_grow_factor", 0)) <= 1:
-        raise ValueError("Invalid adaptive trust factors")
     if not 0 < float(proj.get("alpha_shrink_factor", 0)) < 1:
         raise ValueError("alpha_shrink_factor must be in (0,1)")
     if not 0 < float(proj.get("alpha_minimum", 0)) <= float(proj.get("alpha_initial", 0)) <= 1:
         raise ValueError("Invalid projection line-search bounds")
-    if not 0 < float(proj.get("minimum_trust_radius", 0)) <= float(proj.get("initial_trust_radius", 0)) <= float(proj.get("maximum_trust_radius", 0)):
-        raise ValueError("Invalid projection trust-radius bounds")

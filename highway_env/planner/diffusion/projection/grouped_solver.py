@@ -1,4 +1,4 @@
-"""Priority-grouped damped LS with fixed control-box constraints."""
+"""Priority-grouped LS/QP dispatch and shared nonlinear acceptance."""
 from __future__ import annotations
 
 import torch
@@ -308,9 +308,20 @@ def protect_direction(d, history, chol, cfg, lower=None, upper=None):
 
 
 def solve_groups(controls, groups, selected, rows, thresholds, metric, order, cfg,
-                 scale, trust, damping_multiplier, control_lower, control_upper):
-    if cfg["solver_method"] != "damped_least_squares":
-        raise NotImplementedError("constrained_qp is reserved for Stage 2; select damped_least_squares")
+                 scale, trust, damping_multiplier, control_lower, control_upper,
+                 control_weights=None):
+    if cfg["solver_method"] == "constrained_qp":
+        from .qp_solver import solve_groups_qp
+        return solve_groups_qp(
+            controls, groups, selected, rows, thresholds, order, cfg,
+            control_lower, control_upper, control_weights)
+    return _solve_groups_ls(
+        controls, groups, selected, rows, thresholds, metric, order, cfg,
+        scale, trust, damping_multiplier, control_lower, control_upper)
+
+
+def _solve_groups_ls(controls, groups, selected, rows, thresholds, metric, order, cfg,
+                     scale, trust, damping_multiplier, control_lower, control_upper):
     if not torch.isfinite(metric).all():
         return None, {"reason": "nonfinite_metric"}
     metric_chol, info = torch.linalg.cholesky_ex(metric)

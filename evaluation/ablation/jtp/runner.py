@@ -259,7 +259,7 @@ def _evaluate_frame(job, model, projector, jtp_cfg, ev, device):
 def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
              jtp_config: str, dataset_root: str | None, split: str | None,
              num_frames: int | None, seeds: str | None, device_name: str | None,
-             output_dir: str | None, figure_seed: int | None, constraint_distributions: bool = False,
+             output_dir: str | None, constraint_distributions: bool = False,
              statistics_unit: str = 'both', workers: int | None = None,
              worker_threads: int | None = None):
     if statistics_unit not in ('both', 'trajectory', 'step'):
@@ -267,6 +267,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
     from .distributions import collect, KEYS, FLAGS
     from .statistics import step_records, write_reports
+    from .cases import KINDS, frame_candidates, candidate_key, save_case
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -294,7 +295,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     if num_frames < 0:raise ValueError('num_frames must be nonnegative (0 means all)')
     seed_values=parse_seeds(seeds if seeds is not None else ev.get('seeds','0,1,2'))
     sample_seed=int(ev.get('sample_seed',2026))
-    figure_seed=int(figure_seed if figure_seed is not None else ev.get('figure_seed',2027))
     device_name=device_name or ev.get('device','auto')
     device=torch.device('cuda' if device_name=='auto' and torch.cuda.is_available() else
                         'cpu' if device_name=='auto' else device_name)
@@ -311,8 +311,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     frames,data_manifest=selected_frames(root,split,num_frames=num_frames,sample_seed=sample_seed)
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
-    pick=np.random.default_rng(figure_seed).integers(0,len(frames))
-    figure_key=(seed_values[0],*frames[int(pick)][0]); figure_data=None
+    best_cases = {}
+    case_figures = {}
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     from .parallel import frame_results
     jobs = ((seed, index, key, entries) for seed in seed_values
@@ -326,26 +326,27 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             seed, frame_index, key, entries = job
             episode, frame = key
             context, meta, pose0, roads, roads_meta, actors, data = result
-            if recorder is not None or 'step' in units:
-                step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
-                                  'ego_index': int(item['ego_index'])} for item in meta]
-                deviation_xy = np.linalg.norm(
-                    data['projected']['trajectory'].detach().cpu().numpy()[:, 1:, :2] -
-                    data['nominal']['trajectory'].detach().cpu().numpy()[:, 1:, :2], axis=-1)
-                for method, control_key, rollout_key, expected_key in (
-                        ('Baseline', 'nominal_u', 'nominal', 'before'),
-                        ('Ours', 'projected_u', 'projected', 'after')):
-                    collected = collect(data[control_key], data[rollout_key], context,
-                                        roads, actors, jtp_cfg, ev)
-                    for k, flag in zip(KEYS, FLAGS):
-                        for i, evaluated in enumerate(data[expected_key]):
-                            if bool(np.any(collected[1][k][i])) != bool(evaluated[flag]):
-                                raise ValueError(f'Per-step/evaluator mismatch: {method}/{k}/{i}')
-                    if recorder is not None:
-                        recorder.add(method, collected, seed, episode, frame,
-                                     [int(item['ego_index']) for item in meta], data[expected_key])
-                    if 'step' in units:
-                        step_rows.extend(step_records(collected, step_metadata, method, deviation_xy))
+            collected_pair = {}
+            step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
+                              'ego_index': int(item['ego_index'])} for item in meta]
+            deviation_xy = np.linalg.norm(
+                data['projected']['trajectory'].detach().cpu().numpy()[:, 1:, :2] -
+                data['nominal']['trajectory'].detach().cpu().numpy()[:, 1:, :2], axis=-1)
+            for method, control_key, rollout_key, expected_key in (
+                    ('Baseline', 'nominal_u', 'nominal', 'before'),
+                    ('Ours', 'projected_u', 'projected', 'after')):
+                collected = collect(data[control_key], data[rollout_key], context,
+                                    roads, actors, jtp_cfg, ev)
+                collected_pair[method] = collected
+                for k, flag in zip(KEYS, FLAGS):
+                    for i, evaluated in enumerate(data[expected_key]):
+                        if bool(np.any(collected[1][k][i])) != bool(evaluated[flag]):
+                            raise ValueError(f'Per-step/evaluator mismatch: {method}/{k}/{i}')
+                if recorder is not None:
+                    recorder.add(method, collected, seed, episode, frame,
+                                 [int(item['ego_index']) for item in meta], data[expected_key])
+                if 'step' in units:
+                    step_rows.extend(step_records(collected, step_metadata, method, deviation_xy))
             for i, item in enumerate(meta):
                 base={'seed':seed,'episode_index':episode,'frame_index':frame,
                       'ego_index':int(item['ego_index']),
@@ -377,8 +378,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'rollout_consistency': data['consistency_max_abs'],
                 'active_set_diagnostics': data['diagnostics'],
             })
-            if figure_data is None and ((seed,episode,frame)==figure_key or
-                (seed==seed_values[-1] and frame_index==len(frames)-1)):
+            candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg)
+            improved = {kind: c for kind, c in candidates.items()
+                        if kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind])}
+            if improved:
                 nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
                 for i in range(len(entries)):
                     bounds_a.append(stability_limits(nom['states'][i,1:,0].detach(),
@@ -389,7 +392,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     jtp_cfg['geometry']['footprint']['circle_radius_m'])
                 safety_edge_pairs=[_road_safety_edges_world(m, pose0[i], safety_margin)
                                    for i,m in enumerate(roads_meta)]
-                figure_data={'seed':seed,'episode_index':episode,'frame_index':frame,
+                frame_figure={'seed':seed,'episode_index':episode,'frame_index':frame,
                     'ego_ids':np.asarray([int(item['ego_index']) for item in meta]),
                     'dt_s':np.asarray(jtp_cfg['execution']['dt_s']),
                     'nominal_controls':data['nominal_u'].detach().cpu().numpy(),
@@ -416,6 +419,22 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'road_safety_envelope_valid_by_vehicle':[pair[2] for pair in safety_edge_pairs],
                     'road_safety_margin_m':safety_margin,
                     'external_actors':[a.pose for a in actors]}
+                for kind, candidate in improved.items():
+                    i = candidate['exemplar_index']
+                    chosen = {**frame_figure, 'case_kind': kind, 'exemplar_index': i,
+                              'ego_index': int(meta[i]['ego_index']),
+                              'selection_grade': candidate['grade'], 'selection_score': candidate['rank'],
+                              'before_violation_steps': candidate['before_count'],
+                              'after_violation_steps': candidate['after_count']}
+                    if kind == 'geometry':
+                        road_before = -collected_pair['Baseline'][0]['road'][i]
+                        road_after = -collected_pair['Ours'][0]['road'][i]
+                        gain = np.maximum(road_before-ev['tolerances']['road_m'], 0)-np.maximum(road_after-ev['tolerances']['road_m'], 0)
+                        focus = max(range(len(gain)), key=lambda t: (gain[t], abs(road_before[t]-road_after[t]), -t))
+                        chosen.update(focus_step=focus+1, nominal_road_residual=road_before,
+                                      projected_road_residual=road_after)
+                    best_cases[kind] = candidate
+                    case_figures[kind] = chosen
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
@@ -432,34 +451,9 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     solver_summary = _summarize_solver_diagnostics(frame_diagnostics)
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
-    if figure_data:
-        draw_projection_figures(output, figure_data)
-        figure_arrays = {k:v for k,v in figure_data.items() if isinstance(v,np.ndarray)}
-        figure_arrays.update({key:np.asarray(figure_data[key]) for key in ('seed', 'episode_index', 'frame_index')})
-        # Preserve ragged map polylines without pickle so the paper figure can
-        # be regenerated from this NPZ without rerunning the 500 frame-seed pass.
-        for key in ('road_edge_world', 'road_safety_edge_world'):
-            values = figure_data.get(key, [])
-            if values:
-                lengths = np.asarray([len(value) for value in values], dtype=np.int32)
-                width = int(lengths.max())
-                packed = np.full((len(values), width, 2), np.nan, dtype=np.float64)
-                for index, value in enumerate(values):
-                    array = np.asarray(value, dtype=np.float64)
-                    packed[index, :len(array)] = array
-            else:
-                lengths = np.zeros((0,), dtype=np.int32)
-                packed = np.zeros((0, 0, 2), dtype=np.float64)
-            figure_arrays[key] = packed
-            figure_arrays[f'{key}_lengths'] = lengths
-        actors = figure_data.get('external_actors', [])
-        figure_arrays['external_actors'] = (np.stack(actors).astype(np.float64)
-                                            if actors else np.zeros((0, int(jtp_cfg['execution']['horizon_steps']) + 1, 3)))
-        figure_arrays['road_safety_envelope_valid_by_vehicle'] = np.asarray(
-            figure_data.get('road_safety_envelope_valid_by_vehicle', []), dtype=bool)
-        figure_arrays['road_safety_margin_m'] = np.asarray(
-            figure_data.get('road_safety_margin_m', np.nan), dtype=np.float64)
-        np.savez_compressed(output/'projection_ablation_figure_data.npz', **figure_arrays)
+    draw_projection_figures(output, case_figures)
+    for kind in KINDS:
+        save_case(output/f'projection_ablation_{kind}_data.npz', case_figures[kind])
     manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
                            'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
                            'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
@@ -491,9 +485,13 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
               'dataset':data_manifest,'evaluated_seed_count':len(seed_values),
               'included_frames_across_seeds':len(frame_diagnostics),
               'excluded_frames':len(errors),'plot_selection':{
-                   'method':'preselected fixed random synchronized frame, not largest improvement',
-                   'figure_seed':figure_seed,
-                   'selected':{k:figure_data[k] for k in ('seed','episode_index','frame_index')} if figure_data else None},
+                   'method':'independent ranked repair examples; not representative aggregate performance',
+                   'cases':{kind:{'seed':c['identity'][0], 'episode_index':c['identity'][1],
+                                  'frame_index':c['identity'][2], 'ego_index':c['identity'][3],
+                                  'grade':c['grade'], 'score':c['rank'],
+                                  'before_violation_steps':c['before_count'],
+                                  'after_violation_steps':c['after_count']}
+                            for kind,c in best_cases.items()}},
               'checkpoint':{'path':str(checkpoint_path),'sha256':_sha256(checkpoint_path),
                   'model_execution':model.vehicle_model.kind,'anchor_strategy':model.anchors_config.get('strategy')},
               'configs':{'diffusion':str(diffusion_path),'jtp':str(jtp_path),
@@ -518,7 +516,6 @@ def main(argv=None):
     parser.add_argument('--seeds',default=None,help='Comma-separated diffusion noise seeds')
     parser.add_argument('--device',default=None)
     parser.add_argument('--output-dir',default=None)
-    parser.add_argument('--figure-seed',type=int,default=None)
     parser.add_argument('--constraint-distributions',action='store_true',help='Save full twelve-constraint distributions and plot two 3x2 figures')
     parser.add_argument('--workers', type=int, default=None, help='Parallel frame processes; default 1 (serial)')
     parser.add_argument('--worker-threads', type=int, default=None, help='CPU threads per parallel worker; default 1')
@@ -528,7 +525,7 @@ def main(argv=None):
              evaluation_config=args.config,jtp_config=args.jtp_config,
              dataset_root=args.dataset_root,split=args.split,
              num_frames=args.num_frames,seeds=args.seeds,device_name=args.device,
-             output_dir=args.output_dir,figure_seed=args.figure_seed,
+             output_dir=args.output_dir,
              constraint_distributions=args.constraint_distributions,
              statistics_unit=args.statistics_unit,
              workers=args.workers,worker_threads=args.worker_threads,

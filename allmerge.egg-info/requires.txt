@@ -1,0 +1,6 @@
+shapely<3,>=2.0
+
+[jtp]
+PyYAML>=6.0
+scipy>=1.10
+osqp>=1.0.0

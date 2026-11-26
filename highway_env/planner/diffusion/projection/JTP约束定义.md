@@ -1,6 +1,6 @@
 # JTP 约束汇总
 
-当前 JTP 包含六类参与优先级分组的状态约束，以及一类固定控制范围硬约束。控制范围不参与优先级评分或活动集截断，并在每个 LS 子问题中共同施加。下表对应 `configs/projection/jtp.yaml` 的默认配置；运行时若覆盖配置，以实际加载值为准。
+当前 JTP 包含六类参与优先级分组的状态约束，以及一类固定控制范围硬约束。控制范围不参与优先级评分或活动集截断，并在每个 LS/QP 子问题中共同施加。下表对应 `configs/projection/jtp.yaml` 的默认配置；运行时若覆盖配置，以实际加载值为准。
 
 记 `mu_e = max(road_mu, 0.05)`，`m = max(payload_kg, 0)`（kg），`clip(x, lo, hi)` 为区间截断。`H = 40`、`dt = 0.1 s`，默认预测时域为 4 s。
 
@@ -12,7 +12,7 @@
 | 稳定性 `stability` | 载荷转移率 `LTR`（无量纲） | `-0.80` | `+0.80` | 固定双侧限值；检查未来 `t = 1…H` 的预测 LTR。 | [constraints.py](constraints.py)：`stability_residual` |
 | 道路 `road` | 每个车辆轮廓圆心相对关联道路中心线的有符号横向偏移 `d`（m，左正右负） | `-w_R + 1.80` | `w_L - 1.80` | `w_L`、`w_R` 为在线道路几何提供、沿关联线段插值得到的左右半宽。车身纵向圆心偏移为 `[-3, -1.5, 0, 1.5, 3] m`，各圆半径 `1.45 m`，额外净空 `0.35 m`，合计边界距离 `1.80 m`；检查未来 `t = 1…H` 的全部 5 个圆心。 | [geometry.py](geometry.py)：`footprint_circle_centers`、`road_corridor_residual` |
 | 曲率 `curvature` | 离散轨迹曲率 `kappa`（m⁻¹） | `-0.025` | `+0.025` | `kappa = wrap_angle(psi[t+1] - psi[t]) / max(norm(p[t+1] - p[t]), 1e-4 m)`，`t = 1…H-1`；实现残差为 `kappa² - 0.025²`。对应曲率半径至少 `40 m`（非零曲率时）。 | [geometry.py](geometry.py)：`curvature_residual` |
-| 固定硬约束 `control` | 纵向加速度 `a_x`（m/s²） | `-4.0` | `+2.5` | 对所有车辆、所有控制节点施加幅值硬约束；默认控制节点数 `K = H = 40`。每个优先级组 LS 子问题均满足该范围。 | [joint_projector.py](joint_projector.py)：`_constraint_groups`；[grouped_solver.py](grouped_solver.py)：`solve_groups` |
+| 固定硬约束 `control` | 纵向加速度 `a_x`（m/s²） | `-4.0` | `+2.5` | 对所有车辆、所有控制节点施加幅值硬约束；默认控制节点数 `K = H = 40`。每个优先级组 LS/QP 子问题均满足该范围。 | [joint_projector.py](joint_projector.py)：`_constraint_groups`；[grouped_solver.py](grouped_solver.py)：`solve_groups` |
 | 固定硬约束 `control` | 前轮转向角 `delta_f`（rad） | `-0.08`（约 `-4.58°`） | `+0.08`（约 `+4.58°`） | 对所有车辆、所有控制节点施加幅值硬约束；约束的是前轮转向角，不参与状态约束优先级排序。 | [joint_projector.py](joint_projector.py)：`_constraint_groups`；[grouped_solver.py](grouped_solver.py)：`solve_groups` |
 
 | 编队内部碰撞 `intertruck_collision` | 任意两辆车的覆盖圆圆心距离 | `2*1.45+0.35 m` | 无 | 对同步未来时刻全部跨车圆对检查。 | `geometry.py` |
@@ -41,3 +41,8 @@
 ## Stage 3 道路活动集计算范围
 
 道路物理约束的完整定义和非线性评价分辨率不变：每辆车仍在全部 40 个未来预测步、全部 5 个车身轮廓圆心处检查左右道路边界，共 400 条道路残差。为降低 LS Jacobian 的活动行数，仅从每辆车未来每两个 step 的中心圆心（纵向偏移 0 m）生成活动候选，每个时刻对应左右两条边界约束，因此每辆车 40 条候选、三辆车最多 120 条。`projection.max_active_per_group.road=30` 是跨全部受控车辆的全局 Top-K 上限。未采样道路行及超过 Top-K 的道路行仍完整参与 Stage 2 逐约束非退化接受、最终可行性统计和独立论文评价。编队内部碰撞与外部碰撞约束的几何采样及活动集保持不变。
+
+
+## Constrained QP 后端
+
+QP 后端将控制量上下界作为硬约束。对于当前优先级组中选中的正超容差残差 `r`，引入状态松弛变量 `s`：`r + J d <= s`、`0 <= s <= r`。状态松弛同时具有正线性惩罚和正二次惩罚。对于前序组的全部已选活动约束行，构造跨组保护 `H_prev d <= xi`，并约束 `0 <= xi <= protection_tolerance`；保护松弛同样具有正线性和二次惩罚。QP 唯一的主优化目标是控制修正幅度，不包含状态违反残差平方项，也不设置组级最低改善比例。QP 不使用 Trust Region，仍通过原有 Backtracking 和完整非线性 Stage-2 接受条件验证候选。

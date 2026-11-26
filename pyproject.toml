@@ -13,6 +13,8 @@ readme = "README.md"
 [project.optional-dependencies]
 jtp = [
     "PyYAML>=6.0",
+    "scipy>=1.10",
+    "osqp>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]

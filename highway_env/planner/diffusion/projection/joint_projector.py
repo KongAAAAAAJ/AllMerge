@@ -1,4 +1,4 @@
-"""Priority-grouped joint trajectory projection with shared K2 linearization."""
+"""Priority-grouped LS/QP joint trajectory projection with shared K2 linearization."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -31,7 +31,7 @@ class _Evaluation:
 
 
 class JointTrajectoryProjector:
-    """Grouped LS with linearized protection and full nonlinear verification."""
+    """Priority-grouped LS/QP projection with full nonlinear verification."""
 
     def __init__(self, execution_model, config=None, *, control_interpolation_matrix=None):
         self.cfg = (load_jtp_config(config)
@@ -257,7 +257,7 @@ class JointTrajectoryProjector:
         """Return center-circle road rows at every second future step.
 
         The full road residual remains [N,H,C,2] flattened in vehicle-major,
-        time-major, circle-major, boundary-major order. Only the LS candidate
+        time-major, circle-major, boundary-major order. Only the solver candidate
         pool is reduced; nonlinear metrics and acceptance retain every row.
         """
         offsets = [float(value) for value in self.cfg["geometry"]["footprint"]["circle_offsets_m"]]
@@ -277,7 +277,7 @@ class JointTrajectoryProjector:
         return (vehicle_offsets[:, None] + local_indices[None, :]).reshape(-1)
 
     def _active_indices(self, groups):
-        """Select LS rows from state-constraint candidate pools using evaluation tolerances."""
+        """Select grouped-solver rows from state-constraint pools using evaluation tolerances."""
         cfg = self.cfg["projection"]
         thresholds = self._constraint_thresholds(groups)
         selected = {}
@@ -398,8 +398,8 @@ class JointTrajectoryProjector:
         nominal = nominal_controls.detach().clone()
         controls = nominal.clone()
         proj_cfg = self.cfg["projection"]
-        if proj_cfg["solver_method"] != "damped_least_squares":
-            raise NotImplementedError("constrained_qp is reserved for Stage 2; select damped_least_squares")
+        solver_method = proj_cfg["solver_method"]
+        use_ls = solver_method == "damped_least_squares"
         with torch.no_grad():
             current = self._evaluate(controls, context, roads, external_actors=external_actors)
         tau_nominal = current.rollout["trajectory"].detach().clone()
@@ -408,8 +408,8 @@ class JointTrajectoryProjector:
         history = [{"iteration": 0, **current.metrics, "priority_group_maxima": group_maxima(current.metrics, order), "status": "nominal"}]
         initial_metrics = current.metrics
         projection_history = []
-        trust = float(proj_cfg["initial_trust_radius"])
-        damping_scale = 1.0
+        trust = float(proj_cfg["initial_trust_radius"]) if use_ls else None
+        damping_scale = 1.0 if use_ls else None
         accepted_iterations = stalled = validations = linearizations = 0
         cache = None
         cache_ms = 0.
@@ -418,10 +418,11 @@ class JointTrajectoryProjector:
             if controls.is_cuda:
                 torch.cuda.synchronize(controls.device)
             return perf_counter()
-        scale = controls.new_tensor(self.cfg["control"]["trust_scale"])
+        scale = controls.new_tensor(self.cfg["control"]["trust_scale"]) if use_ls else None
         lower = controls.new_tensor([self.cfg["control"]["acceleration_min_mps2"], self.cfg["control"]["steering_min_rad"]])
         upper = controls.new_tensor([self.cfg["control"]["acceleration_max_mps2"], self.cfg["control"]["steering_max_rad"]])
-        if not current.metrics["projector_constraints_satisfied"] and isinstance(self.rollout_fn, KoopmanExecutionAdapter):
+        if (use_ls and not current.metrics["projector_constraints_satisfied"]
+                and isinstance(self.rollout_fn, KoopmanExecutionAdapter)):
             tick = clock()
             cache = K2StaticCache(self.rollout_fn, context, self.control_interpolation)
             cache_ms = (clock()-tick)*1000
@@ -433,13 +434,22 @@ class JointTrajectoryProjector:
                 status = "no_active_violations"
                 break
             tick = clock()
+            has_active_state_rows = sum(active_diagnostics["active_counts"].values()) > 0
+            if (not use_ls and has_active_state_rows and cache is None
+                    and isinstance(self.rollout_fn, KoopmanExecutionAdapter)):
+                cache = K2StaticCache(self.rollout_fn, context, self.control_interpolation)
+                cache_ms = (clock()-tick)*1000
             with torch.enable_grad():
-                rows, metric, method = shared_linearization(self, controls, context, roads, current, selected, external_actors, cache)
+                rows, metric, method = shared_linearization(
+                    self, controls, context, roads, current, selected, external_actors, cache,
+                    build_metric=use_ls)
             linearizations += 1
             diag = {"iteration":iteration, **active_diagnostics,
                     "hard_control_violation_count_before":current.metrics["control_box_violation_count"],
                     "linearization_method":method,
-                    "linearization_ms":(clock()-tick)*1000,"trust_radius":trust}
+                    "linearization_ms":(clock()-tick)*1000,
+                    "trust_radius":trust,
+                    "trust_region_enabled":use_ls}
             tick = clock()
             if not all(torch.isfinite(j).all() for j in rows.values()):
                 delta, info = None, {"reason":"nonfinite_active_jacobian"}
@@ -447,7 +457,8 @@ class JointTrajectoryProjector:
                 with torch.no_grad():
                     delta, info = solve_groups(
                         controls, current.groups, selected, rows, thresholds, metric, order,
-                        proj_cfg, scale, trust, damping_scale, lower, upper)
+                        proj_cfg, scale, trust, damping_scale, lower, upper,
+                        control_weights=self.cfg["optimization"]["control_weights"])
             diag.update(info)
             diag["grouped_solver_ms"]=(clock()-tick)*1000
             before=group_maxima(current.metrics,order)
@@ -510,13 +521,14 @@ class JointTrajectoryProjector:
                         accepted_reason = acceptance_reason
                         accepted_iterations += 1
                         stalled = 0
-                        if alpha >= .75:
-                            trust = min(float(proj_cfg["maximum_trust_radius"]),
-                                        trust * float(proj_cfg["trust_grow_factor"]))
-                        elif alpha <= .25:
-                            trust = max(float(proj_cfg["minimum_trust_radius"]),
-                                        trust * float(proj_cfg["trust_shrink_factor"]))
-                        damping_scale = max(1.0, damping_scale / 2.0)
+                        if use_ls:
+                            if alpha >= .75:
+                                trust = min(float(proj_cfg["maximum_trust_radius"]),
+                                            trust * float(proj_cfg["trust_grow_factor"]))
+                            elif alpha <= .25:
+                                trust = max(float(proj_cfg["minimum_trust_radius"]),
+                                            trust * float(proj_cfg["trust_shrink_factor"]))
+                            damping_scale = max(1.0, damping_scale / 2.0)
                         break
                     if not hard_feasible_before and not hard_feasible_after:
                         # A smaller fraction of a hard-feasibility restoration
@@ -532,11 +544,17 @@ class JointTrajectoryProjector:
                          "acceptance_reason": accepted_reason if accepted else "rejected_or_zero_step"})
             projection_history.append(diag)
             history.append({"iteration":iteration,**current.metrics,"priority_group_maxima":group_maxima(current.metrics,order),"status":"accepted" if accepted else "rejected"})
+            if not use_ls and delta is None:
+                status = "solver_failed:" + str(info.get("reason", "unknown"))
+                break
             if current.metrics["projector_constraints_satisfied"]:
                 status="converged_feasible"; break
             if not accepted:
-                stalled+=1; trust*=float(proj_cfg["trust_shrink_factor"]); damping_scale*=10.
-            if trust<float(proj_cfg["minimum_trust_radius"]):
+                stalled += 1
+                if use_ls:
+                    trust *= float(proj_cfg["trust_shrink_factor"])
+                    damping_scale *= 10.0
+            if use_ls and trust < float(proj_cfg["minimum_trust_radius"]):
                 status="stalled_infeasible:minimum_trust_radius"; break
             if stalled>=int(proj_cfg["max_stalled_iterations"]):
                 status="stalled_infeasible:no_group_improvement"; break
@@ -552,7 +570,7 @@ class JointTrajectoryProjector:
         return JTPResult(controls=controls.detach(),trajectories=final.rollout["trajectory"].detach(),states=final.rollout["states"].detach(),ltr=final.rollout["ltr"].detach(),
             projector_constraints_satisfied=bool(final.metrics["projector_constraints_satisfied"]),status=status,iterations=len(projection_history),
             diagnostics={"accepted_iterations":accepted_iterations,"history":history,"projection":projection_history,"objective":objective,
-            "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,
+            "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,"trust_region_enabled":use_ls,
             "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
             "acceptance_policy":"hard_control_box_plus_per_constraint_non_degradation_and_group_violation_count_nonincrease","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,

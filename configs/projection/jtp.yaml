@@ -56,8 +56,24 @@ optimization:
   control_weights: [0.16, 156.25]
 
 projection:
-  # Priority-grouped sequential projection. QP reserved for Stage 2.
-  solver_method: damped_least_squares
+  # solver_method: damped_least_squares or constrained_qp
+  solver_method: constrained_qp
+  qp:
+    backend: osqp
+    control_correction_weight: 1.0
+    # Initial values for the first QP smoke test; calibrate from matched-frame diagnostics.
+    state_slack:
+      linear_penalty: 10.0
+      quadratic_penalty: 1.0
+    protection_slack:
+      linear_penalty: 1000.0
+      quadratic_penalty: 100.0
+    eps_abs: 1.0e-8
+    eps_rel: 1.0e-8
+    max_iter: 20000
+    polishing: true
+    adaptive_rho: true
+    verbose: false
   group_count: 3
   # Provisional neutral importance; rank by q * (1 + initial max normalized excess).
   priority_weights:

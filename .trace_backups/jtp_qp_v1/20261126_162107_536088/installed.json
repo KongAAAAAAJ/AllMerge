@@ -1,0 +1,74 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/qp_solver.py",
+    "old": null,
+    "new": "ccd49f91299e705e0b3c30afc2976aadb59deb8cc3ba7481c7d6b140e8361d68",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/grouped_solver.py",
+    "old": "5bcee922d34c6b1f7e7ee32fdd264cd673a5284ec2fdd0c64091bac8d0924616",
+    "new": "cfc500aebf60a7b5df975839599e620f33f171b730b769e024d68e5b317aa820",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old": "e839006b3661fb2a1906bce218ba2148671cbc7d00fd3738b0914d31b0e9d2eb",
+    "new": "db380c05e5085d1f65dd60f7835666e342820062142142d836649be850a11814",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/linearization.py",
+    "old": "3efdb4a611a3ccf382d0dc438227a115dcc8b9f24210280088c5422be4c73c51",
+    "new": "8df700596ccb29567ad633fbb3fc0d001339104c155e5e0f2f4c3e30edb96804",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/config.py",
+    "old": "7640ac86e8764b1b1984aa2245d6bb66b22905ee6eaa4b9f57b06418ab43f338",
+    "new": "d1c825ce1be4d5c331285cfc018f1c239e06082c49054d0ea01a1f3cddc307d3",
+    "optional": false
+  },
+  {
+    "path": "configs/projection/jtp.yaml",
+    "old": "d91eb4ea34e4b1b356ab6e507043cbbaacf71b029b675d643903b28bddf18db5",
+    "new": "d4ccb38575dd56d544e66437d73e9d545035bb383ab767642136efb1263ee409",
+    "optional": false
+  },
+  {
+    "path": "pyproject.toml",
+    "old": "b14ebfb207f615b5ca0db701c6d95e5d09967558fca5b2c3d3b11dc7d82b2e41",
+    "new": "ff13948fa311f1618d4788b9a7440129ab924f01ea43205d8fd73a1f0f9efbee",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_qp.py",
+    "old": null,
+    "new": "0181eea3a60df969a78e4ef62bb8cdcd90b9f8fffc1aa8ff4768a62f3fe2bf9c",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_grouped_stage1.py",
+    "old": "bdb3d0b513f9754291b53a3693a86c6fb748dea974de868144c85faa75091d64",
+    "new": "708e204f83b2aaf0de928aa2a5033b6096f904f7ca86fa721d1f6af6944fef1a",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/README.md",
+    "old": "36df4a7261a3b06112f5a21e69e5183ee48c33059dd76677fd0225dc6fa7f20a",
+    "new": "8d6efeb9fb989cced2ca12db4bd1eb74acbadb8dc90e3e724e19891e017c3fdc",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP伪代码.md",
+    "old": "6066d05ff2159b473ac2524aea13af191c858fd5fc67d8e81315b76df2efdc8a",
+    "new": "bdf67df9dcfa62c5319959cd987272e60adea00e8a6e333ff3e5cd00f6336eba",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP约束定义.md",
+    "old": "49f9eec49ad7663dad39f4e1b768d1e21bd33af6d8f2aae3e2135f147b6134d6",
+    "new": "7846ceb0785b6859491f1245ed3b62ca453892af184438a6824c2b81edc71cd7",
+    "optional": true
+  }
+]

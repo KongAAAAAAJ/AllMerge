@@ -77,15 +77,18 @@ class K2StaticCache:
             return {'trajectory':_block_rows(jp), 'states':_block_rows(sx), 'ltr':_block_rows(outj[:,:,5:6]).squeeze(2)}
 
 
-def shared_linearization(projector, controls, context, roads, current, selected, actors, cache):
+def shared_linearization(projector, controls, context, roads, current, selected, actors, cache, *, build_metric=True):
     """Use one output sensitivity and one frozen association per outer iterate."""
+    active_names = [name for name, ids in selected.items() if ids.numel()]
+    if not active_names and not build_metric:
+        return {}, None, 'no_state_active_rows'
     flat = controls.detach().flatten().requires_grad_(True)
     if cache is not None:
         outj = cache.output_jacobians(controls)
         method = 'structured_k2'
     else:
-        # Existing public callable adapter contract, used for synthetic tests.
-        # Not a legacy solver; both paths use identical grouped LS.
+        # Shared callable adapter path for synthetic tests and non-K2 execution models.
+        # The resulting constraint Jacobians are consumed by either solver backend.
         keys = ('trajectory','states','ltr')
         sizes = [current.rollout[key].numel() for key in keys]
         def f(v):
@@ -94,7 +97,6 @@ def shared_linearization(projector, controls, context, roads, current, selected,
         j = jacobian(f, flat)
         outj = {key: part.reshape(*current.rollout[key].shape,flat.numel()) for key,part in zip(keys,j.split(sizes,0))}
         method = 'callable_autograd'
-    active_names = [name for name, ids in selected.items() if ids.numel()]
     if active_names:
         def residual(v):
             dv = v - flat.detach()
@@ -106,6 +108,8 @@ def shared_linearization(projector, controls, context, roads, current, selected,
         rows = dict(zip(active_names, j.split(sizes, 0)))
     else:
         rows = {}
+    if not build_metric:
+        return rows, None, method
     jtau = outj['trajectory'].reshape(-1,flat.numel())
     weights = controls.new_tensor(projector.cfg['optimization']['trajectory_weights']).repeat(controls.shape[0]*(projector.horizon+1))
     opt=projector.cfg['optimization']; cfg=projector.cfg['projection']
