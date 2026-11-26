@@ -57,7 +57,25 @@ complete-frame selector.
 
 ## Paper metrics and supplementary diagnostics
 
-The four finalized paper metrics remain unchanged:
+Independent evaluation excludes the history-to-first-prediction control-rate
+transition. Acceleration and steering rates, their violation flags, and normalized
+excess statistics use only `(u[t] - u[t-1]) / dt` at prediction steps 2..H.
+This applies to all summaries, joint feasibility, paired statistics, and tables.
+The projector and its internal diagnostics still include the historical transition.
+For H=1, rate violation flags are false, excess statistics are zero, and rate
+distributions have no samples. Distribution metadata v2 records this scope;
+legacy files retain their original semantics when replotted. Use a fresh output
+directory when reevaluating; existing results are not migrated automatically.
+
+`--statistics-unit {both,trajectory,step}` defaults to `both`. Each selected
+unit has its own directory and five-metric table. The following definitions
+describe trajectory statistics; step statistics use only steps 2..H for every
+constraint and XY deviation, with curvature assigned to its interval end node.
+Joint feasibility then requires all trucks to be feasible at that same step.
+The additional **Feasibility (%)** column counts feasible individual vehicles
+(whole trajectories or individual steps). Empty step reports (H=1) use null/N/A.
+
+The trajectory metrics are:
 
 1. **Joint Feasibility (%)**: percentage of synchronized N-truck frame/seed
    plans for which every controlled vehicle satisfies all independently
@@ -83,11 +101,13 @@ control-rate violation rates, normalized constraint-excess magnitudes,
 projection-applied rate, normalized control-correction magnitude, projection
 latency, and projection iterations. These diagnostics quantify partial
 improvements even when a sample remains infeasible; they are not substitutes
-for the four primary paper metrics.
+for the primary paper metrics. Detailed normalized excess and solver diagnostics
+are retained in trajectory reports; step reports expose per-step violation flags.
 
 ## Evaluation protocol
 
-- One complete synchronized N-truck frame is the statistical unit.
+- Statistical units are selected by the CLI; bootstrap always resamples physical
+  episode/frame clusters, preserving all seeds, trucks, and steps within a cluster.
 - Baseline and Ours share the exact same raw Diffusion inference for each
   frame/seed pair.
 - Stability and geometric constraints are checked for every future step of
@@ -102,16 +122,19 @@ for the four primary paper metrics.
 
 ## Outputs
 
-- `jtp_per_vehicle.csv`: paired per-vehicle outcomes and projection diagnostics.
-- `jtp_per_seed.csv`: per-seed summaries.
-- `jtp_summary.csv`: aggregate metrics for Baseline and Ours.
-- `jtp_paired_statistics.json`: paired differences and cluster-bootstrap CIs.
+- `<unit>/jtp_per_vehicle_<unit>.csv`: paired trajectory or vehicle-step records.
+- `<unit>/jtp_per_seed_<unit>.csv`: per-seed summaries.
+- `<unit>/jtp_summary_<unit>.csv`: aggregate metrics for Baseline and Ours.
+- `<unit>/jtp_paired_statistics_<unit>.json`: differences and cluster-bootstrap CIs.
 - `jtp_projection_diagnostics.json`: per-frame projection status, internal
   constraint status, correction magnitudes, iteration counts, and latency.
 - `jtp_solver_summary.json`: termination status, grouped solver timing, protection, cache reuse, active-set truncation, and
   group-wise residual/count/L2 progress for stability, road, curvature, control
   magnitude, inter-truck collision, external collision, and control rate.
-- `projection_ablation_table.tex`: four-metric paper table.
+- `<unit>/projection_ablation_table_<unit>.tex`: five-metric paper table with
+  Joint Feas., individual Feas., geometry/stability violation, and deviation.
+  Old unsuffixed statistical files are no longer written; historical files are
+  not deleted. Use a fresh output directory to avoid mixing report versions.
 - `projection_ablation.pdf` / `.png`: seven-panel trajectory, geometry, and
   four-channel chassis-response plot.
 - `projection_ablation_figure_data.npz`: pickle-free data for figure regeneration

@@ -19,7 +19,7 @@ max_external_distance_m: 150.0
 limits:
   collision_clearance_m: 0.35
   acceleration_rate_max_mps3: 2.5
-  steering_rate_max_rad_s: 0.12
+  steering_rate_max_rad_s: 0.5
 tolerances:
   stability_rad: 0.00001
   ltr: 0.00001

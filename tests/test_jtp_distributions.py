@@ -38,8 +38,8 @@ def test_distribution_roundtrip_and_evaluator_parity(tmp_path):
     for method in ('Baseline', 'Ours'):
         expected = evaluate_group(u, pose, states, ltr, context, [road]*n, [], cfg, ev)
         result = collect(u, rollout, context, [road]*n, [], cfg, ev)
-        assert result[0]['acceleration_rate'][0][0] == pytest.approx(15.)
-        assert result[0]['steering_rate'][0][1] == pytest.approx(-.8)
+        assert result[0]['acceleration_rate'][0][0] == pytest.approx(-20.)
+        assert result[0]['steering_rate'][0][0] == pytest.approx(-.8)
         assert len(result[0]['curvature'][0]) == h-1
         assert len(result[0]['external'][0]) == 0
         assert result[0]['intertruck'][0][0] == pytest.approx(2.-2*1.45)
@@ -49,6 +49,8 @@ def test_distribution_roundtrip_and_evaluator_parity(tmp_path):
     path = recorder.save(tmp_path)
     with np.load(path, allow_pickle=False) as data:
         assert len(data.files) == 12*2*3
+        assert data['Baseline_acceleration_rate_ids'][:, 4].tolist() == [2, 3, 4]*n
+        assert metadata_version(path) == 2
         for k in KEYS:
             assert np.array_equal(data[f'Baseline_{k}_ids'], data[f'Ours_{k}_ids'])
     metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
@@ -67,3 +69,46 @@ def test_distribution_roundtrip_and_evaluator_parity(tmp_path):
 def test_missing_data_explains_rerun(tmp_path):
     with pytest.raises(ValueError, match='rerun'):
         draw(tmp_path/'absent.npz', tmp_path)
+
+
+def metadata_version(path):
+    return json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))['version']
+
+
+@pytest.mark.parametrize('h,later', [(1, False), (3, False), (3, True)])
+def test_rate_first_step_excluded(h, later, tmp_path):
+    from highway_env.planner.diffusion.projection.constraints import control_rate_residual
+    cfg = load_jtp_config()
+    with open('configs/evaluation/jtp_ablation.yaml', encoding='utf-8') as f:
+        ev = yaml.safe_load(f)
+    u = torch.zeros(1, h, 2)
+    if later:
+        u[0, 1:, :] = torch.tensor([1., .04])
+    pose = torch.zeros(1, h+1, 3)
+    pose[0, :, 0] = torch.arange(h+1)
+    states = torch.zeros(1, h+1, 5)
+    states[..., 0] = 10.
+    ltr = torch.zeros(1, h+1)
+    context = {'koopman_payload_kg': torch.tensor([5000.]),
+               'koopman_road_mu': torch.tensor([.8]),
+               'koopman_control_hist_si': torch.tensor([[[2., .08]]])}
+    roads = [RoadGeometry(torch.tensor([[-20., 0.], [100., 0.]]), 20., 20.)]
+    rollout = {'trajectory': pose, 'states': states, 'ltr': ltr}
+    expected = evaluate_group(u, pose, states, ltr, context, roads, [], cfg, ev)
+    for key in ('acceleration_rate_violation', 'steering_rate_violation', 'control_rate_violation'):
+        assert expected[0][key] == later
+    assert expected[0]['joint_feasible'] == (not later)
+    if not later:
+        assert expected[0]['control_rate_excess_mean_norm'] == 0.
+        assert expected[0]['control_rate_excess_max_norm'] == 0.
+    # Evaluation ignores historical control, but the unchanged projector does not.
+    assert (control_rate_residual(u, context, cfg) > 0).any()
+    collected = collect(u, rollout, context, roads, [], cfg, ev)
+    recorder = DistributionRecorder(cfg, ev)
+    for method in ('Baseline', 'Ours'):
+        recorder.add(method, collected, 0, 0, 0, [0], expected)
+    path = recorder.save(tmp_path)
+    with np.load(path, allow_pickle=False) as data:
+        assert data['Ours_acceleration_rate_ids'][:, 4].tolist() == list(range(2, h+1))
+    if h == 1:
+        draw(path, tmp_path)

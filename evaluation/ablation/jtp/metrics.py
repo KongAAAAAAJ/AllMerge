@@ -77,14 +77,19 @@ def _normalized_positive_excess(residual, tolerance, scale):
     return np.maximum(residual - float(tolerance), 0.0) / max(float(scale), 1e-8)
 
 
+def prediction_control_rates(controls: np.ndarray, dt: float) -> np.ndarray:
+    """Physical control rates at prediction steps 2..H; exclude history-to-step-1."""
+    return np.diff(controls, axis=-2) / dt
+
+
 def evaluate_group(controls: torch.Tensor, trajectories: torch.Tensor, states: torch.Tensor,
                    ltr: torch.Tensor, context: dict, roads: Sequence,
                    actors: Sequence[TrafficActor], jtp_cfg: dict, evaluation_cfg: dict) -> list[dict]:
     """Evaluate every full-horizon constraint on the actual world-frame K2 rollout.
 
     Results are one row per controlled vehicle. Inter-truck collision violations
-    are propagated to both vehicles involved. Control-rate checks include the
-    previous observed control at the first prediction node.
+    are propagated to both vehicles involved. Control-rate checks cover only
+    prediction steps 2..H, excluding the history-to-first-control transition.
     """
     if controls.ndim != 3 or controls.shape[-1] != 2:
         raise ValueError('Expected controls [N,H,2]')
@@ -138,8 +143,7 @@ def evaluate_group(controls: torch.Tensor, trajectories: torch.Tensor, states: t
         curvature_bad = bool(np.any(geometry[road_count:] > float(tol['curvature_per_m2'])))
         geometric_bad = road_bad or curvature_bad
 
-        previous_control = context['koopman_control_hist_si'][i, -1].detach().cpu().numpy()
-        control_rate = np.diff(np.concatenate((previous_control[None], u[i]), axis=0), axis=0) / dt
+        control_rate = prediction_control_rates(u[i], dt)
 
         acceleration_min = float(cfg_ctl['acceleration_min_mps2'])
         acceleration_max = float(cfg_ctl['acceleration_max_mps2'])

@@ -3,21 +3,17 @@ from __future__ import annotations
 
 import csv
 import json
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 
 
-PAPER_COLUMNS = ('joint_feasible', 'geometric_violation', 'stability_violation')
-
-
-def write_csv(path: Path, rows: list[dict]):
+def write_csv(path: Path, rows: list[dict], columns=None):
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not rows:
+    if not rows and columns is None:
         path.write_text('', encoding='utf-8-sig')
         return
-    columns = list(dict.fromkeys(k for row in rows for k in row))
+    columns = columns or list(dict.fromkeys(k for row in rows for k in row))
     with path.open('w', newline='', encoding='utf-8-sig') as stream:
         writer = csv.DictWriter(stream, columns)
         writer.writeheader()
@@ -106,109 +102,21 @@ def _summary(rows):
     return summary
 
 
-def paired_report(rows: list[dict], *, bootstrap_repeats=2000, bootstrap_seed=2026):
-    """Cluster-bootstrap physical synchronized frames, preserving seeds and trucks."""
-    keys = ('seed', 'episode_index', 'frame_index', 'ego_index')
-    lookup = {}
-    for row in rows:
-        key = (row['method'],) + tuple(row[k] for k in keys)
-        if key in lookup:
-            raise ValueError(f'Duplicate ablation row {key}')
-        lookup[key] = row
-
-    baseline_rows = [row for row in rows if row['method'] == 'Baseline']
-    if not baseline_rows:
-        raise ValueError('No Baseline observations')
-
-    frames = defaultdict(list)
-    for baseline in baseline_rows:
-        key = tuple(baseline[k] for k in keys)
-        paired_key = ('Ours',) + key
-        if paired_key not in lookup:
-            raise ValueError(f'Missing exact paired JTP observation: {key}')
-        frames[(baseline['episode_index'], baseline['frame_index'])].append(
-            (baseline, lookup[paired_key]))
-
-    ours_rows = [row for row in rows if row['method'] == 'Ours']
-    if len(ours_rows) != len(baseline_rows):
-        raise ValueError('Unmatched/duplicated Ours observations')
-
-    baselines = [pair[0] for group in frames.values() for pair in group]
-    projected = [pair[1] for group in frames.values() for pair in group]
-    by_method = {'Baseline': _summary(baselines), 'Ours': _summary(projected)}
-    detailed_delta_keys = (
-        'joint_feasibility_pct',
-        'geometric_violation_pct',
-        'stability_violation_pct',
-        'collision_violation_pct',
-        'control_violation_pct',
-        'stability_excess_mean_norm',
-        'geometry_excess_mean_norm',
-        'control_magnitude_excess_mean_norm',
-        'control_rate_excess_mean_norm',
-        'collision_penetration_mean_m',
-    )
-    deltas = {
-        name: (by_method['Ours'][name] - by_method['Baseline'][name])
-        for name in detailed_delta_keys
-    }
-
-    rng = np.random.default_rng(bootstrap_seed)
-    frame_groups = list(frames.values())
-
-    def pair_deltas(pairs):
-        frame_values = {}
-        for baseline, ours in pairs:
-            key = (baseline['seed'], baseline['episode_index'], baseline['frame_index'])
-            value = float(baseline['joint_frame_feasible']) - float(ours['joint_frame_feasible'])
-            if key in frame_values and value != frame_values[key]:
-                raise ValueError(f'Conflicting frame feasibility in paired results {key}')
-            frame_values[key] = value
-        return {
-            col: (
-                float(np.mean(list(frame_values.values()))) * 100.0
-                if col == 'joint_feasible'
-                else float(np.mean([float(a[col]) - float(b[col]) for a, b in pairs])) * 100.0
-            )
-            for col in PAPER_COLUMNS
-        }
-
-    observed = pair_deltas([pair for group in frame_groups for pair in group])
-    samples = {col: [] for col in PAPER_COLUMNS}
-    for _ in range(int(bootstrap_repeats)):
-        draw = rng.integers(0, len(frame_groups), size=len(frame_groups))
-        sample = [pair for index in draw for pair in frame_groups[int(index)]]
-        values = pair_deltas(sample)
-        for col in PAPER_COLUMNS:
-            samples[col].append(values[col])
-
-    confidence = {
-        col: {
-            'baseline_minus_ours_pp': observed[col],
-            'bootstrap_95ci_pp': (
-                [float(x) for x in np.percentile(samples[col], [2.5, 97.5])]
-                if bootstrap_repeats else None
-            ),
-        }
-        for col in PAPER_COLUMNS
-    }
-    return by_method, deltas, confidence
-
-
-def paper_table(by_method: dict) -> str:
-    """Four-metric paper table; no solver-success column or solver watermark."""
-    caption = 'Effects of Joint Trajectory Projection on Constraint Satisfaction'
+def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
+    """Five-metric paper table with an explicit statistical unit."""
+    caption = f'Effects of Joint Trajectory Projection on Constraint Satisfaction ({unit} statistics)'
     lines = [
         r'\begin{table}[!t]',
         r'\centering',
         r'\caption{' + caption + '}',
-        r'\label{tab:projection_ablation}',
+        r'\label{tab:projection_ablation_' + unit + '}',
         r'\scriptsize',
         r'\renewcommand{\arraystretch}{1.15}',
         r'\setlength{\tabcolsep}{2.5pt}',
-        r'\begin{tabular}{@{}lcccc@{}}',
+        r'\begin{tabular}{@{}lccccc@{}}',
         r'\hline',
         r'\textbf{Method} & \shortstack{\textbf{Joint}\\\textbf{Feas. (\%)}} & '
+        r'\textbf{Feas. (\%)} & '
         r'\shortstack{\textbf{Geometric}\\\textbf{Viol. (\%)}} & '
         r'\shortstack{\textbf{Stability}\\\textbf{Viol. (\%)}} & '
         r'\shortstack{\textbf{Deviation}\\\textbf{(m)}} \\',
@@ -216,11 +124,15 @@ def paper_table(by_method: dict) -> str:
     ]
     for key, label in (('Baseline', 'Baseline'), ('Ours', r'\textbf{Ours}')):
         value = by_method[key]
+        def formatted(name, digits=2):
+            v = value.get(name)
+            return 'N/A' if v is None else f'{v:.{digits}f}'
         cells = [
-            f"{value['joint_feasibility_pct']:.2f}",
-            f"{value['geometric_violation_pct']:.2f}",
-            f"{value['stability_violation_pct']:.2f}",
-            'N/A' if key == 'Baseline' else f"{value['deviation_m']:.3f}",
+            formatted('joint_feasibility_pct'),
+            formatted('feasibility_pct'),
+            formatted('geometric_violation_pct'),
+            formatted('stability_violation_pct'),
+            'N/A' if key == 'Baseline' else formatted('deviation_m', 3),
         ]
         if key == 'Ours':
             cells = [r'\textbf{' + cell + '}' for cell in cells]

@@ -25,7 +25,7 @@ python scripts/training/run_diffusion.py ^
   --anchor-cache-dir outputs/anchor_ablation/cache_candidates_parallel ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment_new
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A1_new
 
 ## Diffusion 训练命令 A2：
 python scripts/training/run_diffusion.py ^

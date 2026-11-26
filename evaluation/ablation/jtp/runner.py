@@ -24,7 +24,7 @@ from highway_env.planner.diffusion.projection.geometry import geometry_residual
 from .data import (selected_frames, collate_frame, build_road_geometry,
                    build_external_traffic, local_to_world)
 from .metrics import evaluate_group, trajectory_deviation_m, validate_evaluation_config
-from .reporting import paired_report, paper_table, write_csv, write_json
+from .reporting import write_json
 from .visualization import draw_projection_figure
 
 
@@ -250,7 +250,13 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
 def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
              jtp_config: str, dataset_root: str | None, split: str | None,
              num_frames: int | None, seeds: str | None, device_name: str | None,
-             output_dir: str | None, figure_seed: int | None, constraint_distributions: bool = False):
+             output_dir: str | None, figure_seed: int | None, constraint_distributions: bool = False,
+             statistics_unit: str = 'both'):
+    if statistics_unit not in ('both', 'trajectory', 'step'):
+        raise ValueError('statistics_unit must be both, trajectory or step')
+    units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
+    from .distributions import collect, KEYS, FLAGS
+    from .statistics import step_records, write_reports
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -292,7 +298,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
     pick=np.random.default_rng(figure_seed).integers(0,len(frames))
     figure_key=(seed_values[0],*frames[int(pick)][0]); figure_data=None
-    rows=[]; errors=[]; frame_diagnostics=[]
+    rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     for seed in seed_values:
         for frame_index,(key,entries) in enumerate(frames):
             episode, frame = key
@@ -319,14 +325,26 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
                                  seed=seed,episode=episode,frame=frame,
                                  consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
-            if recorder is not None:
+            if recorder is not None or 'step' in units:
+                step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
+                                  'ego_index': int(item['ego_index'])} for item in meta]
+                deviation_xy = np.linalg.norm(
+                    data['projected']['trajectory'].detach().cpu().numpy()[:, 1:, :2] -
+                    data['nominal']['trajectory'].detach().cpu().numpy()[:, 1:, :2], axis=-1)
                 for method, control_key, rollout_key, expected_key in (
                         ('Baseline', 'nominal_u', 'nominal', 'before'),
                         ('Ours', 'projected_u', 'projected', 'after')):
                     collected = collect(data[control_key], data[rollout_key], context,
                                         roads, actors, jtp_cfg, ev)
-                    recorder.add(method, collected, seed, episode, frame,
-                                 [int(item['ego_index']) for item in meta], data[expected_key])
+                    for k, flag in zip(KEYS, FLAGS):
+                        for i, evaluated in enumerate(data[expected_key]):
+                            if bool(np.any(collected[1][k][i])) != bool(evaluated[flag]):
+                                raise ValueError(f'Per-step/evaluator mismatch: {method}/{k}/{i}')
+                    if recorder is not None:
+                        recorder.add(method, collected, seed, episode, frame,
+                                     [int(item['ego_index']) for item in meta], data[expected_key])
+                    if 'step' in units:
+                        step_rows.extend(step_records(collected, step_metadata, method, deviation_xy))
             for i, item in enumerate(meta):
                 base={'seed':seed,'episode_index':episode,'frame_index':frame,
                       'ego_index':int(item['ego_index']),
@@ -345,7 +363,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                             'projection_iterations':0 if method=='Baseline' else data['iterations'],
                             'projection_latency_ms':0. if method=='Baseline' else data['latency_ms'],
                             'k2_consistency_max_abs':data['consistency_max_abs']}
-                    rows.append(record)
+                    if 'trajectory' in units:
+                        rows.append(record)
             frame_diagnostics.append({
                 'seed': seed, 'episode_index': episode, 'frame_index': frame,
                 'projection_status': data['projection_status'],
@@ -402,26 +421,18 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
-    if not rows:raise RuntimeError('No valid paired JTP observations')
-    by_method,deltas,confidence=paired_report(rows,
-        bootstrap_repeats=int(ev.get('bootstrap_repeats',2000)),bootstrap_seed=int(ev.get('bootstrap_seed',2026)))
+    if not frame_diagnostics:raise RuntimeError('No valid paired JTP observations')
     output.mkdir(parents=True,exist_ok=True)
     if recorder is not None:
         distribution_path = recorder.save(output)
         draw(distribution_path, output)
-    write_csv(output/'jtp_per_vehicle.csv',rows)
-    write_csv(output/'jtp_per_seed.csv',
-        [{**{'seed':seed,'method':method},**paired_report([r for r in rows if r['seed']==seed],
-         bootstrap_repeats=0)[0][method]} for seed in seed_values for method in ('Baseline','Ours')])
-    write_csv(output/'jtp_summary.csv',[{'method':m,**v} for m,v in by_method.items()])
-    write_json(output/'jtp_paired_statistics.json',{'difference_ours_minus_baseline_pp':deltas,
-                                                    'paired_cluster_bootstrap':confidence})
+    statistics = {unit: write_reports(output, rows if unit == 'trajectory' else step_rows,
+                  unit, seed_values, int(ev.get('bootstrap_repeats', 2000)),
+                  int(ev.get('bootstrap_seed', 2026))) for unit in units}
     write_json(output/'jtp_projection_diagnostics.json',frame_diagnostics)
     solver_summary = _summarize_solver_diagnostics(frame_diagnostics)
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
-    (output/'projection_ablation_table.tex').write_text(
-        paper_table(by_method),encoding='utf-8')
     if figure_data:
         draw_projection_figure(output/'projection_ablation.pdf', figure_data,
              dt=float(jtp_cfg['execution']['dt_s']),
@@ -461,20 +472,22 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                                                'inter-truck and external-actor collision clearance',
                                                'acceleration and steering control rates'],
               'collision_handling':'inter-truck and constant-velocity external-actor collision constraints are included in the JTP active-set projection and independently re-evaluated over the full horizon',
-              'control_rate_handling':'acceleration and steering first-difference rates, including the previous applied control, are included in the JTP active-set projection and independently re-evaluated over the full horizon',
+              'control_rate_handling':'JTP projection and solver diagnostics include previous-applied-control to step 1; independent evaluation and distributions use only prediction-internal differences at steps 2..H',
+              'control_rate_evaluation_scope':'prediction_steps_2_to_H',
+              'control_rate_first_step_excluded':True,
               'projector_constraints_satisfied_definition':'diagnostic flag for only the constraint families implemented inside JTP; not used as paper joint feasibility',
               'projection_applied_definition':'per-vehicle normalized control correction L2 norm exceeds configs/projection/jtp.yaml projection.change_tolerance',
               'reference_trajectories':'single shared frozen K2 inference per synchronized frame and seed',
               'deviation_definition':'per-vehicle mean pointwise Euclidean XY distance t=1..H from the paired nominal K2 execution trajectory, metres',
-              'violation_denominator':'joint feasibility per synchronized N-truck frame/seed; geometry/stability/collision/control violation rates per vehicle trajectory',
+              'violation_denominator':'see statistics entries for each selected unit',
               'uncertainty_unit':'cluster bootstrap resampling physical synchronized frames, preserving every inference seed and truck',
-              'paper_metrics':['joint feasibility rate','geometric violation rate','stability violation rate','mean trajectory deviation'],
+              'paper_metrics':['joint feasibility rate','single-vehicle feasibility rate','geometric violation rate','stability violation rate','mean trajectory deviation'],
               'supplementary_metrics':['collision violation rates','control magnitude/rate violation rates',
                                        'normalized constraint-excess magnitudes','projection applied rate',
                                        'normalized control correction','projection latency','projection iterations'],
               'evaluation_scope':'offline expert-data open loop, not TruckSim closed loop',
               'dataset':data_manifest,'evaluated_seed_count':len(seed_values),
-              'included_frames_across_seeds':len({(r['seed'],r['episode_index'],r['frame_index']) for r in rows}),
+              'included_frames_across_seeds':len(frame_diagnostics),
               'excluded_frames':len(errors),'plot_selection':{
                    'method':'preselected fixed random synchronized frame, not largest improvement',
                    'figure_seed':figure_seed,
@@ -484,12 +497,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
               'configs':{'diffusion':str(diffusion_path),'jtp':str(jtp_path),
                          'jtp_sha256':_sha256(jtp_path),'evaluation':str(config_path),
                          'evaluation_sha256':_sha256(config_path)},
-              'summary':by_method,'paired_deltas':deltas,
+              'statistics_unit':statistics_unit,'statistics':statistics,
               'solver_summary':solver_summary}
     write_json(output/'jtp_manifest.json',manifest)
-    print(f'[COMPLETE] {output}; '
-          f'joint feasibility {by_method["Baseline"]["joint_feasibility_pct"]:.2f}% -> '
-          f'{by_method["Ours"]["joint_feasibility_pct"]:.2f}%', flush=True)
+    print(f'[COMPLETE] {output}; statistics units: {", ".join(units)}', flush=True)
     return manifest
 
 
@@ -507,6 +518,7 @@ def main(argv=None):
     parser.add_argument('--output-dir',default=None)
     parser.add_argument('--figure-seed',type=int,default=None)
     parser.add_argument('--constraint-distributions',action='store_true',help='Save full twelve-constraint distributions and plot two 3x2 figures')
+    parser.add_argument('--statistics-unit', choices=('both', 'trajectory', 'step'), default='both')
     args=parser.parse_args(argv)
     evaluate(checkpoint=args.checkpoint,diffusion_config=args.diffusion_config,
              evaluation_config=args.config,jtp_config=args.jtp_config,
@@ -514,6 +526,7 @@ def main(argv=None):
              num_frames=args.num_frames,seeds=args.seeds,device_name=args.device,
              output_dir=args.output_dir,figure_seed=args.figure_seed,
              constraint_distributions=args.constraint_distributions,
+             statistics_unit=args.statistics_unit,
 )
     return 0
 

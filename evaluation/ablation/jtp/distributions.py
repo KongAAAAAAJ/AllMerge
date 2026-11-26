@@ -4,7 +4,7 @@ import json
 import numpy as np
 import torch
 
-from .metrics import _circle_centers, _actor_circles
+from .metrics import _circle_centers, _actor_circles, prediction_control_rates
 from highway_env.planner.diffusion.projection.constraints import stability_limits
 from highway_env.planner.diffusion.projection.geometry import geometry_residual, wrap_angle
 
@@ -30,9 +30,10 @@ def specifications(cfg, ev):
     limits += [[ev['limits']['collision_clearance_m']]] * 2
     limits += [[c['acceleration_min_mps2'], c['acceleration_max_mps2']],
                [c['steering_min_rad'], c['steering_max_rad']]]
-    return {'version': 1, 'methods': ['Baseline', 'Ours'],
+    return {'version': 2, 'methods': ['Baseline', 'Ours'],
+            'control_rate_scope': 'prediction_steps_2_to_H; history-to-step-1 excluded; projector still includes it',
             'id_columns': ['seed', 'episode', 'frame', 'ego', 'future_step'],
-            'definition': 'All future steps; road minimum margin over circles/sides; collision minimum envelope gap per controlled vehicle. Missing collision objects omitted. Curvature uses H-1 future intervals. Rates include previous observed control.',
+            'definition': 'All future steps; road minimum margin over circles/sides; collision minimum envelope gap per controlled vehicle. Missing collision objects omitted. Curvature uses H-1 future intervals. Control rates use prediction steps 2..H only.',
             'tolerances': t, 'evaluation_limits': ev['limits'],
             'projection_config': cfg,
             'constraints': {k: {'label': label, 'thresholds': lim, 'trajectory_flag': flag,
@@ -50,7 +51,7 @@ def collect(controls, rollout, context, roads, actors, cfg, ev):
     ltr = array(rollout['ltr'])
     n, h, _ = u.shape
     tol, lim = ev['tolerances'], ev['limits']
-    rate = np.diff(np.concatenate((array(context['koopman_control_hist_si'][:, -1:]), u), axis=1), axis=1) / cfg['execution']['dt_s']
+    rate = prediction_control_rates(u, cfg['execution']['dt_s'])
     values = {k: [] for k in KEYS}
     bad = {k: [] for k in KEYS}
     footprint = cfg['geometry']['footprint']
@@ -106,7 +107,8 @@ class DistributionRecorder:
                 v, b = values[k][i], bad[k][i]
                 if bool(np.any(b)) != bool(expected[i][flag]):
                     raise ValueError(f'Distribution/evaluator mismatch: {method}/{k}/{ego}')
-                ids = np.array([[seed, episode, frame, ego, t] for t in range(1, len(v)+1)], dtype=np.int64).reshape(-1, 5)
+                start = 2 if k in ('acceleration_rate', 'steering_rate') else 1
+                ids = np.array([[seed, episode, frame, ego, t] for t in range(start, start+len(v))], dtype=np.int64).reshape(-1, 5)
                 for suffix, item in (('values', v), ('bad', b), ('ids', ids)):
                     self.parts.setdefault(f'{method}_{k}_{suffix}', []).append(item)
 
@@ -144,24 +146,34 @@ def draw(data_path, output_dir):
                     pad = max((high-low)*.03, max(abs(low), abs(high), 1.)*1e-6)
                     bins = np.linspace(low-pad, high+pad, 61)
                     notes = []
-                    for m, color, style in zip(metadata['methods'], ('tab:blue', 'tab:orange'), ('-', '--')):
+                    for method_index, (m, color) in enumerate(zip(metadata['methods'], ('tab:blue', 'tab:orange'))):
                         v, b, ids = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad', 'ids'))
                         if len(v):
-                            ax.hist(v, bins=bins, density=True, histtype='step', color=color, linestyle=style, linewidth=1.6, label=m)
+                            density, _ = np.histogram(v, bins=bins, density=True)
+                            widths = np.diff(bins)
+                            # Two opaque bars share each bin without occluding each other.
+                            centers = (bins[:-1] + bins[1:]) / 2
+                            ax.bar(centers + (method_index-.5)*widths*.44,
+                                   density, width=widths*.44, color=color,
+                                   alpha=1., linewidth=0, label=m, zorder=2)
                             _, inverse = np.unique(ids[:, :4], axis=0, return_inverse=True)
                             trajectory_bad = np.zeros(inverse.max()+1, dtype=bool)
                             np.logical_or.at(trajectory_bad, inverse, b)
-                            notes.append(f'{m}: n={len(v):,}; step {100*b.mean():.2f}%; traj {100*trajectory_bad.mean():.2f}%')
+                            notes.append(f'{m}: {len(trajectory_bad):,} trajectories, {len(v):,} steps\n'
+                                         f'  Violations: step {100*b.mean():.2f}%; trajectory '
+                                         f'{trajectory_bad.sum():,}/{len(trajectory_bad):,} ({100*trajectory_bad.mean():.2f}%)')
                     ax.text(.02, .98, '\n'.join(notes), transform=ax.transAxes, va='top', fontsize=8,
                             bbox={'facecolor': 'white', 'alpha': .8, 'edgecolor': 'none'})
-                    ax.legend(loc='upper right', fontsize=8, bbox_to_anchor=(1, .82))
+                    ax.legend(loc='upper right', fontsize=8, bbox_to_anchor=(1, .72))
                 else:
-                    ax.text(.5, .5, 'No eligible collision objects\nn=0; violation rates N/A', ha='center', transform=ax.transAxes)
+                    message = 'No eligible collision objects' if k in ('intertruck', 'external') else 'No evaluable prediction intervals'
+                    ax.text(.5, .5, message+'\nn=0; violation rates N/A', ha='center', transform=ax.transAxes)
                 for threshold in thresholds:
-                    ax.axvline(threshold, color='black', linestyle='--', linewidth=1)
+                    ax.axvline(threshold, color='black', linestyle='--', linewidth=1, zorder=3)
                 if spec['dynamic_threshold']:
                     ax.text(.02, .04, 'Threshold varies with operating conditions', transform=ax.transAxes, fontsize=8)
                 ax.set(title=spec['label'], xlabel=spec['label'], ylabel='Density')
+                ax.set_axisbelow(True)
                 ax.grid(alpha=.2)
             fig.tight_layout()
             for extension in ('pdf', 'png'):
