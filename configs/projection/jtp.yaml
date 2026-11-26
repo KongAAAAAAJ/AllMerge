@@ -74,7 +74,7 @@ projection:
   max_stalled_iterations: 3
   max_active_per_group:
     stability: 24
-    road: 24
+    road: 30  # Global cap across all vehicles; candidates use the center circle every 2 steps.
     curvature: 16
     intertruck_collision: 64
     external_collision: 64

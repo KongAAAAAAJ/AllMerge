@@ -22,10 +22,10 @@ python evaluation/ablation/run_jtp.py ^
   --split test ^
   --num-frames 500 ^
   --seeds "0" ^
-  --workers 2 ^
+  --workers 1 ^
   --worker-threads 1 ^
   --output-dir outputs/jtp_ablation/A0 ^
-  --constraint-distributions --output-dir outputs/jtp_ablation/A0
+  --constraint-distributions
 
 
 已成功安装。

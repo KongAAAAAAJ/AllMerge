@@ -191,6 +191,23 @@ def draw(data_path, output_dir):
                 ax.set_axisbelow(True)
                 ax.grid(alpha=.2)
 
+                y_limits = {
+                    'road':              (0, 0.9),
+                    'curvature':         (0, 120),
+                    'yaw':               (0, 5),
+                    'beta':              (0, 30),
+                    'roll':              (0, 40),
+                    'ltr':               (0, 2),
+                    'acceleration_rate': (0, 1.5),
+                    'steering_rate':     (0, 5),
+                    'intertruck':        (0, 1.4),
+                    'external':          (0, 0.16),
+                    'acceleration':      (0, 5),
+                    'steering':          (0, 42),
+                }
+
+                ax.set_ylim(*y_limits[k])
+
 
             fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center',
                        bbox_to_anchor=(.5, .01), ncol=2, frameon=False)

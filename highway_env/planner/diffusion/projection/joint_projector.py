@@ -253,29 +253,81 @@ class JointTrajectoryProjector:
         return (0.5 * (tau_error.square() * wt).sum()
                 + 0.5 * float(opt["lambda_u"]) * (u_error.square() * wu).sum())
 
+    def _road_active_candidate_indices(self, road_values):
+        """Return center-circle road rows at every second future step.
+
+        The full road residual remains [N,H,C,2] flattened in vehicle-major,
+        time-major, circle-major, boundary-major order. Only the LS candidate
+        pool is reduced; nonlinear metrics and acceptance retain every row.
+        """
+        offsets = [float(value) for value in self.cfg["geometry"]["footprint"]["circle_offsets_m"]]
+        center_circle = offsets.index(0.0)
+        circle_count = len(offsets)
+        time_indices = torch.arange(0, self.horizon, 2, device=road_values.device)
+        boundary_indices = torch.arange(2, device=road_values.device)
+        local_indices = (
+            (time_indices[:, None] * circle_count + center_circle) * 2
+            + boundary_indices[None, :]
+        ).reshape(-1)
+        rows_per_vehicle = self.horizon * circle_count * 2
+        vehicle_count = road_values.numel() // rows_per_vehicle
+        vehicle_offsets = torch.arange(
+            vehicle_count, device=road_values.device
+        ) * rows_per_vehicle
+        return (vehicle_offsets[:, None] + local_indices[None, :]).reshape(-1)
+
     def _active_indices(self, groups):
-        """Select violated state-constraint rows using evaluation tolerances."""
+        """Select LS rows from state-constraint candidate pools using evaluation tolerances."""
         cfg = self.cfg["projection"]
         thresholds = self._constraint_thresholds(groups)
         selected = {}
         counts = {}
         total_counts = {}
         truncated_counts = {}
+        candidate_pool_sizes = {}
+        candidate_total_counts = {}
+        sampling_omitted_counts = {}
+        topk_truncated_counts = {}
         for name, values in groups.items():
             if name == "control":
                 continue
-            ids = torch.nonzero(values.detach() > thresholds[name], as_tuple=False).reshape(-1)
-            total = int(ids.numel())
+            full_active = torch.nonzero(
+                values.detach() > thresholds[name], as_tuple=False
+            ).reshape(-1)
+            if name == "road":
+                candidate_indices = self._road_active_candidate_indices(values)
+            else:
+                candidate_indices = torch.arange(values.numel(), device=values.device)
+            candidate_active = candidate_indices[
+                values.detach()[candidate_indices] > thresholds[name][candidate_indices]
+            ]
+            candidate_total = int(candidate_active.numel())
             cap = int(cfg["max_active_per_group"][name])
-            if total > cap:
-                local = torch.topk(values.detach()[ids] - thresholds[name][ids],
-                                   k=cap, largest=True, sorted=False).indices
-                ids = ids[local]
+            ids = candidate_active
+            if candidate_total > cap:
+                local = torch.topk(
+                    values.detach()[candidate_active] - thresholds[name][candidate_active],
+                    k=cap, largest=True, sorted=False
+                ).indices
+                ids = candidate_active[local]
             selected[name] = ids
             counts[name] = int(ids.numel())
-            total_counts[name] = total
-            truncated_counts[name] = max(0, total - int(ids.numel()))
-        return selected, counts, total_counts, truncated_counts
+            total_counts[name] = int(full_active.numel())
+            candidate_pool_sizes[name] = int(candidate_indices.numel())
+            candidate_total_counts[name] = candidate_total
+            sampling_omitted_counts[name] = int(full_active.numel()) - candidate_total
+            topk_truncated_counts[name] = candidate_total - int(ids.numel())
+            truncated_counts[name] = int(full_active.numel()) - int(ids.numel())
+        diagnostics = {
+            "active_counts": counts,
+            "active_total_counts": total_counts,
+            "active_truncated_counts": truncated_counts,
+            "active_candidate_pool_sizes": candidate_pool_sizes,
+            "active_candidate_total_counts": candidate_total_counts,
+            "active_sampling_omitted_counts": sampling_omitted_counts,
+            "active_topk_truncated_counts": topk_truncated_counts,
+        }
+        return selected, diagnostics
 
     def evaluate_preprojection(self, nominal_controls: torch.Tensor, context: dict,
                                 road_geometry, external_actors=()) -> dict:
@@ -376,16 +428,15 @@ class JointTrajectoryProjector:
         for iteration in range(1, int(proj_cfg["max_iterations"])+1):
             if current.metrics["projector_constraints_satisfied"]:
                 break
-            selected, counts, totals, truncated = self._active_indices(current.groups)
-            if not sum(counts.values()) and current.metrics["control_box_feasible"]:
+            selected, active_diagnostics = self._active_indices(current.groups)
+            if not sum(active_diagnostics["active_counts"].values()) and current.metrics["control_box_feasible"]:
                 status = "no_active_violations"
                 break
             tick = clock()
             with torch.enable_grad():
                 rows, metric, method = shared_linearization(self, controls, context, roads, current, selected, external_actors, cache)
             linearizations += 1
-            diag = {"iteration":iteration,"active_counts":counts,"active_total_counts":totals,
-                    "active_truncated_counts":truncated,
+            diag = {"iteration":iteration, **active_diagnostics,
                     "hard_control_violation_count_before":current.metrics["control_box_violation_count"],
                     "linearization_method":method,
                     "linearization_ms":(clock()-tick)*1000,"trust_radius":trust}
@@ -506,4 +557,11 @@ class JointTrajectoryProjector:
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
             "acceptance_policy":"hard_control_box_plus_per_constraint_non_degradation_and_group_violation_count_nonincrease","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
             "control_rate_constraints_enabled":True,
+            "road_active_sampling":{
+                "time_stride":2,
+                "circle_offset_m":0.0,
+                "candidate_rows_per_vehicle":2 * ((self.horizon + 1) // 2),
+                "global_top_k":int(proj_cfg["max_active_per_group"]["road"]),
+                "nonlinear_validation":"full_footprint_all_steps",
+            },
             "config_path":self.cfg.get("_config_path")})

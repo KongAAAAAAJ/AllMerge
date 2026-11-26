@@ -20,12 +20,11 @@ from highway_env.planner.diffusion.config.experiment import resolve_repo_file, l
 from highway_env.planner.diffusion.training.control import load_control_checkpoint
 from highway_env.planner.diffusion.projection import JointTrajectoryProjector, load_jtp_config
 from highway_env.planner.diffusion.projection.constraints import stability_limits
-from highway_env.planner.diffusion.projection.geometry import geometry_residual
 from .data import (selected_frames, collate_frame, build_road_geometry,
                    build_external_traffic, local_to_world)
 from .metrics import evaluate_group, trajectory_deviation_m, validate_evaluation_config
 from .reporting import write_json
-from .visualization import draw_projection_figure
+from .visualization import draw_projection_figures
 
 
 def parse_seeds(value):
@@ -53,24 +52,6 @@ def _seed_for_frame(seed, episode, frame):
     return int.from_bytes(hashlib.sha256(payload).digest()[:8],'big') % (2**63-1)
 
 
-
-
-def _road_residual_by_time(trajectory, road, jtp_cfg):
-    """Worst signed road-boundary residual per future time step (m).
-
-    Positive values indicate violation; negative values indicate remaining
-    clearance. The reduction is over all longitudinal footprint circles and
-    both road sides, matching the geometric residual used by JTP.
-    """
-    residual, meta = geometry_residual(trajectory, road, jtp_cfg)
-    horizon = int(jtp_cfg['execution']['horizon_steps'])
-    circle_count = len(jtp_cfg['geometry']['footprint']['circle_offsets_m'])
-    road_count = int(meta['road_count'])
-    expected = horizon * circle_count * 2
-    if road_count != expected:
-        raise ValueError(
-            f'Road residual layout mismatch: expected {expected}, got {road_count}')
-    return residual[:road_count].reshape(horizon, circle_count, 2).amax(dim=(1, 2))
 
 
 def _road_safety_edges_world(road_meta, pose0, safety_margin_m):
@@ -404,19 +385,18 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
                     bounds_b.append(stability_limits(post['states'][i,1:,0].detach(),
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
-                nominal_road_residual=[]; projected_road_residual=[]
-                for i in range(len(entries)):
-                    nominal_road_residual.append(
-                        _road_residual_by_time(nom['trajectory'][i], roads[i], jtp_cfg)
-                        .detach().cpu().numpy())
-                    projected_road_residual.append(
-                        _road_residual_by_time(post['trajectory'][i], roads[i], jtp_cfg)
-                        .detach().cpu().numpy())
                 safety_margin=float(jtp_cfg['geometry']['road_clearance_m']) + float(
                     jtp_cfg['geometry']['footprint']['circle_radius_m'])
                 safety_edge_pairs=[_road_safety_edges_world(m, pose0[i], safety_margin)
                                    for i,m in enumerate(roads_meta)]
                 figure_data={'seed':seed,'episode_index':episode,'frame_index':frame,
+                    'ego_ids':np.asarray([int(item['ego_index']) for item in meta]),
+                    'dt_s':np.asarray(jtp_cfg['execution']['dt_s']),
+                    'nominal_controls':data['nominal_u'].detach().cpu().numpy(),
+                    'projected_controls':data['projected_u'].detach().cpu().numpy(),
+                    'control_lower':np.asarray([jtp_cfg['control']['acceleration_min_mps2'], jtp_cfg['control']['steering_min_rad']]),
+                    'control_upper':np.asarray([jtp_cfg['control']['acceleration_max_mps2'], jtp_cfg['control']['steering_max_rad']]),
+                    'control_rate_limits':np.asarray([ev['limits']['acceleration_rate_max_mps3'], ev['limits']['steering_rate_max_rad_s']]),
                     'nominal_world':nom['trajectory'].detach().cpu().numpy(),
                     'projected_world':post['trajectory'].detach().cpu().numpy(),
                     'nominal_states':nom['states'].detach().cpu().numpy(),
@@ -425,8 +405,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'projected_ltr':post['ltr'].detach().cpu().numpy(),
                     'nominal_stability_bounds':np.stack(bounds_a),
                     'projected_stability_bounds':np.stack(bounds_b),
-                    'nominal_road_residual':np.stack(nominal_road_residual),
-                    'projected_road_residual':np.stack(projected_road_residual),
                     'road_edge_world':[local_to_world(np.column_stack((m['left_edge_local'],
                                                 np.zeros(len(m['left_edge_local'])))),pose0[i])[:,:2]
                                        for i,m in enumerate(roads_meta)]+
@@ -455,10 +433,9 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
     if figure_data:
-        draw_projection_figure(output/'projection_ablation.pdf', figure_data,
-             dt=float(jtp_cfg['execution']['dt_s']),
-             kappa_lim=float(jtp_cfg['geometry']['curvature_limit_per_m']))
+        draw_projection_figures(output, figure_data)
         figure_arrays = {k:v for k,v in figure_data.items() if isinstance(v,np.ndarray)}
+        figure_arrays.update({key:np.asarray(figure_data[key]) for key in ('seed', 'episode_index', 'frame_index')})
         # Preserve ragged map polylines without pickle so the paper figure can
         # be regenerated from this NPZ without rerunning the 500 frame-seed pass.
         for key in ('road_edge_world', 'road_safety_edge_world'):

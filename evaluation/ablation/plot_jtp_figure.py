@@ -6,14 +6,13 @@ from pathlib import Path
 import sys
 
 import numpy as np
-import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from evaluation.ablation.jtp.visualization import draw_projection_figure
+from evaluation.ablation.jtp.visualization import draw_projection_figures
 
 
 def _resolve_path(value):
@@ -35,30 +34,21 @@ def _unpack_ragged(data, key):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Replot TRACE JTP ablation figure from saved NPZ')
     parser.add_argument('--figure-data', required=True, help='projection_ablation_figure_data.npz')
-    parser.add_argument('--jtp-config', default='configs/projection/jtp.yaml')
-    parser.add_argument('--output', default='outputs/jtp_ablation/evaluation/projection_ablation.pdf')
+    parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
 
     data_path = _resolve_path(args.figure_data)
     if not data_path.is_file():
         raise FileNotFoundError(data_path)
-    config_path = _resolve_path(args.jtp_config)
-    if not config_path.is_file():
-        raise FileNotFoundError(config_path)
-    cfg = yaml.safe_load(config_path.read_text(encoding='utf-8'))
     with np.load(data_path, allow_pickle=False) as data:
         figure = {key: data[key].copy() for key in data.files
                   if not key.endswith('_lengths') and key not in ('road_edge_world', 'road_safety_edge_world')}
         figure['road_edge_world'] = _unpack_ragged(data, 'road_edge_world')
         figure['road_safety_edge_world'] = _unpack_ragged(data, 'road_safety_edge_world')
         figure['external_actors'] = [row.copy() for row in data['external_actors']]
-    output = _resolve_path(args.output)
-    draw_projection_figure(
-        output, figure,
-        dt=float(cfg['execution']['dt_s']),
-        kappa_lim=float(cfg['geometry']['curvature_limit_per_m']),
-    )
-    print(f'[COMPLETE] Wrote {output} and {output.with_suffix(".png")}')
+    output = _resolve_path(args.output_dir)
+    draw_projection_figures(output, figure)
+    print(f'[COMPLETE] Wrote geometry, stability and control PDFs to {output}')
     return 0
 
 

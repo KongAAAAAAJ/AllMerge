@@ -1,0 +1,38 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old": "1b404392d61a672a0762e0b41f2eb3a067da361a056b020cf098e2a3607f2b9c",
+    "new": "e839006b3661fb2a1906bce218ba2148671cbc7d00fd3738b0914d31b0e9d2eb",
+    "optional": false
+  },
+  {
+    "path": "configs/projection/jtp.yaml",
+    "old": "ae66b5e8b5a6595e4d73398f18665cf72480c7d1950cf78376fe6ebc3b2d2445",
+    "new": "d91eb4ea34e4b1b356ab6e507043cbbaacf71b029b675d643903b28bddf18db5",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_stage3_road_active_set.py",
+    "old": null,
+    "new": "f1e48ba23824883ba7ab184255997975367816454a112b0afd2d8bd1155f6c75",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/README.md",
+    "old": "676d1838555ce96c4e7388c2c066392f795615b708fdb7f3ee94a9d140da28fd",
+    "new": "36df4a7261a3b06112f5a21e69e5183ee48c33059dd76677fd0225dc6fa7f20a",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP伪代码.md",
+    "old": "d0aeb3087e5d0c55c62cf6c52966aa66591ccb83c18d8ce20d444f8df7011ac4",
+    "new": "6066d05ff2159b473ac2524aea13af191c858fd5fc67d8e81315b76df2efdc8a",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/JTP约束定义.md",
+    "old": "cca2f705e98fbf9d3750555d9442e4df76cfde7896864cebc0839fb788af0b03",
+    "new": "49f9eec49ad7663dad39f4e1b768d1e21bd33af6d8f2aae3e2135f147b6134d6",
+    "optional": true
+  }
+]

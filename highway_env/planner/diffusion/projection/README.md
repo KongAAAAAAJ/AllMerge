@@ -1,4 +1,4 @@
-# TRACE Joint Trajectory Projection (Stage 2)
+# TRACE Joint Trajectory Projection (Stage 3)
 
 The runtime projection algorithm is priority-grouped damped least squares with
 fixed hard control bounds, cross-group protection, and outer nonlinear
@@ -10,7 +10,7 @@ not included in priority scoring or state active-set caps.
 ## Solver configuration
 
 `configs/projection/jtp.yaml`, `projection.solver_method: damped_least_squares`
-is the implemented Stage-2 backend. `constrained_qp` remains reserved for a
+is the implemented Stage-3 backend. `constrained_qp` remains reserved for a
 later solver study and selecting it raises `NotImplementedError`. `group_count`
 is 2 or 3. The six state families are ranked by
 `q * (1 + max(relu(normalized_residual - tolerance)))`, split into near-equal
@@ -50,8 +50,12 @@ metrics. Control magnitude bounds have zero feasibility slack.
 
 The road model, five-circle footprint, collision model, K2 execution model,
 independent paper metrics, and evaluation interfaces remain unchanged.
-Road active-set sampling and its cap remain unchanged in Stage 2; road active-set
-reduction is reserved for Stage 3.
+For Stage 3, the road LS candidate pool contains only the center footprint circle
+at future steps 1, 3, ..., 39 (20 sampled times per vehicle, two boundaries per
+time), giving 40 candidates per vehicle. A global Top-K cap of 30 is applied
+across all controlled vehicles. The full five-circle, 40-step road residual is
+still evaluated for nonlinear acceptance, final feasibility metrics, and paper
+evaluation. Collision geometry and collision active sets are unchanged.
 
 ## API
 
@@ -62,4 +66,9 @@ K2 network, training code, or evaluation metric modification is required.
 
 ## Tests
 
-`python -m pytest -q tests/test_joint_trajectory_projection.py tests/test_jtp_grouped_stage1.py`
+`python -m pytest -q tests/test_joint_trajectory_projection.py tests/test_jtp_grouped_stage1.py tests/test_jtp_stage3_road_active_set.py`
+
+
+## Stage 3 road active-set sampling
+
+The road residual is still constructed at all five footprint-circle centers for all 40 future steps. Only the LS candidate pool is sampled: the center circle (offset 0 m) is selected at every second future step, producing 40 candidate rows per vehicle (20 times × left/right boundaries). The global road Top-K cap is 30 across the full controlled platoon. Full-resolution road rows remain active in nonlinear acceptance and final metrics; inter-truck and external collision geometry is unchanged.
