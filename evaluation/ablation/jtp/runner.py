@@ -446,7 +446,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         draw(distribution_path, output)
     statistics = {unit: write_reports(output, rows if unit == 'trajectory' else step_rows,
                   unit, seed_values, int(ev.get('bootstrap_repeats', 2000)),
-                  int(ev.get('bootstrap_seed', 2026))) for unit in units}
+                  int(ev.get('bootstrap_seed', 2026)), frame_diagnostics) for unit in units}
     write_json(output/'jtp_projection_diagnostics.json',frame_diagnostics)
     solver_summary = _summarize_solver_diagnostics(frame_diagnostics)
     write_json(output/'jtp_solver_summary.json',solver_summary)

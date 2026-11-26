@@ -43,7 +43,7 @@ def test_step_alignment_joint_and_single_vehicle():
 
 def test_output_names_csv_recomputation_and_empty(tmp_path):
     rows = make_records()
-    write_reports(tmp_path, rows, 'step', [0], 3, 2026)
+    write_reports(tmp_path, rows, 'step', [0], 3, 2026, [])
     directory = tmp_path/'step'
     with (directory/'jtp_per_vehicle_step.csv').open(encoding='utf-8-sig') as f:
         saved = list(csv.DictReader(f))
@@ -58,7 +58,30 @@ def test_output_names_csv_recomputation_and_empty(tmp_path):
     assert empty['Ours']['num_samples'] == 0
     assert empty['Ours']['joint_feasibility_pct'] is None
     assert 'N/A' in paper_table(empty, 'step')
-    write_reports(tmp_path/'empty', [], 'step', [0], 3, 1)
+    write_reports(tmp_path/'empty', [], 'step', [0], 3, 1, [])
+
+
+def test_projection_timing_weights_frames_not_vehicle_steps(tmp_path):
+    from evaluation.ablation.jtp.statistics import add_projection_timing
+    rows = make_records()
+    # Frame 3 has fewer vehicle/step observations but must get equal timing weight.
+    small = [{**r, 'frame_index': 3} for r in rows if r['ego_index'] == 0 and r['prediction_step'] == 2]
+    other_seed = [{**r, 'seed': 1} for r in rows]
+    frames = [dict(seed=0, episode_index=1, frame_index=2, latency_ms=10.),
+              dict(seed=0, episode_index=1, frame_index=3, latency_ms=30.),
+              dict(seed=1, episode_index=1, frame_index=2, latency_ms=80.)]
+    result = write_reports(tmp_path, rows+small+other_seed, 'step', [0, 1], 0, 1, frames)
+    assert result['summary']['Baseline']['projection_latency_ms_mean'] == 0.
+    assert result['summary']['Ours']['projection_latency_ms_mean'] == 40.
+    assert result['timing']['per_seed'] == {'0': {'Baseline': 0., 'Ours': 20.}, '1': {'Baseline': 0., 'Ours': 80.}}
+    table = (tmp_path/'step/projection_ablation_table_step.tex').read_text()
+    assert 'Mean Time' in table and 'lcccccc' in table and '40.00' in table
+    assert all(line.count('&') == 6 for line in table.splitlines() if line.startswith(('Baseline &', r'\textbf{Ours} &')))
+    assert 'Mean Time' not in paper_table(result['summary'], 'trajectory')
+    empty = {'Baseline': {}, 'Ours': {}}
+    add_projection_timing(empty, [])
+    assert empty['Baseline']['projection_latency_ms_mean'] == 0.
+    assert empty['Ours']['projection_latency_ms_mean'] is None
 
 
 def test_cluster_bootstrap_uses_physical_frames():

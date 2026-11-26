@@ -111,10 +111,18 @@ def report(rows, unit, repeats=2000, seed=2026):
     return by_method, deltas, confidence
 
 
-def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed):
+def add_projection_timing(summaries, frames):
+    """One equally weighted timing per seed/frame, independent of vehicle/step counts."""
+    summaries['Baseline']['projection_latency_ms_mean'] = 0.0
+    summaries['Ours']['projection_latency_ms_mean'] = float(np.mean([f['latency_ms'] for f in frames])) if frames else None
+
+
+def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diagnostics):
     directory = output / unit
     directory.mkdir(parents=True, exist_ok=True)
     summaries, deltas, confidence = report(rows, unit, repeats, bootstrap_seed)
+    if unit == 'step':
+        add_projection_timing(summaries, frame_diagnostics)
     empty_columns = ['seed', 'episode_index', 'frame_index', 'ego_index', 'method',
                      'prediction_step', *FLAGS, 'stability_violation', 'geometric_violation',
                      'collision_violation', 'control_magnitude_violation', 'control_rate_violation',
@@ -124,12 +132,21 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed):
     per_seed = []
     for seed in seeds:
         by_method, _, _ = report([r for r in rows if r['seed'] == seed], unit, 0, bootstrap_seed)
+        if unit == 'step':
+            add_projection_timing(by_method, [f for f in frame_diagnostics if f['seed'] == seed])
         per_seed.extend({'seed': seed, 'method': m, **v} for m, v in by_method.items())
     write_csv(directory/f'jtp_per_seed_{unit}.csv', per_seed)
     write_json(directory/f'jtp_paired_statistics_{unit}.json', {'statistics_unit': unit,
                'difference_ours_minus_baseline_pp': deltas, 'paired_cluster_bootstrap': confidence,
                'resampling_unit': 'physical episode/frame, preserving seeds, trucks and steps'})
     (directory/f'projection_ablation_table_{unit}.tex').write_text(paper_table(summaries, unit), encoding='utf-8')
-    return {'summary': summaries, 'paired_deltas': deltas,
+    result = {'summary': summaries, 'paired_deltas': deltas,
             'prediction_steps': '2..H' if unit == 'step' else '1..H; control rates 2..H',
             'denominator': 'synchronized platoon steps for Joint; vehicle steps otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
+    if unit == 'step':
+        result['timing'] = {
+            'unit': 'ms', 'num_projections': len(frame_diagnostics),
+            'definition': 'Mean synchronized wall time per seed/frame for projector.project only; Baseline is zero additional JTP time. Concurrent resource contention is included.',
+            'per_seed': {str(seed): {r['method']: r['projection_latency_ms_mean'] for r in per_seed if r['seed'] == seed} for seed in seeds},
+        }
+    return result

@@ -103,7 +103,7 @@ def _summary(rows):
 
 
 def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
-    """Five-metric paper table with an explicit statistical unit."""
+    """Paper table with an explicit statistical unit and step-only JTP timing."""
     caption = f'Effects of Joint Trajectory Projection on Constraint Satisfaction ({unit} statistics)'
     lines = [
         r'\begin{table}[!t]',
@@ -113,13 +113,14 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
         r'\scriptsize',
         r'\renewcommand{\arraystretch}{1.15}',
         r'\setlength{\tabcolsep}{2.5pt}',
-        r'\begin{tabular}{@{}lccccc@{}}',
+        r'\begin{tabular}{@{}l' + 'c' * (6 if unit == 'step' else 5) + r'@{}}',
         r'\hline',
         r'\textbf{Method} & \shortstack{\textbf{Joint}\\\textbf{Feas. (\%)}} & '
         r'\textbf{Feas. (\%)} & '
         r'\shortstack{\textbf{Geometric}\\\textbf{Viol. (\%)}} & '
         r'\shortstack{\textbf{Stability}\\\textbf{Viol. (\%)}} & '
-        r'\shortstack{\textbf{Deviation}\\\textbf{(m)}} \\',
+        r'\shortstack{\textbf{Deviation}\\\textbf{(m)}}'
+        + (r' & \shortstack{\textbf{Mean Time}\\\textbf{(ms)}}' if unit == 'step' else '') + r' \\',
         r'\hline',
     ]
     for key, label in (('Baseline', 'Baseline'), ('Ours', r'\textbf{Ours}')):
@@ -134,6 +135,8 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
             formatted('stability_violation_pct'),
             'N/A' if key == 'Baseline' else formatted('deviation_m', 3),
         ]
+        if unit == 'step':
+            cells.append('0.00' if key == 'Baseline' else formatted('projection_latency_ms_mean'))
         if key == 'Ours':
             cells = [r'\textbf{' + cell + '}' for cell in cells]
         lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
