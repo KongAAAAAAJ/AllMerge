@@ -46,3 +46,4 @@ __pycache__/
 !/tests/test_road_area.py
 !/tests/test_jtp_distributions.py
 !/tests/test_jtp_statistics.py
+!/tests/test_jtp_parallel.py

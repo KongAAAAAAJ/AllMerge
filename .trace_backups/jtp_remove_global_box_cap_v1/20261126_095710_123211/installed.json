@@ -1,0 +1,12 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old_sha256": "43dde6cd3e1adc38eb025a94473b17b0e2141b37f2a19b5968d29cc114459cae",
+    "new_sha256": "8149b31215115e4ae530b3c445ece34939921b7e78c499fffc3de611721e8404"
+  },
+  {
+    "path": "tests/test_jtp_global_box_cap.py",
+    "old_sha256": null,
+    "new_sha256": "47eecec566d8660a47acda6eaadfb66652582394137bbff572415692d1991b2a"
+  }
+]

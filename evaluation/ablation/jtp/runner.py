@@ -247,11 +247,40 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
     )
 
 
+def _evaluate_frame(job, model, projector, jtp_cfg, ev, device):
+    seed, frame_index, key, entries = job
+    episode, frame = key
+    features,context,meta=collate_frame(entries,device)
+    if not {'agent_states','agent_valid_mask','map_polylines','map_valid_mask'}.issubset(features):
+        raise KeyError('Missing world traffic/map features for paper JTP evaluation')
+    pose0=context['koopman_pose0_si'].detach().cpu().numpy()
+    roads=[]; roads_meta=[]
+    try:
+        for i in range(len(entries)):
+            road,rmeta=build_road_geometry({k:v[i] for k,v in features.items()},pose0[i])
+            roads.append(road); roads_meta.append(rmeta)
+    except Exception as exc:
+        error={'episode_index':episode,'frame_index':frame,'seed':seed,'reason':f'{type(exc).__name__}: {exc}'}
+        raise RuntimeError(
+            f'Invalid road frame {key}; every selected synchronized frame must produce a JTP result. '
+            f'{error}') from exc
+    collision_runtime = jtp_cfg.get('runtime', {}).get('collision', {})
+    actors=build_external_traffic(features,context,int(jtp_cfg['execution']['horizon_steps']),
+                                  float(jtp_cfg['execution']['dt_s']),
+                                  max_actors=int(collision_runtime['max_external_actors']),
+                                  max_distance_m=float(collision_runtime['max_external_distance_m']))
+    data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
+                         seed=seed,episode=episode,frame=frame,
+                         consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
+    return context, meta, pose0, roads, roads_meta, actors, data
+
+
 def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
              jtp_config: str, dataset_root: str | None, split: str | None,
              num_frames: int | None, seeds: str | None, device_name: str | None,
              output_dir: str | None, figure_seed: int | None, constraint_distributions: bool = False,
-             statistics_unit: str = 'both'):
+             statistics_unit: str = 'both', workers: int | None = None,
+             worker_threads: int | None = None):
     if statistics_unit not in ('both', 'trajectory', 'step'):
         raise ValueError('statistics_unit must be both, trajectory or step')
     units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
@@ -260,6 +289,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
+    workers = int(workers if workers is not None else ev.get('workers', 1))
+    worker_threads = int(worker_threads if worker_threads is not None else ev.get('worker_threads', 1))
+    if workers < 1 or worker_threads < 1:
+        raise ValueError('workers and worker_threads must be positive')
     diffusion_path=resolve_repo_file(diffusion_config)
     diffusion_cfg=load_mode_yaml(diffusion_path)
     if diffusion_cfg.get('output_space')!='control':
@@ -292,39 +325,26 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         raise ValueError('Diffusion/JTP horizon mismatch')
     if not np.isclose(model.ctrl_cfg.dt,float(jtp_cfg['execution']['dt_s']),atol=1.e-10):
         raise ValueError('Diffusion/JTP dt mismatch')
-    model.to(device).eval()
-    projector=JointTrajectoryProjector(model.vehicle_model,config=jtp_path)
+    model.to(device if workers == 1 else 'cpu').eval()
+    projector=JointTrajectoryProjector(model.vehicle_model,config=jtp_path) if workers == 1 else None
     frames,data_manifest=selected_frames(root,split,num_frames=num_frames,sample_seed=sample_seed)
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
+    print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
     pick=np.random.default_rng(figure_seed).integers(0,len(frames))
     figure_key=(seed_values[0],*frames[int(pick)][0]); figure_data=None
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
-    for seed in seed_values:
-        for frame_index,(key,entries) in enumerate(frames):
+    from .parallel import frame_results
+    jobs = ((seed, index, key, entries) for seed in seed_values
+            for index, (key, entries) in enumerate(frames))
+    evaluation_start = time.perf_counter()
+    def serial_frame(job):
+        return _evaluate_frame(job, model, projector, jtp_cfg, ev, device)
+    worker_args = (str(checkpoint_path), str(jtp_path), jtp_cfg, ev, str(device), worker_threads)
+    with frame_results(jobs, serial_frame, workers, worker_args) as results:
+        for job, result in results:
+            seed, frame_index, key, entries = job
             episode, frame = key
-            features,context,meta=collate_frame(entries,device)
-            if not {'agent_states','agent_valid_mask','map_polylines','map_valid_mask'}.issubset(features):
-                raise KeyError('Missing world traffic/map features for paper JTP evaluation')
-            pose0=context['koopman_pose0_si'].detach().cpu().numpy()
-            roads=[]; roads_meta=[]
-            try:
-                for i in range(len(entries)):
-                    road,rmeta=build_road_geometry({k:v[i] for k,v in features.items()},pose0[i])
-                    roads.append(road); roads_meta.append(rmeta)
-            except Exception as exc:
-                error={'episode_index':episode,'frame_index':frame,'seed':seed,'reason':f'{type(exc).__name__}: {exc}'}
-                errors.append(error)
-                raise RuntimeError(
-                    f'Invalid road frame {key}; every selected synchronized frame must produce a JTP result. '
-                    f'{error}') from exc
-            collision_runtime = jtp_cfg.get('runtime', {}).get('collision', {})
-            actors=build_external_traffic(features,context,int(jtp_cfg['execution']['horizon_steps']),
-                                          float(jtp_cfg['execution']['dt_s']),
-                                          max_actors=int(collision_runtime['max_external_actors']),
-                                          max_distance_m=float(collision_runtime['max_external_distance_m']))
-            data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
-                                 seed=seed,episode=episode,frame=frame,
-                                 consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
+            context, meta, pose0, roads, roads_meta, actors, data = result
             if recorder is not None or 'step' in units:
                 step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
                                   'ego_index': int(item['ego_index'])} for item in meta]
@@ -421,6 +441,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
+    evaluation_wall_s = time.perf_counter() - evaluation_start
     if not frame_diagnostics:raise RuntimeError('No valid paired JTP observations')
     output.mkdir(parents=True,exist_ok=True)
     if recorder is not None:
@@ -462,7 +483,11 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         figure_arrays['road_safety_margin_m'] = np.asarray(
             figure_data.get('road_safety_margin_m', np.nan), dtype=np.float64)
         np.savez_compressed(output/'projection_ablation_figure_data.npz', **figure_arrays)
-    manifest={'study':'TRACE Ablation 3: Joint Trajectory Projection',
+    manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
+                           'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
+                           'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
+                           'projection_latency_scope': 'per-worker wall time; concurrent resource contention included' if workers > 1 else 'serial wall time'},
+              'study':'TRACE Ablation 3: Joint Trajectory Projection',
               'projection_method':'Priority-grouped non-degradation JTP (structured K2)',
               'projection_solver_method':jtp_cfg['projection']['solver_method'],
               'projection_output_policy':'Always retain the returned JTP controls and Koopman rollout; no nominal-output fallback. Projection exceptions abort the evaluation.',
@@ -518,6 +543,8 @@ def main(argv=None):
     parser.add_argument('--output-dir',default=None)
     parser.add_argument('--figure-seed',type=int,default=None)
     parser.add_argument('--constraint-distributions',action='store_true',help='Save full twelve-constraint distributions and plot two 3x2 figures')
+    parser.add_argument('--workers', type=int, default=None, help='Parallel frame processes; default 1 (serial)')
+    parser.add_argument('--worker-threads', type=int, default=None, help='CPU threads per parallel worker; default 1')
     parser.add_argument('--statistics-unit', choices=('both', 'trajectory', 'step'), default='both')
     args=parser.parse_args(argv)
     evaluate(checkpoint=args.checkpoint,diffusion_config=args.diffusion_config,
@@ -527,6 +554,7 @@ def main(argv=None):
              output_dir=args.output_dir,figure_seed=args.figure_seed,
              constraint_distributions=args.constraint_distributions,
              statistics_unit=args.statistics_unit,
+             workers=args.workers,worker_threads=args.worker_threads,
 )
     return 0
 

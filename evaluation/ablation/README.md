@@ -22,6 +22,8 @@ python evaluation/ablation/run_jtp.py ^
   --split test ^
   --num-frames 500 ^
   --seeds "0" ^
+  --workers 2 ^
+  --worker-threads 1 ^
   --output-dir outputs/jtp_ablation/A0 ^
   --constraint-distributions --output-dir outputs/jtp_ablation/A0
 
@@ -31,6 +33,16 @@ python evaluation/ablation/run_jtp.py ^
 接下来实现step 2: 新增 Priority-weighted Loss Aggregation，让高优先级候选获得更充分的优化。
 等step 2完成之后，统一再进行A0和A0_assignment评估
 ## JTP trajectory / step 统计
+
+### 并行评估
+
+默认 `--workers 1` 保持串行评估。在原命令后添加 `--workers 2 --worker-threads 1`，可用两个独立进程并行评估不同场景帧（Windows使用spawn）；每个进程只在启动时加载一次模型。同一场景内所有受控车辆仍由JTP联合求解。命令行覆盖评估YAML中的 `workers`、`worker_threads`。
+
+单张GPU建议先比较1与2个worker的实际吞吐量。各进程共享所选GPU，但分别占用模型和求解显存；worker更多不保证更快。CPU模式可通过 `--device cpu --workers 4 --worker-threads 1` 使用多核。随机种子仍由场景和推理种子决定，结果按原输入顺序合并，统计、图表及写文件均由主进程统一完成。
+
+本机RTX 4080、当前A0配置的小规模验证：16帧串行13.84秒，双进程13.82秒（评估阶段），未观察到明显提速；4帧则双进程更慢。两种模式的逐步记录完全相同，逐轨迹记录仅延迟字段不同。此测试不代表500帧性能，默认仍保留串行。
+
+`jtp_manifest.json` 的 `execution` 记录进程数、设备、评估墙钟时间及场景/种子对吞吐量（含worker启动、帧准备及主进程统计采集，不含最终bootstrap和绘图）。并行时单帧projection latency包含资源争用，不能作为独占设备算法延迟与串行值直接比较。模型初始化有固定开销，少量帧可能比串行慢。内存中最多预提交2×workers个任务；任一任务失败即中止，不跳帧或回退。
 
 `run_jtp.py` 新增 `--statistics-unit both|trajectory|step`，默认 `both`。在原评估命令后添加 `--statistics-unit step` 可只输出step报告。建议采用新的 `--output-dir outputs/jtp_ablation/A0_units`，避免混用历史文件。
 

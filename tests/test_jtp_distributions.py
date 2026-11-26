@@ -81,6 +81,11 @@ def test_rate_first_step_excluded(h, later, tmp_path):
     cfg = load_jtp_config()
     with open('configs/evaluation/jtp_ablation.yaml', encoding='utf-8') as f:
         ev = yaml.safe_load(f)
+    # This fixture deliberately exceeds these limits, independent of user tuning.
+    cfg['control']['steering_rate_max_rad_s'] = .12
+    ev['limits']['steering_rate_max_rad_s'] = .12
+    cfg['control']['acceleration_rate_max_mps3'] = 2.5
+    ev['limits']['acceleration_rate_max_mps3'] = 2.5
     u = torch.zeros(1, h, 2)
     if later:
         u[0, 1:, :] = torch.tensor([1., .04])

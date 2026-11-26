@@ -382,20 +382,28 @@ class JointTrajectoryProjector:
             before=group_maxima(current.metrics,order)
             diag["priority_group_maxima_before"]=before
             accepted=False; trials=[]; tick=clock()
+            diag["global_box_cap_disabled"] = True
+            diag["would_be_alpha_box_cap"] = None
+            diag["would_be_alpha_box_blocked"] = None
             if delta is not None and bool(delta.abs().max()>0):
                 alpha=float(proj_cfg["alpha_initial"])
-                # Preserve the scalar search direction for nominal in-box
-                # controls. For nominal out-of-box, allow a corrective box
-                # guard but subject the actual guarded candidate to full checks.
+                # The former global box cap is disabled. Its hypothetical value
+                # is retained for diagnostics only and never modifies alpha.
                 in_box=bool(((controls>=lower)&(controls<=upper)).all())
                 if in_box:
                     tiny=torch.finfo(delta.dtype).tiny
                     cap=torch.where(delta>0,(upper-controls)/delta.clamp_min(tiny),torch.where(delta<0,(lower-controls)/delta.clamp_max(-tiny),torch.full_like(delta,float('inf'))))
-                    alpha=min(alpha,float(cap.min().clamp_min(0)))
+                    would_be_alpha_box_cap=float(cap.min().clamp_min(0))
+                    diag["would_be_alpha_box_cap"] = would_be_alpha_box_cap
+                    diag["would_be_alpha_box_blocked"] = would_be_alpha_box_cap < float(proj_cfg["alpha_minimum"])
                 while alpha>=float(proj_cfg["alpha_minimum"]):
                     candidate_controls=controls+alpha*delta
                     guarded=torch.maximum(torch.minimum(candidate_controls,upper),lower)
-                    guard_changed=bool((guarded-candidate_controls).abs().max()>1e-7)
+                    guard_delta=guarded-candidate_controls
+                    guard_abs=guard_delta.abs()
+                    guard_max_correction=float(guard_abs.max())
+                    guard_changed=guard_max_correction>1e-7
+                    guard_changed_count=int((guard_abs>1e-7).sum())
                     candidate_controls=guarded
                     with torch.no_grad():
                         candidate=self._evaluate(candidate_controls,context,roads,external_actors=external_actors)
@@ -403,7 +411,10 @@ class JointTrajectoryProjector:
                     after=group_maxima(candidate.metrics,order)
                     feasible=bool(candidate.metrics["projector_constraints_satisfied"])
                     ok=feasible or accept_nonlinear(before,after,proj_cfg)
-                    trials.append({"alpha":alpha,"priority_group_maxima":after,"accepted":ok,"box_guard_changed":guard_changed})
+                    trials.append({"alpha":alpha,"priority_group_maxima":after,"accepted":ok,
+                                   "box_guard_changed":guard_changed,
+                                   "box_guard_changed_count":guard_changed_count,
+                                   "box_guard_max_correction":guard_max_correction})
                     if ok:
                         current=candidate; controls=candidate_controls.detach(); accepted=True; accepted_iterations+=1; stalled=0
                         if alpha>=.75:
@@ -445,4 +456,5 @@ class JointTrajectoryProjector:
             "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
             "acceptance_policy":"all_priority_group_maxima_nonincreasing_and_one_improved_or_feasible","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
-            "control_rate_constraints_enabled":True,"config_path":self.cfg.get("_config_path")})
+            "control_rate_constraints_enabled":True,"global_box_step_cap_enabled":False,
+            "config_path":self.cfg.get("_config_path")})

@@ -9,6 +9,8 @@ figure_seed: 2027
 bootstrap_seed: 2026
 bootstrap_repeats: 2000
 device: auto
+workers: 1                 # independent frame processes; try 2 on a single GPU
+worker_threads: 1          # CPU threads per parallel worker; serial mode unchanged
 output_dir: outputs/jtp_ablation/evaluation
 jtp_config: configs/projection/jtp.yaml
 invalid_map_policy: error  # 'skip' only for explicitly reported and audited geometry failures

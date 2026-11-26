@@ -106,6 +106,15 @@ are retained in trajectory reports; step reports expose per-step violation flags
 
 ## Evaluation protocol
 
+Frame/seed pairs run serially by default (`--workers 1`). Use `--workers 2
+--worker-threads 1` for isolated spawn processes, each loading its own model
+once and sharing the selected device. The trucks in each frame remain jointly
+projected. Submission is bounded, results are merged in original order, and a
+failed task aborts the evaluation. Single-GPU speedup is workload-dependent;
+concurrent per-frame latency includes resource contention. Manifest `execution`
+records evaluation wall time and throughput for comparison. Final reporting
+and plotting remain in the parent process.
+
 - Statistical units are selected by the CLI; bootstrap always resamples physical
   episode/frame clusters, preserving all seeds, trucks, and steps within a cluster.
 - Baseline and Ours share the exact same raw Diffusion inference for each
