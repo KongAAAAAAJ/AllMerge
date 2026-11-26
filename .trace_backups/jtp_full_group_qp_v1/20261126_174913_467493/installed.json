@@ -1,0 +1,44 @@
+[
+  {
+    "path": "highway_env/planner/diffusion/projection/README.md",
+    "old": "8d6efeb9fb989cced2ca12db4bd1eb74acbadb8dc90e3e724e19891e017c3fdc",
+    "new": "c66a7b910751e4b88ec88c2c2524fdc7a208e8bc62ac9e18e48a2ef17ff9437e",
+    "optional": true
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/grouped_solver.py",
+    "old": "cfc500aebf60a7b5df975839599e620f33f171b730b769e024d68e5b317aa820",
+    "new": "3ac4586ad6817cef3b42c197ab1bcb03ca93bf8f1a76f7c76d502974e600e550",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/joint_projector.py",
+    "old": "db380c05e5085d1f65dd60f7835666e342820062142142d836649be850a11814",
+    "new": "1f496a9f6b0016643a3abee21c5f462d62921cc2883f30a3f63b3df03ed81739",
+    "optional": false
+  },
+  {
+    "path": "highway_env/planner/diffusion/projection/qp_solver.py",
+    "old": "ccd49f91299e705e0b3c30afc2976aadb59deb8cc3ba7481c7d6b140e8361d68",
+    "new": "7edfb5120c5cb41dbfbd38eefeb2d4705ad9bd47f2fea8a485cf95d2ca3e9b92",
+    "optional": false
+  },
+  {
+    "path": "tests/test_joint_trajectory_projection.py",
+    "old": "1a8b05c9acf99757762ebc36dd103a3a2fa073436a5774576b6e8b3adfacf5a8",
+    "new": "49d185b13159901986460c1c050eb36e52c2d8a82b707fc153c314e1a9a97530",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_grouped_stage1.py",
+    "old": "708e204f83b2aaf0de928aa2a5033b6096f904f7ca86fa721d1f6af6944fef1a",
+    "new": "961bfa08ad0a9b451bd85097e8b441a9298b68c5d65251046dbcd9a1788d5d00",
+    "optional": false
+  },
+  {
+    "path": "tests/test_jtp_qp.py",
+    "old": "0181eea3a60df969a78e4ef62bb8cdcd90b9f8fffc1aa8ff4768a62f3fe2bf9c",
+    "new": "595c9960508b67457d62ec908377294bd1523c063befa6834cddecb1a528acd9",
+    "optional": false
+  }
+]

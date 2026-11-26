@@ -313,7 +313,7 @@ def solve_groups(controls, groups, selected, rows, thresholds, metric, order, cf
     if cfg["solver_method"] == "constrained_qp":
         from .qp_solver import solve_groups_qp
         return solve_groups_qp(
-            controls, groups, selected, rows, thresholds, order, cfg,
+            controls, groups, rows, thresholds, order, cfg,
             control_lower, control_upper, control_weights)
     return _solve_groups_ls(
         controls, groups, selected, rows, thresholds, metric, order, cfg,

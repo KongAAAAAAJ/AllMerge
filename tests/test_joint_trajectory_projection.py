@@ -60,12 +60,19 @@ def _road(width=30.0):
     return RoadGeometry(center, width, width)
 
 
-def test_jtp_config_has_grouped_projection_and_reserved_qp_backend():
+def _ls_config():
+    cfg = load_jtp_config()
+    cfg["projection"]["solver_method"] = "damped_least_squares"
+    return cfg
+
+
+def test_jtp_config_has_grouped_projection_and_supported_backends():
     cfg = load_jtp_config()
     assert cfg["execution"]["horizon_steps"] == 40
     assert cfg["projection"]["max_active_per_group"]["stability"] > 0
-    assert cfg["projection"]["solver_method"] == "damped_least_squares"
+    assert cfg["projection"]["solver_method"] in {"damped_least_squares", "constrained_qp"}
     assert cfg["projection"]["group_count"] in (2, 3)
+    assert cfg["projection"]["qp"]["backend"] == "osqp"
     assert cfg["collision"]["clearance_m"] > 0
     assert cfg["control"]["acceleration_rate_max_mps3"] > 0
     assert cfg["control"]["steering_rate_max_rad_s"] > 0
@@ -112,7 +119,7 @@ def test_jtp_returns_nominal_when_all_constraints_are_feasible():
 
 
 def test_grouped_projection_corrects_yaw_stability_without_osqp():
-    cfg = load_jtp_config()
+    cfg = _ls_config()
     cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
     cfg["geometry"]["curvature_limit_per_m"] = 0.2
     cfg["projection"]["max_iterations"] = 8
@@ -146,7 +153,7 @@ def test_grouped_projection_corrects_yaw_stability_without_osqp():
 
 
 def test_control_box_is_enforced_by_bounded_group_solver():
-    cfg = load_jtp_config()
+    cfg = _ls_config()
     cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
     projector = JointTrajectoryProjector(StraightLineExecution(), cfg)
     controls = torch.zeros(1, 40, 2)
@@ -159,7 +166,7 @@ def test_control_box_is_enforced_by_bounded_group_solver():
 
 
 def test_hard_control_restoration_runs_when_no_state_constraint_is_active():
-    cfg = load_jtp_config()
+    cfg = _ls_config()
     cfg["control"]["acceleration_rate_max_mps3"] = 1000.0
     cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
     projector = JointTrajectoryProjector(StraightLineExecution(), cfg)

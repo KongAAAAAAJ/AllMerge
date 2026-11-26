@@ -329,6 +329,33 @@ class JointTrajectoryProjector:
         }
         return selected, diagnostics
 
+    def _full_group_indices(self, groups):
+        """Expose every state-constraint row to the QP backend."""
+        thresholds = self._constraint_thresholds(groups)
+        selected = {}
+        active_counts = {}
+        row_counts = {}
+        for name in self.cfg["projection"]["priority_weights"]:
+            values = groups[name]
+            selected[name] = torch.arange(values.numel(), device=values.device)
+            row_counts[name] = int(values.numel())
+            active_counts[name] = int((values.detach() > thresholds[name]).sum().cpu())
+        diagnostics = {
+            "active_counts": active_counts,
+            "active_total_counts": dict(active_counts),
+            "active_truncated_counts": {name: 0 for name in row_counts},
+            "active_candidate_pool_sizes": dict(row_counts),
+            "active_candidate_total_counts": dict(active_counts),
+            "active_sampling_omitted_counts": {name: 0 for name in row_counts},
+            "active_topk_truncated_counts": {name: 0 for name in row_counts},
+            "solver_constraint_scope": "all_rows_per_priority_group",
+            "solver_constraint_rows_by_family": row_counts,
+            "solver_inactive_rows_by_family": {
+                name: row_counts[name] - active_counts[name] for name in row_counts
+            },
+        }
+        return selected, diagnostics
+
     def evaluate_preprojection(self, nominal_controls: torch.Tensor, context: dict,
                                 road_geometry, external_actors=()) -> dict:
         """Evaluate nominal controls with the exact JTP constraints, without projection.
@@ -429,13 +456,16 @@ class JointTrajectoryProjector:
         for iteration in range(1, int(proj_cfg["max_iterations"])+1):
             if current.metrics["projector_constraints_satisfied"]:
                 break
-            selected, active_diagnostics = self._active_indices(current.groups)
-            if not sum(active_diagnostics["active_counts"].values()) and current.metrics["control_box_feasible"]:
-                status = "no_active_violations"
-                break
+            if use_ls:
+                selected, active_diagnostics = self._active_indices(current.groups)
+                if not sum(active_diagnostics["active_counts"].values()) and current.metrics["control_box_feasible"]:
+                    status = "no_active_violations"
+                    break
+            else:
+                selected, active_diagnostics = self._full_group_indices(current.groups)
             tick = clock()
-            has_active_state_rows = sum(active_diagnostics["active_counts"].values()) > 0
-            if (not use_ls and has_active_state_rows and cache is None
+            has_solver_state_rows = sum(ids.numel() for ids in selected.values()) > 0
+            if (not use_ls and has_solver_state_rows and cache is None
                     and isinstance(self.rollout_fn, KoopmanExecutionAdapter)):
                 cache = K2StaticCache(self.rollout_fn, context, self.control_interpolation)
                 cache_ms = (clock()-tick)*1000
@@ -452,7 +482,7 @@ class JointTrajectoryProjector:
                     "trust_region_enabled":use_ls}
             tick = clock()
             if not all(torch.isfinite(j).all() for j in rows.values()):
-                delta, info = None, {"reason":"nonfinite_active_jacobian"}
+                delta, info = None, {"reason":"nonfinite_constraint_jacobian"}
             else:
                 with torch.no_grad():
                     delta, info = solve_groups(
@@ -571,7 +601,9 @@ class JointTrajectoryProjector:
             projector_constraints_satisfied=bool(final.metrics["projector_constraints_satisfied"]),status=status,iterations=len(projection_history),
             diagnostics={"accepted_iterations":accepted_iterations,"history":history,"projection":projection_history,"objective":objective,
             "initial_metrics":initial_metrics,"final_metrics":final.metrics,"group_progress":group_progress,"termination_status":status,"final_trust_radius":trust,"trust_region_enabled":use_ls,
-            "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],"static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
+            "priority_groups":order,"priority_scores":scores,"solver_method":proj_cfg["solver_method"],
+            "solver_constraint_scope":"active_set" if use_ls else "all_rows_per_priority_group",
+            "static_cache_builds":int(cache is not None),"static_cache_ms":cache_ms,
             "linearization_count":linearizations,"nonlinear_validation_count":validations,"collision_handled_by":"joint_projection","external_actor_count":len(external_actors),
             "acceptance_policy":"hard_control_box_plus_per_constraint_non_degradation_and_group_violation_count_nonincrease","intertruck_collision_constraints_enabled":True,"external_collision_constraints_enabled":True,
             "control_rate_constraints_enabled":True,
@@ -580,6 +612,7 @@ class JointTrajectoryProjector:
                 "circle_offset_m":0.0,
                 "candidate_rows_per_vehicle":2 * ((self.horizon + 1) // 2),
                 "global_top_k":int(proj_cfg["max_active_per_group"]["road"]),
+                "applied_to_solver":use_ls,
                 "nonlinear_validation":"full_footprint_all_steps",
             },
             "config_path":self.cfg.get("_config_path")})

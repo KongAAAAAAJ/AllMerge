@@ -69,6 +69,7 @@ def draw_projection_figures(output_dir: Path, cases: dict):
         }):
             if kind == 'geometry':
                 fig, overall = plt.subplots(figsize=(12, 6.5))
+                # 修改放大图位置
                 zoom = overall.inset_axes([.1, .52, .42, .43])  # 主图绘图区的比例：[左侧位置, 底部位置, 宽度, 高度]
 
                 # (a) Draw the road corridor and its actual configured safety inset.

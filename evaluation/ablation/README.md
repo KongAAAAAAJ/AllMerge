@@ -20,7 +20,7 @@ python evaluation/ablation/run_jtp.py ^
   --jtp-config configs/projection/jtp.yaml ^
   --checkpoint outputs/anchor_ablation/diffusion_ckpt/dual/A0/best.pt ^
   --split test ^
-  --num-frames 500 ^
+  --num-frames 10 ^
   --seeds "0" ^
   --workers 1 ^
   --worker-threads 1 ^
