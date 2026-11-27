@@ -64,18 +64,18 @@ projection:
     protection_slack:
       linear_penalty: 1000.0
       quadratic_penalty: 100.0
-    eps_abs: 1.0e-8
-    eps_rel: 1.0e-8
+    eps_abs: 1.0e-3
+    eps_rel: 1.0e-3
     max_iter: 20000
     polishing: true
     adaptive_rho: true
     verbose: false
   # G1 stability, G2 road/curvature, G3 control-rate.
-  constraint_sampling_stride: 2
+  constraint_sampling_stride: 4
   protection_max_sweeps: 32
   protection_tolerance: 1.0e-6
   nondegradation_tolerance: 1.0e-6
-  max_iterations: 12
+  max_iterations: 6
   max_stalled_iterations: 3
   max_active_per_group:
     stability: 24

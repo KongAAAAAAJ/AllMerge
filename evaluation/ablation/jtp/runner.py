@@ -226,7 +226,9 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
     # surfaced and abort the evaluation; there is no nominal-trajectory fallback.
     result = projector.project(nominal_u, context, roads)
     _sync(device)
-    latency_ms = (time.perf_counter() - start) * 1000.0
+    project_call_wall_time_ms = (time.perf_counter() - start) * 1000.0
+    projection_latency_ms_by_vehicle = np.asarray(
+        result.diagnostics["projection_latency_ms_by_vehicle"], dtype=np.float64)
 
     projected_u = result.controls.detach()
     candidate = {
@@ -266,7 +268,8 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
         iterations=int(result.iterations),
         iterations_by_vehicle=list(result.diagnostics.get('iterations_by_vehicle', [])),
         diagnostics=result.diagnostics or {},
-        latency_ms=latency_ms,
+        projection_latency_ms_by_vehicle=projection_latency_ms_by_vehicle,
+        project_call_wall_time_ms=project_call_wall_time_ms,
         consistency_max_abs=difference,
     )
 
@@ -405,7 +408,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                             'projection_control_delta_norm':0. if method=='Baseline' else float(data['projection_control_delta_norm'][i]),
                             'projection_status':'not_run' if method=='Baseline' else data['projection_status_by_vehicle'][i],
                             'projection_iterations':0 if method=='Baseline' else data['iterations_by_vehicle'][i],
-                            'projection_latency_ms':0. if method=='Baseline' else data['latency_ms'],
+                            'projection_latency_ms':0. if method=='Baseline' else float(data['projection_latency_ms_by_vehicle'][i]),
                             'k2_consistency_max_abs':data['consistency_max_abs']}
                     if 'trajectory' in units:
                         rows.append(record)
@@ -418,7 +421,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'projection_applied_by_vehicle': data['projection_applied'].tolist(),
                 'control_delta_norm_by_vehicle': data['projection_control_delta_norm'].tolist(),
                 'iterations': data['iterations'],
-                'latency_ms': data['latency_ms'],
+                'projection_latency_ms_by_vehicle': data['projection_latency_ms_by_vehicle'].tolist(),
+                'mean_vehicle_projection_latency_ms': float(np.mean(data['projection_latency_ms_by_vehicle'])),
+                'max_vehicle_projection_latency_ms': float(np.max(data['projection_latency_ms_by_vehicle'])),
+                'project_call_wall_time_ms': data['project_call_wall_time_ms'],
                 'rollout_consistency': data['consistency_max_abs'],
                 'active_set_diagnostics': data['diagnostics'],
             })
@@ -501,7 +507,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
                            'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
                            'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
-                           'projection_latency_scope': 'per-worker wall time; concurrent resource contention included' if workers > 1 else 'serial wall time'},
+                           'projection_latency_scope': 'single-vehicle _project_single wall time, measured separately for each controlled vehicle with CUDA synchronization; the serial three-vehicle project-call wall time is recorded separately and excluded from per-vehicle latency summaries'},
+               'projection_latency_definition': 'Per-vehicle wall-clock duration of one _project_single call, including that vehicle initial evaluation, K2 linearization, priority-group solver pass(es), Backtracking, and final diagnostics; CUDA is synchronized at both timing boundaries.',
               'study':'TRACE Ablation 3: Joint Trajectory Projection',
               'projection_method':'Independent single-vehicle 80-D priority-grouped JTP (structured K2)',
               'projection_solver_method':jtp_cfg['projection']['solver_method'],

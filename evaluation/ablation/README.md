@@ -20,13 +20,13 @@ python evaluation/ablation/run_jtp.py ^
   --config configs/evaluation/jtp_ablation.yaml ^
   --diffusion-config configs/train/ablation/diffusion_a0_fixed.yaml ^
   --jtp-config configs/projection/jtp.yaml ^
-  --checkpoint outputs/anchor_ablation/diffusion_ckpt/dual/A0/best.pt ^
+  --checkpoint outputs/anchor_ablation/diffusion_ckpt/dual/A0_new/best.pt ^
   --split test ^
   --num-frames 10 ^
   --seeds "0" ^
   --workers 1 ^
   --worker-threads 1 ^
-  --output-dir outputs/jtp_ablation/A0 ^
+  --output-dir outputs/jtp_ablation/A0_stride_4_eps3_iter_6 ^
   --constraint-distributions
 
 

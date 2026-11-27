@@ -112,9 +112,24 @@ def report(rows, unit, repeats=2000, seed=2026):
 
 
 def add_projection_timing(summaries, frames):
-    """One equally weighted timing per seed/frame, independent of vehicle/step counts."""
-    summaries['Baseline']['projection_latency_ms_mean'] = 0.0
-    summaries['Ours']['projection_latency_ms_mean'] = float(np.mean([f['latency_ms'] for f in frames])) if frames else None
+    """Summarize one independently measured _project_single wall time per vehicle."""
+    values = np.asarray([
+        float(latency)
+        for frame in frames
+        for latency in frame['projection_latency_ms_by_vehicle']
+    ], dtype=np.float64)
+    summaries['Baseline'].update(
+        projection_latency_ms_mean=0.0,
+        projection_latency_ms_p95=0.0,
+        projection_latency_ms_max=0.0,
+        num_vehicle_projections=0,
+    )
+    summaries['Ours'].update(
+        projection_latency_ms_mean=float(values.mean()) if values.size else None,
+        projection_latency_ms_p95=float(np.percentile(values, 95)) if values.size else None,
+        projection_latency_ms_max=float(values.max()) if values.size else None,
+        num_vehicle_projections=int(values.size),
+    )
 
 
 def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diagnostics):
@@ -145,8 +160,27 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
             'denominator': 'synchronized platoon steps for Joint; vehicle steps otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
     if unit == 'step':
         result['timing'] = {
-            'unit': 'ms', 'num_projections': len(frame_diagnostics),
-            'definition': 'Mean synchronized wall time per seed/frame for projector.project only; Baseline is zero additional JTP time. Concurrent resource contention is included.',
-            'per_seed': {str(seed): {r['method']: r['projection_latency_ms_mean'] for r in per_seed if r['seed'] == seed} for seed in seeds},
+            'unit': 'ms_per_vehicle_projection',
+            'num_vehicle_projections': sum(
+                len(frame['projection_latency_ms_by_vehicle']) for frame in frame_diagnostics),
+            'num_synchronized_frames': len(frame_diagnostics),
+            'definition': (
+                'Mean and P95 of independently measured per-vehicle _project_single wall time. '
+                'Each vehicle projection is timed separately with CUDA synchronization at both '
+                'boundaries. The serial three-vehicle project-call wall time is retained only in '
+                'frame diagnostics and is excluded from these summaries. Baseline adds no JTP time.'
+            ),
+            'per_seed': {
+                str(seed): {
+                    r['method']: r['projection_latency_ms_mean']
+                    for r in per_seed if r['seed'] == seed
+                } for seed in seeds
+            },
+            'per_seed_p95': {
+                str(seed): {
+                    r['method']: r.get('projection_latency_ms_p95')
+                    for r in per_seed if r['seed'] == seed
+                } for seed in seeds
+            },
         }
     return result

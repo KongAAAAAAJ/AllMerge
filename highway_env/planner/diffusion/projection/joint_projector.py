@@ -432,15 +432,24 @@ class JointTrajectoryProjector:
             context, n=n, device=nominal_controls.device, dtype=nominal_controls.dtype)
         roads = self._road_list(
             road_geometry, n, device=nominal_controls.device, dtype=nominal_controls.dtype)
+        def synchronized_clock():
+            if nominal_controls.is_cuda:
+                torch.cuda.synchronize(nominal_controls.device)
+            return perf_counter()
+
         results = []
         for vehicle_index in range(n):
             vehicle_context = {
                 key: value[vehicle_index:vehicle_index + 1]
                 for key, value in full_context.items()
             }
-            results.append(self._project_single(
+            start = synchronized_clock()
+            result = self._project_single(
                 nominal_controls[vehicle_index:vehicle_index + 1],
-                vehicle_context, [roads[vehicle_index]]))
+                vehicle_context, [roads[vehicle_index]])
+            result.diagnostics["projection_latency_ms"] = (
+                synchronized_clock() - start) * 1000.0
+            results.append(result)
 
         controls = torch.cat([result.controls for result in results], dim=0)
         trajectories = torch.cat([result.trajectories for result in results], dim=0)
@@ -521,6 +530,10 @@ class JointTrajectoryProjector:
             "nonlinear_validation_count": sum(item["nonlinear_validation_count"] for item in diagnostics_by_vehicle),
             "constraint_sampling_stride": int(solver_cfg["constraint_sampling_stride"]),
             "constraint_sampling_by_vehicle": [item["constraint_sampling"] for item in diagnostics_by_vehicle],
+            "projection_latency_ms_by_vehicle": [
+                float(item["projection_latency_ms"]) for item in diagnostics_by_vehicle],
+            "mean_vehicle_projection_latency_ms": sum(
+                float(item["projection_latency_ms"]) for item in diagnostics_by_vehicle) / n,
             "control_rate_constraints_enabled": True,
             "collision_constraints_enabled": False,
             "acceptance_policy": "hard_control_box_plus_full_horizon_per_constraint_non_degradation_and_group_violation_count_nonincrease",

@@ -79,7 +79,7 @@ def test_config_has_two_solver_backends_fixed_priority_and_sparse_sampling():
     cfg = load_jtp_config()
     assert cfg["execution"]["horizon_steps"] == 40
     assert cfg["projection"]["solver_method"] in {"damped_least_squares", "constrained_qp"}
-    assert cfg["projection"]["constraint_sampling_stride"] == 2
+    assert 1 <= cfg["projection"]["constraint_sampling_stride"] <= cfg["execution"]["horizon_steps"]
     assert set(cfg["projection"]["max_active_per_group"]) == {
         "stability", "road", "curvature", "control_rate"}
     assert "collision" not in cfg
@@ -201,6 +201,9 @@ def test_three_vehicles_are_projected_independently_in_80d_spaces():
     single_result = projector.project(controls[:1], {key: value[:1] for key, value in context.items()}, roads[:1])
     assert batch_result.controls.shape == (3, 40, 2)
     assert len(batch_result.diagnostics["per_vehicle"]) == 3
+    assert len(batch_result.diagnostics["projection_latency_ms_by_vehicle"]) == 3
+    assert all(value >= 0.0 for value in batch_result.diagnostics["projection_latency_ms_by_vehicle"])
+    assert all("projection_latency_ms" in item for item in batch_result.diagnostics["per_vehicle"])
     assert batch_result.diagnostics["iterations_by_vehicle"][0] > 0
     for item in batch_result.diagnostics["per_vehicle"]:
         for step in item["projection"]:
@@ -228,6 +231,39 @@ def test_grouped_ls_corrects_yaw_stability_without_qp():
     assert (result.controls[..., 1] >= cfg["control"]["steering_min_rad"] - 1e-6).all()
     assert (result.controls[..., 1] <= cfg["control"]["steering_max_rad"] + 1e-6).all()
     assert result.diagnostics["collision_constraints_enabled"] is False
+
+
+def test_qp_max_iterations_one_runs_one_linearization_and_one_group_pass_per_vehicle(monkeypatch):
+    from highway_env.planner.diffusion.projection import joint_projector as projector_module
+
+    cfg = load_jtp_config()
+    cfg["projection"]["solver_method"] = "constrained_qp"
+    cfg["projection"]["max_iterations"] = 1
+    cfg["geometry"]["footprint"] = {"circle_offsets_m": [0.0], "circle_radius_m": 0.5}
+    calls = []
+
+    def fake_solve_groups(controls, groups, selected, rows, thresholds, metric, order, cfg,
+                          scale, trust, damping_multiplier, lower, upper,
+                          control_weights=None):
+        calls.append({"shape": tuple(controls.shape), "order": order})
+        return torch.zeros_like(controls), {"groups": [], "solver_method": "constrained_qp"}
+
+    monkeypatch.setattr(projector_module, "solve_groups", fake_solve_groups)
+    projector = JointTrajectoryProjector(StraightLineExecution(), cfg)
+    controls = torch.zeros(3, 40, 2)
+    context = _context(3, yaw_rate=[0.60, 0.0, 0.0])
+    roads = [_road(100.0), _road(100.0), _road(100.0)]
+
+    result = projector.project(controls, context, roads)
+
+    assert len(calls) == 1
+    assert calls[0]["shape"] == (1, 40, 2)
+    assert calls[0]["order"] == [["stability"], ["road", "curvature"], ["control_rate"]]
+    per_vehicle = result.diagnostics["per_vehicle"]
+    assert per_vehicle[0]["linearization_count"] == 1
+    assert len(per_vehicle[0]["projection"]) == 1
+    assert per_vehicle[1]["linearization_count"] == 0
+    assert per_vehicle[2]["linearization_count"] == 0
 
 
 def test_control_box_is_enforced_by_bounded_group_solver():
