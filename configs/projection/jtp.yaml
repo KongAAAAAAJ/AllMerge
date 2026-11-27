@@ -46,10 +46,6 @@ control:
   # Characteristic scales used to normalize control-space updates.
   trust_scale: [2.5, 0.08]
 
-collision:
-  # Clearance is shared by inter-truck and external-actor footprint checks.
-  clearance_m: 0.35
-
 optimization:
   lambda_u: 0.10
   trajectory_weights: [1.0, 1.0, 0.25]
@@ -74,15 +70,8 @@ projection:
     polishing: true
     adaptive_rho: true
     verbose: false
-  group_count: 3
-  # Provisional neutral importance; rank by q * (1 + initial max normalized excess).
-  priority_weights:
-    stability: 1.0
-    road: 1.0
-    curvature: 1.0
-    intertruck_collision: 1.0
-    external_collision: 1.0
-    control_rate: 1.0
+  # G1 stability, G2 road/curvature, G3 control-rate.
+  constraint_sampling_stride: 2
   protection_max_sweeps: 32
   protection_tolerance: 1.0e-6
   nondegradation_tolerance: 1.0e-6
@@ -90,17 +79,14 @@ projection:
   max_stalled_iterations: 3
   max_active_per_group:
     stability: 24
-    road: 30  # Global cap across all vehicles; candidates use the center circle every 2 steps.
+    road: 30
     curvature: 16
-    intertruck_collision: 64
-    external_collision: 64
     control_rate: 64
   constraint_tolerance: 1.0e-4
   residual_scales:
     stability: [0.5, 0.0872665, 0.0872665, 0.80]
     road_m: 0.5
     curvature_per_m2: 0.000625
-    collision_m: 0.5
     control_rate: [2.5, 0.12]
   violation_weight_beta: 2.0
   damping: 1.0e-4
@@ -133,6 +119,3 @@ runtime:
     forward_range_m: 180.0
     include_connected_road_segments: true
     search_lateral_range_m: 40.0
-  collision:
-    max_external_actors: 12
-    max_external_distance_m: 150.0

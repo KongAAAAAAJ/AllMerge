@@ -83,19 +83,26 @@ def _summarize_solver_diagnostics(frame_diagnostics):
         'initial_max_violation', 'final_max_violation', 'max_violation_reduction',
         'initial_violation_count', 'final_violation_count', 'violation_count_reduction',
         'initial_violation_l2', 'final_violation_l2', 'violation_l2_reduction')}
-        for name in ('stability', 'road', 'curvature', 'control', 'intertruck_collision', 'external_collision', 'control_rate')}
+        for name in ('stability', 'road', 'curvature', 'control', 'control_rate')}
     active_total = Counter(); active_selected = Counter(); active_truncated = Counter()
+    sampling_omitted = Counter(); topk_truncated = Counter()
     iterations = []; accepted_iterations = []
     linearization_ms = []; solver_ms = []; validation_ms = []; group_steps = []
     cache_builds = []; linearization_counts = []; validation_counts = []; methods = Counter()
+    sampled_rows = {name: [] for name in ('stability', 'road', 'curvature', 'control_rate')}
+    refinement_events = []
+    protection_failures = 0
+    protection_excesses = []
     internal_feasible = 0
     for frame in frame_diagnostics:
         diag = frame.get('active_set_diagnostics') or {}
         status = str(frame.get('projection_status', 'unknown'))
         status_counts[status] += 1
         internal_feasible += int(bool(frame.get('projector_constraints_satisfied', False)))
-        iterations.append(int(frame.get('iterations', 0)))
-        accepted_iterations.append(int(diag.get('accepted_iterations', 0)))
+        iterations.extend(int(value) for value in frame.get(
+            'iterations_by_vehicle', [frame.get('iterations', 0)]))
+        accepted_iterations.append(float(diag.get('mean_accepted_iterations_per_vehicle',
+                                                   diag.get('accepted_iterations', 0))))
         for name, values in (diag.get('group_progress') or {}).items():
             if name in group_values:
                 for key in group_values[name]:
@@ -105,29 +112,52 @@ def _summarize_solver_diagnostics(frame_diagnostics):
         linearization_counts.append(int(diag.get('linearization_count', 0)))
         validation_counts.append(int(diag.get('nonlinear_validation_count', 0)))
         methods[str(diag.get('solver_method', 'unknown'))] += 1
+        for vehicle_sampling in diag.get('constraint_sampling_by_vehicle', []):
+            for name in sampled_rows:
+                sampled_rows[name].append(int(vehicle_sampling['sampled_rows_by_family'][name]))
+            refinement_events.extend(vehicle_sampling.get('refinement_events', []))
         for step in diag.get('projection', []):
             linearization_ms.append(float(step.get('linearization_ms', 0)))
             solver_ms.append(float(step.get('grouped_solver_ms', 0)))
             validation_ms.append(float(step.get('nonlinear_validation_ms', 0)))
             group_steps.extend(step.get('groups', []))
+            for group in step.get('groups', []):
+                if 'protection_ok' in group:
+                    protection_failures += int(not bool(group['protection_ok']))
+                    protection_excesses.append(float(group.get('protection_peak', 0.0)))
+                else:
+                    excess = float(group.get('protection_linearized_regression_max', 0.0))
+                    protection_failures += int(excess > 1.0e-6)
+                    protection_excesses.append(excess)
             for name, value in (step.get('active_total_counts') or {}).items():
                 active_total[name] += int(value)
             for name, value in (step.get('active_counts') or {}).items():
                 active_selected[name] += int(value)
             for name, value in (step.get('active_truncated_counts') or {}).items():
                 active_truncated[name] += int(value)
+            for name, value in (step.get('active_sampling_omitted_counts') or {}).items():
+                sampling_omitted[name] += int(value)
+            for name, value in (step.get('active_topk_truncated_counts') or {}).items():
+                topk_truncated[name] += int(value)
 
     mean_progress = {name: {key: (float(np.mean(values)) if values else None)
                              for key, values in metrics.items()}
                      for name, metrics in group_values.items()}
     truncation = {}
-    for name in ('stability', 'road', 'curvature', 'control', 'intertruck_collision', 'external_collision', 'control_rate'):
+    temporal_omission = {}
+    for name in ('stability', 'road', 'curvature', 'control_rate'):
         total = int(active_total[name]); selected = int(active_selected[name])
         truncation[name] = {
-            'violated_constraints_considered': total,
+            'sparse_candidate_violations': max(total - int(sampling_omitted[name]), 0),
             'active_constraints_selected': selected,
-            'active_constraints_truncated': int(active_truncated[name]),
-            'truncation_rate_pct': (100.0 * active_truncated[name] / total) if total else 0.0,
+            'topk_truncated': int(topk_truncated[name]),
+            'topk_truncation_rate_pct': (100.0 * topk_truncated[name] / max(total - sampling_omitted[name], 1)),
+        }
+        temporal_omission[name] = {
+            'full_horizon_violations': total,
+            'omitted_by_temporal_sampling': int(sampling_omitted[name]),
+            'temporal_omission_rate_pct': (100.0 * sampling_omitted[name] / total) if total else 0.0,
+            'combined_omitted_by_sampling_and_topk': int(active_truncated[name]),
         }
     count = len(frame_diagnostics)
     return {
@@ -144,10 +174,18 @@ def _summarize_solver_diagnostics(frame_diagnostics):
         'mean_grouped_solver_ms_per_outer': float(np.mean(solver_ms)) if solver_ms else None,
         'mean_nonlinear_validation_ms_per_outer': float(np.mean(validation_ms)) if validation_ms else None,
         'num_group_solves': len(group_steps),
-        'num_group_protection_or_own_group_rejections': sum(not g.get('protection_ok', False) for g in group_steps),
-        'max_applied_linear_protection_excess': max((g.get('protection_peak', 0.) for g in group_steps), default=0.),
+        'num_group_protection_or_own_group_rejections': protection_failures,
+        'max_applied_linear_protection_excess': max(protection_excesses, default=0.),
         'mean_group_progress': mean_progress,
-        'active_set_truncation': truncation,
+        'active_set_topk_truncation': truncation,
+        'temporal_sampling_omission': temporal_omission,
+        'constraint_sampling_stride': (
+            int(frame_diagnostics[0].get('active_set_diagnostics', {}).get('constraint_sampling_stride', 0))
+            if frame_diagnostics else None),
+        'mean_sampled_rows_by_family': {
+            name: (float(np.mean(values)) if values else None)
+            for name, values in sampled_rows.items()},
+        'adaptive_refinement_event_count': len(refinement_events),
     }
 
 
@@ -186,7 +224,7 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
     # A returned JTP iterate is always evaluated, regardless of whether all
     # projector-internal constraints reached their tolerances. Exceptions are
     # surfaced and abort the evaluation; there is no nominal-trajectory fallback.
-    result = projector.project(nominal_u, context, roads, external_actors=actors)
+    result = projector.project(nominal_u, context, roads)
     _sync(device)
     latency_ms = (time.perf_counter() - start) * 1000.0
 
@@ -218,10 +256,15 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
         projected=candidate,
         deviation=deviation,
         projector_constraints_satisfied=bool(result.projector_constraints_satisfied),
+        projector_constraints_satisfied_by_vehicle=[
+            bool(item['final_metrics']['projector_constraints_satisfied'])
+            for item in result.diagnostics['per_vehicle']],
         projection_status=str(result.status),
+        projection_status_by_vehicle=list(result.diagnostics.get('status_by_vehicle', [])),
         projection_applied=projection_applied.detach().cpu().numpy(),
         projection_control_delta_norm=delta_norm.detach().cpu().numpy(),
         iterations=int(result.iterations),
+        iterations_by_vehicle=list(result.diagnostics.get('iterations_by_vehicle', [])),
         diagnostics=result.diagnostics or {},
         latency_ms=latency_ms,
         consistency_max_abs=difference,
@@ -245,11 +288,10 @@ def _evaluate_frame(job, model, projector, jtp_cfg, ev, device):
         raise RuntimeError(
             f'Invalid road frame {key}; every selected synchronized frame must produce a JTP result. '
             f'{error}') from exc
-    collision_runtime = jtp_cfg.get('runtime', {}).get('collision', {})
     actors=build_external_traffic(features,context,int(jtp_cfg['execution']['horizon_steps']),
                                   float(jtp_cfg['execution']['dt_s']),
-                                  max_actors=int(collision_runtime['max_external_actors']),
-                                  max_distance_m=float(collision_runtime['max_external_distance_m']))
+                                  max_actors=int(ev['max_external_actors']),
+                                  max_distance_m=float(ev['max_external_distance_m']))
     data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
                          seed=seed,episode=episode,frame=frame,
                          consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
@@ -358,11 +400,11 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     frame_joint=all(r['joint_feasible'] for r in (data['before'] if method=='Baseline' else data['after']))
                     record={**base,'method':method,**values,'joint_frame_feasible':frame_joint,
                             'deviation_m':None if method=='Baseline' else float(data['deviation'][i]),
-                            'projector_constraints_satisfied':None if method=='Baseline' else bool(data['projector_constraints_satisfied']),
+                            'projector_constraints_satisfied':None if method=='Baseline' else bool(data['projector_constraints_satisfied_by_vehicle'][i]),
                             'projection_applied':False if method=='Baseline' else bool(data['projection_applied'][i]),
                             'projection_control_delta_norm':0. if method=='Baseline' else float(data['projection_control_delta_norm'][i]),
-                            'projection_status':'not_run' if method=='Baseline' else data['projection_status'],
-                            'projection_iterations':0 if method=='Baseline' else data['iterations'],
+                            'projection_status':'not_run' if method=='Baseline' else data['projection_status_by_vehicle'][i],
+                            'projection_iterations':0 if method=='Baseline' else data['iterations_by_vehicle'][i],
                             'projection_latency_ms':0. if method=='Baseline' else data['latency_ms'],
                             'k2_consistency_max_abs':data['consistency_max_abs']}
                     if 'trajectory' in units:
@@ -371,6 +413,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'seed': seed, 'episode_index': episode, 'frame_index': frame,
                 'projection_status': data['projection_status'],
                 'projector_constraints_satisfied': data['projector_constraints_satisfied'],
+                'projector_constraints_satisfied_by_vehicle': data['projector_constraints_satisfied_by_vehicle'],
+                'iterations_by_vehicle': data['iterations_by_vehicle'],
                 'projection_applied_by_vehicle': data['projection_applied'].tolist(),
                 'control_delta_norm_by_vehicle': data['projection_control_delta_norm'].tolist(),
                 'iterations': data['iterations'],
@@ -459,15 +503,16 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                            'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
                            'projection_latency_scope': 'per-worker wall time; concurrent resource contention included' if workers > 1 else 'serial wall time'},
               'study':'TRACE Ablation 3: Joint Trajectory Projection',
-              'projection_method':'Priority-grouped non-degradation JTP (structured K2)',
+              'projection_method':'Independent single-vehicle 80-D priority-grouped JTP (structured K2)',
               'projection_solver_method':jtp_cfg['projection']['solver_method'],
+              'constraint_sampling_stride':jtp_cfg['projection']['constraint_sampling_stride'],
+              'vehicle_projection_scope':'independent_single_vehicle_80d',
               'projection_output_policy':'Always retain the returned JTP controls and Koopman rollout; no nominal-output fallback. Projection exceptions abort the evaluation.',
                             'projector_constraint_families':['full-horizon yaw-rate, sideslip, roll and LTR stability',
                                                'road-boundary clearance','trajectory curvature',
                                                'acceleration and steering magnitude',
-                                               'inter-truck and external-actor collision clearance',
                                                'acceleration and steering control rates'],
-              'collision_handling':'inter-truck and constant-velocity external-actor collision constraints are included in the JTP active-set projection and independently re-evaluated over the full horizon',
+              'collision_handling':'inter-truck and external-actor collisions are evaluated independently over the full horizon and do not enter JTP projection',
               'control_rate_handling':'JTP projection and solver diagnostics include previous-applied-control to step 1; independent evaluation and distributions use only prediction-internal differences at steps 2..H',
               'control_rate_evaluation_scope':'prediction_steps_2_to_H',
               'control_rate_first_step_excluded':True,

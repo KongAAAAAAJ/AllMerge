@@ -6,16 +6,7 @@ from highway_env.vehicle.koopman.models.base_model import rollout_pose
 
 
 def jacobian(fn, x):
-    try:
-        return torch.autograd.functional.jacobian(fn, x, vectorize=True)
-    except (RuntimeError, NotImplementedError):
-        return torch.autograd.functional.jacobian(fn, x, vectorize=False)
-
-
-def _block_rows(j):
-    # [N,T,D,2K] -> [N,T,D,2KN]. No cross-vehicle execution coupling.
-    n, t, d, k = j.shape
-    return torch.einsum('ntdk,nm->ntdmk', j, torch.eye(n, device=j.device, dtype=j.dtype)).reshape(n,t,d,n*k)
+    return torch.autograd.functional.jacobian(fn, x, vectorize=True)
 
 
 class K2StaticCache:
@@ -74,10 +65,10 @@ class K2StaticCache:
             jwx = c*jvx-s*jvy+(-vx*s-vy*c)*jyaw
             jwy = s*jvx+c*jvy+(vx*c-vy*s)*jyaw
             jp = torch.stack((integrate(jwx),integrate(jwy),jyaw),2)
-            return {'trajectory':_block_rows(jp), 'states':_block_rows(sx), 'ltr':_block_rows(outj[:,:,5:6]).squeeze(2)}
+            return {'trajectory':jp, 'states':sx, 'ltr':outj[:,:,5]}
 
 
-def shared_linearization(projector, controls, context, roads, current, selected, actors, cache, *, build_metric=True):
+def shared_linearization(projector, controls, context, roads, current, selected, cache, *, build_metric=True):
     """Use one output sensitivity and one frozen association per outer iterate."""
     active_names = [name for name, ids in selected.items() if ids.numel()]
     if not active_names and not build_metric:
@@ -101,7 +92,8 @@ def shared_linearization(projector, controls, context, roads, current, selected,
         def residual(v):
             dv = v - flat.detach()
             out = {key: current.rollout[key].detach() + (j.reshape(-1,flat.numel()) @ dv).reshape_as(current.rollout[key]) for key,j in outj.items()}
-            _, groups, _ = projector._constraint_groups(v.reshape_as(controls),context,roads,current.associations,actors,rollout=out)
+            _, groups, _ = projector._constraint_groups(
+                v.reshape_as(controls), context, roads, current.associations, rollout=out)
             return torch.cat([groups[name][selected[name]] for name in active_names])
         j = jacobian(residual, flat)
         sizes = [selected[name].numel() for name in active_names]

@@ -57,7 +57,7 @@ control:
     # Shared objective switch inherited by A0/A2 through `extends`.
     # goal_endpoint: original expert/safety/fuel/progress objective.
     # anchor_consistent: paired frozen-K2 Anchor execution consistency and relative fuel.
-    training_scheme: goal_endpoint
+    training_scheme: anchor_consistent
     anchor_consistency:
       # Applied only to valid modes other than the expert-assigned mode.
       # The expert-assigned mode is supervised by the expert trajectory loss.

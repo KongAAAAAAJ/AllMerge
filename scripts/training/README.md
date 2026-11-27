@@ -16,7 +16,7 @@ python scripts/training/run_diffusion.py ^
   --dataset-root outputs/expert_dataset/expert_trucksim_dual_100k ^
   --max-epochs 60 ^
   --auto-resume ^
-  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A0_anchor_assignment_new
+  --output-dir outputs/anchor_ablation/diffusion_ckpt/dual/A0_new
 
 ## Diffusion 训练命令 A1：
 python scripts/training/run_diffusion.py ^

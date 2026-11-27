@@ -1,48 +1,45 @@
-# JTP 约束汇总
+# JTP 约束定义与采样范围
 
-当前 JTP 包含六类参与优先级分组的状态约束，以及一类固定控制范围硬约束。控制范围不参与优先级评分或活动集截断，并在每个 LS/QP 子问题中共同施加。下表对应 `configs/projection/jtp.yaml` 的默认配置；运行时若覆盖配置，以实际加载值为准。
+JTP 对三辆受控车辆分别执行独立投影。每辆车优化自己的 40 个加速度和前轮转角控制点，共 80 个优化变量。投影器不构建编队内部或外部交通参与者碰撞约束；碰撞指标由 `evaluation/ablation/jtp/metrics.py` 独立计算。
 
-记 `mu_e = max(road_mu, 0.05)`，`m = max(payload_kg, 0)`（kg），`clip(x, lo, hi)` 为区间截断。`H = 40`、`dt = 0.1 s`，默认预测时域为 4 s。
+预测时域为 `H=40`、`dt=0.1 s`。QP/LS 的状态约束候选点由 `projection.constraint_sampling_stride` 控制。`stride=1/2/4` 分别对应初始 40/20/10 个预测时刻。采样时刻为 `stride, 2*stride, ...`，并始终包含终点 `H`。Stage 2 仍在完整 40 个预测时刻验证所有非线性约束。
 
-| 约束族 / 类型 | 约束量 | 下限 | 上限 | 默认参数、计算方式及适用范围 | 实现位置 |
-| --- | --- | --- | --- | --- | --- |
-| 稳定性 `stability` | 横摆角速度 `r`（rad/s） | `-r_max` | `+r_max` | `r_max = 0.85 * mu_e * 9.81 / max(abs(vx), 3.0)`；随各预测步纵向速度及道路附着系数变化；检查未来 `t = 1…H`。例如 `mu = 0.8, vx = 20 m/s` 时为约 `±0.334 rad/s`。 | [constraints.py](constraints.py)：`stability_limits`、`stability_residual` |
-| 稳定性 `stability` | 侧偏角 `beta = atan2(vy, vx)` | `-beta_max` | `+beta_max` | `beta_max = 5° * clip(sqrt(mu_e / 0.8), 0.65, 1.15)`；限值幅度为 `3.25°…5.75°`；`mu = 0.8` 时为 `±5°`；检查未来 `t = 1…H`。代码内部使用 rad。 | [constraints.py](constraints.py)：`stability_limits`、`stability_residual` |
-| 稳定性 `stability` | 侧倾角 `phi` | `-phi_max` | `+phi_max` | `phi_max = 5° * clip(sqrt(mu_e / 0.8), 0.55, 1.10) / (1 + 0.20 * m / 10000)`；载荷越大限值越小。例如 `mu = 0.8, m = 10000 kg` 时为约 `±4.17°`；检查未来 `t = 1…H`。代码内部使用 rad。 | [constraints.py](constraints.py)：`stability_limits`、`stability_residual` |
-| 稳定性 `stability` | 载荷转移率 `LTR`（无量纲） | `-0.80` | `+0.80` | 固定双侧限值；检查未来 `t = 1…H` 的预测 LTR。 | [constraints.py](constraints.py)：`stability_residual` |
-| 道路 `road` | 每个车辆轮廓圆心相对关联道路中心线的有符号横向偏移 `d`（m，左正右负） | `-w_R + 1.80` | `w_L - 1.80` | `w_L`、`w_R` 为在线道路几何提供、沿关联线段插值得到的左右半宽。车身纵向圆心偏移为 `[-3, -1.5, 0, 1.5, 3] m`，各圆半径 `1.45 m`，额外净空 `0.35 m`，合计边界距离 `1.80 m`；检查未来 `t = 1…H` 的全部 5 个圆心。 | [geometry.py](geometry.py)：`footprint_circle_centers`、`road_corridor_residual` |
-| 曲率 `curvature` | 离散轨迹曲率 `kappa`（m⁻¹） | `-0.025` | `+0.025` | `kappa = wrap_angle(psi[t+1] - psi[t]) / max(norm(p[t+1] - p[t]), 1e-4 m)`，`t = 1…H-1`；实现残差为 `kappa² - 0.025²`。对应曲率半径至少 `40 m`（非零曲率时）。 | [geometry.py](geometry.py)：`curvature_residual` |
-| 固定硬约束 `control` | 纵向加速度 `a_x`（m/s²） | `-4.0` | `+2.5` | 对所有车辆、所有控制节点施加幅值硬约束；默认控制节点数 `K = H = 40`。每个优先级组 LS/QP 子问题均满足该范围。 | [joint_projector.py](joint_projector.py)：`_constraint_groups`；[grouped_solver.py](grouped_solver.py)：`solve_groups` |
-| 固定硬约束 `control` | 前轮转向角 `delta_f`（rad） | `-0.08`（约 `-4.58°`） | `+0.08`（约 `+4.58°`） | 对所有车辆、所有控制节点施加幅值硬约束；约束的是前轮转向角，不参与状态约束优先级排序。 | [joint_projector.py](joint_projector.py)：`_constraint_groups`；[grouped_solver.py](grouped_solver.py)：`solve_groups` |
+| 优先级 | 约束族 | 约束量 | 采样范围 | 求解处理 |
+| --- | --- | --- | --- | --- |
+| G1 | 稳定性 `stability` | 横摆角速度、质心侧偏角、侧倾角、LTR | 按 `constraint_sampling_stride` 采样 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| G2 | 道路 `road` | 车身五个覆盖圆心的左右道路边界距离 | 按 `constraint_sampling_stride` 采样，每个采样时刻保留全部圆心和两侧边界 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| G2 | 曲率 `curvature` | 相邻未来轨迹点的离散曲率 | 对应稀疏采样时刻的曲率区间 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| G3 | 控制连续性 `control_rate` | 加速度变化率、前轮转角变化率 | 完整 40 个控制间隔 | DLS 活跃集筛选；QP 使用全部 40 步 |
+| 硬约束 | 控制幅值 `control` | 加速度、前轮转角上下界 | 完整 40 个控制点 | LS 与 QP 均作为硬边界施加 |
 
-| 编队内部碰撞 `intertruck_collision` | 任意两辆车的覆盖圆圆心距离 | `2*1.45+0.35 m` | 无 | 对同步未来时刻全部跨车圆对检查。 | `geometry.py` |
-| 外部碰撞 `external_collision` | 主车覆盖圆与外部车辆覆盖圆距离 | `1.45+r_actor+0.35 m` | 无 | 外部车辆预测轨迹固定；圆半径依外车宽度确定。 | `geometry.py` |
-| 控制变化率 `control_rate` | 加速度变化率、前轮转角变化率 | `-2.5 m/s³`, `-0.12 rad/s` | `2.5 m/s³`, `0.12 rad/s` | 0.1 s 差分包含上一时刻实际控制。 | `constraints.py` |
+## 稳定性约束
 
-物理阈值不因 Stage 1 求解器改变。稳定性、道路、曲率和碰撞等状态约束使用统一的归一化残差容差；控制变化率保留 SI 容差，并在活动约束筛选、LS 残差构造和非线性评价中使用同一容差映射。控制范围硬约束不使用正容差。Stage 3 的道路 LS 活动候选采用中心圆心每两个 step 采样并设置全局 Top-K=30；完整道路非线性验证仍覆盖五圆心和全部40步。论文独立评价器仍使用其原配置。
+稳定性约束在每个被采样时刻检查四项指标的正负边界：
 
-## Stage 2 非线性接受规则
+- 横摆角速度 `r`：`r_max = yaw_rate_safety_factor * mu * g / max(abs(vx), minimum_speed)`。
+- 质心侧偏角 `beta = atan2(vy, vx)`：限值由道路附着系数条件化。
+- 侧倾角 `phi`：限值由道路附着系数和载荷条件化。
+- 轮胎载荷转移率 `LTR`：使用配置的双侧阈值。
 
-对每个状态约束族 `f`，使用统一容差张量 `tau_f` 定义逐行超容差违反程度：
+## 道路与曲率约束
 
-`v_f = relu(g_f - tau_f)`。
+道路边界残差在每个被采样时刻使用完整的五个车身覆盖圆心 `[-3.0, -1.5, 0, 1.5, 3.0] m`，每个圆心检查左右边界。道路关联在一次 Backtracking 内冻结，候选被接受后重新计算关联。
 
-对每个优先级组 `G_k`，候选控制序列必须同时满足：
+曲率残差由相邻未来轨迹点计算。对采样时刻 `t>=2`，使用其对应的离散曲率区间；完整时域验收仍检查全部 `H-1` 个曲率区间。
 
-1. 该组所有约束行均不退化：`v_new[f,j] <= v_old[f,j] + nondegradation_tolerance`；
-2. 该组违反约束数量不增加：`count(v_new[f] > 0) <= count(v_old[f] > 0)`，其中数量在该优先级组内跨全部约束族累计；
-3. 至少一个优先级组出现单条约束的有效改善，或违反约束数量减少。
+## 控制连续性与硬约束
 
-固定控制范围硬约束始终单独判定。若名义控制量原本超出控制范围，允许接受硬约束恢复，但仍要求所有状态约束行不退化且各组违反数量不增加。
+控制变化率约束始终覆盖完整 40 个时刻，并包含上一时刻实际施加的控制到第一个预测控制点的差分。加速度和前轮转角幅值约束在全部控制点上作为固定硬边界，不参与 G1/G2/G3 排序。
 
-一次 Backtracking line search 内冻结最近道路关联，保证投影前后道路约束行逐一对应。候选被接受后，使用已计算的 K2 rollout 重新计算最近道路关联，供下一次外层迭代使用。
+## 稀疏采样的自适应加密
 
+每轮求解前检查完整非线性残差。若 G1/G2 在当前采样集合之外存在违反，则将相应预测时刻加入采样集合。若 Backtracking 候选在未采样时刻引入违反，也将该时刻加入下一轮采样集合。新增时刻不进行 Top-K 截断。DLS 对当前采样候选继续执行原有活跃集筛选；QP 将当前稀疏采样集合中的全部行纳入 Full-Group QP。
 
-## Stage 3 道路活动集计算范围
+## 固定优先级与求解器
 
-道路物理约束的完整定义和非线性评价分辨率不变：每辆车仍在全部 40 个未来预测步、全部 5 个车身轮廓圆心处检查左右道路边界，共 400 条道路残差。为降低 LS Jacobian 的活动行数，仅从每辆车未来每两个 step 的中心圆心（纵向偏移 0 m）生成活动候选，每个时刻对应左右两条边界约束，因此每辆车 40 条候选、三辆车最多 120 条。`projection.max_active_per_group.road=30` 是跨全部受控车辆的全局 Top-K 上限。未采样道路行及超过 Top-K 的道路行仍完整参与 Stage 2 逐约束非退化接受、最终可行性统计和独立论文评价。编队内部碰撞与外部碰撞约束的几何采样及活动集保持不变。
+优先级固定为 G1 稳定性、G2 道路与曲率、G3 控制连续性。`projection.solver_method` 保留两种取值：
 
+- `damped_least_squares`：保留阻尼加权最小二乘、有界活动集、Top-K 活跃约束、Trust Region、度量半空间跨组保护及 Backtracking。
+- `constrained_qp`：使用 OSQP Full-Group QP，不进行活跃集 Top-K 截断；保留统一松弛容差、跨组保护和控制幅值硬约束，不启用 Trust Region。
 
-## Constrained QP 后端
-
-QP 后端将控制量上下界作为硬约束。对于当前优先级组中选中的正超容差残差 `r`，引入状态松弛变量 `s`：`r + J d <= s`、`0 <= s <= r`。状态松弛同时具有正线性惩罚和正二次惩罚。对于前序组的全部已选活动约束行，构造跨组保护 `H_prev d <= xi`，并约束 `0 <= xi <= protection_tolerance`；保护松弛同样具有正线性和二次惩罚。QP 唯一的主优化目标是控制修正幅度，不包含状态违反残差平方项，也不设置组级最低改善比例。QP 不使用 Trust Region，仍通过原有 Backtracking 和完整非线性 Stage-2 接受条件验证候选。
+两种求解器均使用 Stage 2 完整 40 步非线性验收。碰撞只用于独立评价，不参与投影。

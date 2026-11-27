@@ -4,9 +4,11 @@ python evaluation/ablation/run_anchor.py --stage anchors --methods A0 A1 A2
 开环 + 闭环指标：
 python evaluation/ablation/run_anchor.py ^
   --stage all ^
-  --methods A0 ^
+  --methods A0 A1 A2 ^
   --split test ^
-  --checkpoint-a0 outputs/anchor_ablation/diffusion_ckpt/dual/A0/best_through_epoch_0049.pt ^
+  --checkpoint-a0 outputs/anchor_ablation/diffusion_ckpt/dual/A0_anchor_assignment_new/best_through_epoch_0045.pt ^
+  --checkpoint-a1 outputs/anchor_ablation/diffusion_ckpt/dual/A1_anchor_assignment_new/best_through_epoch_0045.pt ^
+  --checkpoint-a2 outputs/anchor_ablation/diffusion_ckpt/dual/A2_anchor_assignment_new/best_through_epoch_0045.pt ^
   --jtp-config configs/projection/jtp.yaml ^
   --num-workers 0
 

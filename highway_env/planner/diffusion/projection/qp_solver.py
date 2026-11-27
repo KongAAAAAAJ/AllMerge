@@ -148,7 +148,7 @@ def _protection_bounds(base_residual, cumulative_change, protection_tolerance,
     return bound, slack_upper
 
 
-def solve_groups_qp(controls, groups, rows, thresholds, order, cfg,
+def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
                     control_lower, control_upper, control_weights):
     """Solve hard-box restoration and all rows in each of the three priority groups."""
     flat = controls.detach().reshape(-1)
@@ -206,7 +206,8 @@ def solve_groups_qp(controls, groups, rows, thresholds, order, cfg,
                           for name in use]
         jac = np.concatenate(jacobian_parts, axis=0)
         base_residual_parts = [
-            (groups[name] - thresholds[name]).detach().to(device="cpu", dtype=torch.float64).numpy()
+            (groups[name][selected[name]] - thresholds[name][selected[name]])
+            .detach().to(device="cpu", dtype=torch.float64).numpy()
             for name in use
         ]
         base_residual = np.concatenate(base_residual_parts)

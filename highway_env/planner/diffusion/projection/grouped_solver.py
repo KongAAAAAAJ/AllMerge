@@ -4,18 +4,11 @@ from __future__ import annotations
 import torch
 
 
-def build_priority_groups(groups, cfg, thresholds):
-    """Rank state-constraint families; fixed control bounds are not ranked."""
-    q = cfg["priority_weights"]
-    scores = {}
-    for name, weight in q.items():
-        excess = (groups[name] - thresholds[name]).clamp_min(0.0)
-        maximum = float(excess.max()) if excess.numel() else 0.0
-        scores[name] = float(weight) * (1.0 + maximum)
-    ordered = sorted(scores, key=lambda name: -scores[name])
-    count = int(cfg["group_count"])
-    return [ordered[i * len(ordered) // count:(i + 1) * len(ordered) // count]
-            for i in range(count)], scores
+def build_priority_groups(groups, cfg=None, thresholds=None):
+    """Return the fixed JTP priority order: stability, geometry, control rate."""
+    order = [["stability"], ["road", "curvature"], ["control_rate"]]
+    scores = {"G1_stability": 1.0, "G2_road_curvature": 2.0, "G3_control_rate": 3.0}
+    return order, scores
 
 
 def group_maxima(metrics, priority_groups):
@@ -313,7 +306,7 @@ def solve_groups(controls, groups, selected, rows, thresholds, metric, order, cf
     if cfg["solver_method"] == "constrained_qp":
         from .qp_solver import solve_groups_qp
         return solve_groups_qp(
-            controls, groups, rows, thresholds, order, cfg,
+            controls, groups, selected, rows, thresholds, order, cfg,
             control_lower, control_upper, control_weights)
     return _solve_groups_ls(
         controls, groups, selected, rows, thresholds, metric, order, cfg,

@@ -84,10 +84,6 @@ def validate_jtp_config(cfg: dict) -> None:
     if not footprint.get("circle_offsets_m") or float(footprint.get("circle_radius_m", 0)) <= 0:
         raise ValueError("geometry.footprint requires circle_offsets_m and positive circle_radius_m")
 
-    collision = cfg.get("collision")
-    if not isinstance(collision, dict) or float(collision.get("clearance_m", -1)) < 0:
-        raise ValueError("collision.clearance_m must be nonnegative")
-
     control = cfg["control"]
     if float(control.get("acceleration_min_mps2", 0)) >= float(control.get("acceleration_max_mps2", 0)):
         raise ValueError("Invalid acceleration bounds")
@@ -114,11 +110,8 @@ def validate_jtp_config(cfg: dict) -> None:
         raise ValueError("Invalid projection iteration limits")
     active = proj.get("max_active_per_group", {})
     active_defaults = {
-        "stability": 24, "road": 24, "curvature": 16,
-        "intertruck_collision": 64, "external_collision": 64, "control_rate": 64,
+        "stability": 24, "road": 30, "curvature": 16, "control_rate": 64,
     }
-    # Partial in-memory overrides remain backward compatible with older
-    # experiment scripts that only set the original four active-set caps.
     for key, default in active_defaults.items():
         active.setdefault(key, default)
         if int(active.get(key, 0)) < 1:
@@ -126,16 +119,11 @@ def validate_jtp_config(cfg: dict) -> None:
     scales = proj.get("residual_scales", {})
     if len(scales.get("stability", [])) != 4 or min(map(float, scales["stability"])) <= 0:
         raise ValueError("projection.residual_scales.stability must contain four positive values")
-    for key in ("road_m", "curvature_per_m2", "collision_m"):
+    for key in ("road_m", "curvature_per_m2"):
         if float(scales.get(key, 0)) <= 0:
             raise ValueError(f"projection.residual_scales.{key} must be positive")
     if len(scales.get("control_rate", [])) != 2 or min(map(float, scales["control_rate"])) <= 0:
         raise ValueError("projection.residual_scales.control_rate must contain two positive values")
-    runtime_collision = cfg["runtime"].get("collision", {})
-    if int(runtime_collision.get("max_external_actors", 0)) < 0:
-        raise ValueError("runtime.collision.max_external_actors must be nonnegative")
-    if float(runtime_collision.get("max_external_distance_m", 0)) <= 0:
-        raise ValueError("runtime.collision.max_external_distance_m must be positive")
     if float(proj.get("change_tolerance", 0)) <= 0:
         raise ValueError("projection.change_tolerance must be positive")
     solver_method = proj.get("solver_method")
@@ -177,11 +165,9 @@ def validate_jtp_config(cfg: dict) -> None:
             raise ValueError("projection.qp.eps_abs and eps_rel must be positive and finite")
         if int(qp.get("max_iter", 0)) < 1:
             raise ValueError("projection.qp.max_iter must be positive")
-    if int(proj.get("group_count", 0)) not in (2, 3):
-        raise ValueError("projection.group_count must be 2 or 3")
-    q = proj.get("priority_weights", {})
-    if set(q) != set(active_defaults) or any(not math.isfinite(float(v)) or float(v)<=0 for v in q.values()):
-        raise ValueError("priority_weights must contain positive finite weights for all state-constraint families")
+    stride = int(proj.get("constraint_sampling_stride", 0))
+    if stride < 1 or stride > int(execution["horizon_steps"]):
+        raise ValueError("projection.constraint_sampling_stride must be within the prediction horizon")
     if "control" in active:
         raise ValueError("Control range is a fixed hard constraint and must not have a priority active-set cap")
     if "active_tolerance" in proj:

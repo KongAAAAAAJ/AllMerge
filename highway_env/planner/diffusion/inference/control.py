@@ -198,7 +198,6 @@ class ControlDiffusionRuntime:
                 nominal_controls=nominal_control,
                 context=context,
                 road_geometry=jtp_inputs['road_geometry'],
-                external_actors=jtp_inputs.get('external_actors', ()),
             )
             self.last_jtp_latency_ms = (time.perf_counter() - jtp_start) * 1000.0
             jtp_status = str(projected.status)
