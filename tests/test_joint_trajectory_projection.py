@@ -229,9 +229,9 @@ def test_three_vehicles_are_projected_independently_in_80d_spaces():
     single_result = projector.project(controls[:1], {key: value[:1] for key, value in context.items()}, roads[:1])
     assert batch_result.controls.shape == (3, 40, 2)
     assert len(batch_result.diagnostics["per_vehicle"]) == 3
-    assert len(batch_result.diagnostics["projection_latency_ms_by_vehicle"]) == 3
-    assert all(value >= 0.0 for value in batch_result.diagnostics["projection_latency_ms_by_vehicle"])
-    assert all("projection_latency_ms" in item for item in batch_result.diagnostics["per_vehicle"])
+    assert len(batch_result.diagnostics["optimization_time_ms_by_vehicle"]) == 3
+    assert all(value >= 0.0 for value in batch_result.diagnostics["optimization_time_ms_by_vehicle"])
+    assert all("optimization_time_ms" in item for item in batch_result.diagnostics["per_vehicle"])
     assert batch_result.diagnostics["iterations_by_vehicle"][0] > 0
     for item in batch_result.diagnostics["per_vehicle"]:
         for step in item["projection"]:
@@ -363,3 +363,22 @@ def test_projector_constraint_groups_do_not_contain_collision_families():
         evaluated = projector._evaluate(torch.zeros(1, 40, 2), _context(), [_road()])
     assert set(evaluated.groups) == {
         "stability", "road", "curvature", "control", "control_rate"}
+
+
+
+def test_optimization_time_sums_iterations_once_per_vehicle(monkeypatch):
+    projector = JointTrajectoryProjector(StraightLineExecution(), _ls_config())
+    original = projector._project_single
+    samples = iter([[], [{"solver_solve_time_total_s": .002}],
+                       [{"solver_solve_time_total_s": .003},
+                        {"solver_solve_time_total_s": .005}]])
+
+    def project_single(*args, **kwargs):
+        result = original(*args, **kwargs)
+        result.diagnostics["projection"] = next(samples)
+        return result
+
+    monkeypatch.setattr(projector, "_project_single", project_single)
+    result = projector.project(torch.zeros(3, 40, 2), _context(3), [_road()] * 3)
+    np.testing.assert_allclose(result.diagnostics["optimization_time_ms_by_vehicle"], [0., 2., 8.])
+    np.testing.assert_allclose([v["optimization_time_ms"] for v in result.diagnostics["per_vehicle"]], [0., 2., 8.])

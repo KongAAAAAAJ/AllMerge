@@ -42,11 +42,6 @@ def _sha256(path):
     return h.hexdigest()
 
 
-def _sync(device):
-    if device.type == 'cuda':
-        torch.cuda.synchronize(device)
-
-
 def _seed_for_frame(seed, episode, frame):
     payload = f'JTP:{seed}:{episode}:{frame}'.encode()
     return int.from_bytes(hashlib.sha256(payload).digest()[:8],'big') % (2**63-1)
@@ -219,16 +214,18 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
             nominal_u, nominal_rollout['trajectory'], nominal_rollout['states'],
             nominal_rollout['ltr'], context, roads, actors, cfg, ev_cfg)
 
-    _sync(device)
-    start = time.perf_counter()
     # A returned JTP iterate is always evaluated, regardless of whether all
     # projector-internal constraints reached their tolerances. Exceptions are
     # surfaced and abort the evaluation; there is no nominal-trajectory fallback.
-    result = projector.project(nominal_u, context, roads)
-    _sync(device)
-    project_call_wall_time_ms = (time.perf_counter() - start) * 1000.0
-    projection_latency_ms_by_vehicle = np.asarray(
-        result.diagnostics["projection_latency_ms_by_vehicle"], dtype=np.float64)
+    result = projector.project(
+        nominal_u, context, roads,
+        diagnostic_context={
+            "seed": int(seed),
+            "episode": int(episode),
+            "frame": int(frame),
+        })
+    optimization_time_ms_by_vehicle = np.asarray(
+        result.diagnostics["optimization_time_ms_by_vehicle"], dtype=np.float64)
 
     projected_u = result.controls.detach()
     candidate = {
@@ -268,8 +265,7 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
         iterations=int(result.iterations),
         iterations_by_vehicle=list(result.diagnostics.get('iterations_by_vehicle', [])),
         diagnostics=result.diagnostics or {},
-        projection_latency_ms_by_vehicle=projection_latency_ms_by_vehicle,
-        project_call_wall_time_ms=project_call_wall_time_ms,
+        optimization_time_ms_by_vehicle=optimization_time_ms_by_vehicle,
         consistency_max_abs=difference,
     )
 
@@ -353,7 +349,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         raise ValueError('Diffusion/JTP dt mismatch')
     model.to(device if workers == 1 else 'cpu').eval()
     projector=JointTrajectoryProjector(model.vehicle_model,config=jtp_path) if workers == 1 else None
-    frames,data_manifest=selected_frames(root,split,num_frames=num_frames,sample_seed=sample_seed)
+    frames,data_manifest=selected_frames(root,split,num_frames=num_frames,sample_seed=sample_seed,
+                                         jtp_config=jtp_cfg,tolerances=ev["tolerances"])
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
     best_cases = {}
@@ -409,7 +406,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                             'projection_control_delta_norm':0. if method=='Baseline' else float(data['projection_control_delta_norm'][i]),
                             'projection_status':'not_run' if method=='Baseline' else data['projection_status_by_vehicle'][i],
                             'projection_iterations':0 if method=='Baseline' else data['iterations_by_vehicle'][i],
-                            'projection_latency_ms':0. if method=='Baseline' else float(data['projection_latency_ms_by_vehicle'][i]),
+                            'optimization_time_ms':0. if method=='Baseline' else float(data['optimization_time_ms_by_vehicle'][i]),
                             'k2_consistency_max_abs':data['consistency_max_abs']}
                     if 'trajectory' in units:
                         rows.append(record)
@@ -422,10 +419,9 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'projection_applied_by_vehicle': data['projection_applied'].tolist(),
                 'control_delta_norm_by_vehicle': data['projection_control_delta_norm'].tolist(),
                 'iterations': data['iterations'],
-                'projection_latency_ms_by_vehicle': data['projection_latency_ms_by_vehicle'].tolist(),
-                'mean_vehicle_projection_latency_ms': float(np.mean(data['projection_latency_ms_by_vehicle'])),
-                'max_vehicle_projection_latency_ms': float(np.max(data['projection_latency_ms_by_vehicle'])),
-                'project_call_wall_time_ms': data['project_call_wall_time_ms'],
+                'optimization_time_ms_by_vehicle': data['optimization_time_ms_by_vehicle'].tolist(),
+                'mean_vehicle_optimization_time_ms': float(np.mean(data['optimization_time_ms_by_vehicle'])),
+                'max_vehicle_optimization_time_ms': float(np.max(data['optimization_time_ms_by_vehicle'])),
                 'rollout_consistency': data['consistency_max_abs'],
                 'active_set_diagnostics': data['diagnostics'],
             })
@@ -527,8 +523,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
                            'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
                            'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
-                           'projection_latency_scope': 'single-vehicle _project_single wall time, measured separately for each controlled vehicle with CUDA synchronization; the serial three-vehicle project-call wall time is recorded separately and excluded from per-vehicle latency summaries'},
-               'projection_latency_definition': 'Per-vehicle wall-clock duration of one _project_single call, including that vehicle initial evaluation, K2 linearization, priority-group solver pass(es), Backtracking, and final diagnostics; CUDA is synchronized at both timing boundaries.',
+                           'optimization_time_scope': 'per-vehicle sum of OSQP solver_solve_time_s across all iterations and QPs, including control restoration and failed or timed-out solves'},
+               'optimization_time_definition': 'OSQP solve time summed per vehicle and converted to milliseconds; excludes linearization, QP construction, data transfer, backtracking and diagnostics. The 50 ms limit applies to each QP, not the cumulative time.',
               'study':'TRACE Ablation 3: Joint Trajectory Projection',
               'projection_method':'Independent single-vehicle 80-D priority-grouped JTP (structured K2)',
               'projection_solver_method':jtp_cfg['projection']['solver_method'],
@@ -552,7 +548,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
               'paper_metrics':['joint feasibility rate','single-vehicle feasibility rate','geometric violation rate','stability violation rate','mean trajectory deviation'],
               'supplementary_metrics':['collision violation rates','control magnitude/rate violation rates',
                                        'normalized constraint-excess magnitudes','projection applied rate',
-                                       'normalized control correction','projection latency','projection iterations'],
+                                       'normalized control correction','optimization time','projection iterations'],
               'evaluation_scope':'offline expert-data open loop, not TruckSim closed loop',
               'dataset':data_manifest,'evaluated_seed_count':len(seed_values),
               'included_frames_across_seeds':len(frame_diagnostics),

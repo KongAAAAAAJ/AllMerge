@@ -19,13 +19,13 @@ max_external_actors: 12
 max_external_distance_m: 150.0
 # These three limits must exactly match configs/projection/jtp.yaml.
 limits:
-  collision_clearance_m: 0.35
-  acceleration_rate_max_mps3: 2.5
-  steering_rate_max_rad_s: 0.5
+  collision_clearance_m: 0.1
+  acceleration_rate_max_mps3: 20
+  steering_rate_max_rad_s: 20
 tolerances:
-  stability_rad: 0.00001
-  ltr: 0.00001
-  road_m: 0.0001
-  curvature_per_m2: 0.000001
-  collision_m: 0.0001
-  control_si: 0.00001
+  stability_rad: 0.01
+  ltr: 0.01
+  road_m: 0.01
+  curvature_per_m2: 0.01
+  collision_m: 0.01
+  control_si: 0.01

@@ -417,7 +417,8 @@ class JointTrajectoryProjector:
         }
 
     def project(self, nominal_controls: torch.Tensor, context: dict,
-                road_geometry: RoadGeometry | list[RoadGeometry]) -> JTPResult:
+                road_geometry: RoadGeometry | list[RoadGeometry], *,
+                diagnostic_context: dict | None = None) -> JTPResult:
         """Project each controlled vehicle independently in its own 80-D space."""
         if (not torch.is_tensor(nominal_controls) or nominal_controls.ndim != 3
                 or nominal_controls.shape[-1] != 2):
@@ -432,23 +433,25 @@ class JointTrajectoryProjector:
             context, n=n, device=nominal_controls.device, dtype=nominal_controls.dtype)
         roads = self._road_list(
             road_geometry, n, device=nominal_controls.device, dtype=nominal_controls.dtype)
-        def synchronized_clock():
-            if nominal_controls.is_cuda:
-                torch.cuda.synchronize(nominal_controls.device)
-            return perf_counter()
-
         results = []
         for vehicle_index in range(n):
             vehicle_context = {
                 key: value[vehicle_index:vehicle_index + 1]
                 for key, value in full_context.items()
             }
-            start = synchronized_clock()
+            vehicle_diagnostic_context = dict(diagnostic_context or {})
+            vehicle_diagnostic_context.update({
+                "vehicle_index": vehicle_index,
+                "horizon_steps": self.horizon,
+                "footprint_circle_count": len(
+                    self.cfg["geometry"]["footprint"]["circle_offsets_m"]),
+            })
             result = self._project_single(
                 nominal_controls[vehicle_index:vehicle_index + 1],
-                vehicle_context, [roads[vehicle_index]])
-            result.diagnostics["projection_latency_ms"] = (
-                synchronized_clock() - start) * 1000.0
+                vehicle_context, [roads[vehicle_index]],
+                diagnostic_context=vehicle_diagnostic_context)
+            result.diagnostics["optimization_time_ms"] = 1000.0 * sum(
+                step["solver_solve_time_total_s"] for step in result.diagnostics["projection"])
             results.append(result)
 
         controls = torch.cat([result.controls for result in results], dim=0)
@@ -530,10 +533,10 @@ class JointTrajectoryProjector:
             "nonlinear_validation_count": sum(item["nonlinear_validation_count"] for item in diagnostics_by_vehicle),
             "constraint_sampling_stride": int(solver_cfg["constraint_sampling_stride"]),
             "constraint_sampling_by_vehicle": [item["constraint_sampling"] for item in diagnostics_by_vehicle],
-            "projection_latency_ms_by_vehicle": [
-                float(item["projection_latency_ms"]) for item in diagnostics_by_vehicle],
-            "mean_vehicle_projection_latency_ms": sum(
-                float(item["projection_latency_ms"]) for item in diagnostics_by_vehicle) / n,
+            "optimization_time_ms_by_vehicle": [
+                float(item["optimization_time_ms"]) for item in diagnostics_by_vehicle],
+            "mean_vehicle_optimization_time_ms": sum(
+                float(item["optimization_time_ms"]) for item in diagnostics_by_vehicle) / n,
             "control_rate_constraints_enabled": True,
             "collision_constraints_enabled": False,
             "acceptance_policy": "hard_control_box_plus_full_horizon_per_constraint_non_degradation_and_group_violation_count_nonincrease",
@@ -549,7 +552,7 @@ class JointTrajectoryProjector:
             iterations=max(result.iterations for result in results),
             diagnostics=diagnostics)
 
-    def _project_single(self, nominal_controls, context, roads):
+    def _project_single(self, nominal_controls, context, roads, *, diagnostic_context=None):
         nominal = nominal_controls.detach().clone()
         controls = nominal.clone()
         proj_cfg = self.cfg["projection"]
@@ -624,6 +627,7 @@ class JointTrajectoryProjector:
             linearizations += 1
             diag = {
                 "iteration": iteration,
+                "solver_solve_time_total_s": 0.0,
                 **active_diagnostics,
                 "hard_control_violation_count_before": current.metrics["control_box_violation_count"],
                 "linearization_method": method,
@@ -639,10 +643,20 @@ class JointTrajectoryProjector:
                 delta, info = None, {"reason": "nonfinite_constraint_jacobian"}
             else:
                 with torch.no_grad():
+                    solve_kwargs = {
+                        "control_weights": self.cfg["optimization"]["control_weights"]
+                    }
+                    if (not use_ls
+                            and proj_cfg["qp"]["diagnostics"]["save_primal_infeasible"]):
+                        solve_kwargs["diagnostic_context"] = {
+                            **(diagnostic_context or {}),
+                            "iteration": iteration,
+                            "group_order": [list(group) for group in order],
+                        }
                     delta, info = solve_groups(
                         controls, current.groups, selected, rows, thresholds, metric, order,
                         proj_cfg, scale, trust, damping_scale, lower, upper,
-                        control_weights=self.cfg["optimization"]["control_weights"])
+                        **solve_kwargs)
             diag.update(info)
             diag["grouped_solver_ms"] = (clock() - tick) * 1000.0
             diag["priority_group_maxima_before"] = group_maxima(current.metrics, order)

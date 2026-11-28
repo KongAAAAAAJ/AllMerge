@@ -39,7 +39,7 @@ class ControlledVehicle(Vehicle):
     KP_A = 1 / TAU_ACC
     KP_HEADING = 1 / TAU_HEADING
     KP_LATERAL = 1 / TAU_LATERAL  # [1/s]
-    MAX_STEERING_ANGLE = 0.08  # [rad]
+    MAX_STEERING_ANGLE = 0.61  # [rad]
     MAX_ACCELERATION = 2.5  # [m/s2], shared actuator upper bound
     MAX_DECELERATION = 4.0  # [m/s2], positive braking magnitude
     MAX_DELTA_STEERING_ANGLE = 0.015  # [rad]

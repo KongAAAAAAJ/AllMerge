@@ -37,13 +37,13 @@ Trajectory-level reports retain the existing joint-feasibility, individual-vehic
 geometric-violation, stability-violation, and mean trajectory-deviation metrics.
 
 The step-level paper table reports the satisfaction rate of each displayed constraint,
-overall constraint feasibility, and per-vehicle projection latency:
+overall constraint feasibility, and per-vehicle optimization time:
 
 - **Geometry:** road-boundary and curvature satisfaction.
 - **Stability:** yaw-rate, sideslip-angle, roll-angle, and lateral-load-transfer-ratio (LTR) satisfaction.
 - **Control:** acceleration magnitude, steering magnitude, acceleration-rate, and steering-rate satisfaction.
 - **Overall feasibility:** individual vehicle-step feasibility and synchronized platoon-step feasibility.
-- **Real-time:** mean and P95 latency of one independently timed single-vehicle projection.
+- **Real-time:** mean and P95 cumulative OSQP solve time per vehicle, summed across all iterations and QPs (including control restoration and failed or timed-out solves). Linearization, QP construction, data transfer, backtracking and diagnostics are excluded; the 50 ms limit applies to each QP.
 
 Node-state constraints use prediction steps 1..H. Curvature and control-rate constraints
 are interval quantities and use steps 2..H. Each individual constraint satisfaction rate

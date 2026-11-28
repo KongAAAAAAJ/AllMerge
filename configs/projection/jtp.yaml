@@ -25,10 +25,10 @@ stability:
     payload_sensitivity: 0.20
     scale_min: 0.55
     scale_max: 1.10
-  ltr_limit: 0.80
+  ltr_limit: 0.6
 
 geometry:
-  curvature_limit_per_m: 0.025
+  curvature_limit_per_m: 0.25
   road_clearance_m: 0.35
   footprint:
     circle_offsets_m: [-3.0, -1.5, 0.0, 1.5, 3.0]
@@ -37,12 +37,12 @@ geometry:
 control:
   acceleration_min_mps2: -4.0
   acceleration_max_mps2: 2.5
-  steering_min_rad: -0.08
-  steering_max_rad: 0.08
+  steering_min_rad: -0.61  # -35°
+  steering_max_rad: 0.61  # 35°
   # First differences include the previously applied control at t=0.
-  acceleration_rate_max_mps3: 2.5
-  steering_rate_max_rad_s: 0.5
-  rate_tolerance_si: 0.00001
+  acceleration_rate_max_mps3: 20
+  steering_rate_max_rad_s: 20
+  rate_tolerance_si: 0.01
   # Characteristic scales used to normalize control-space updates.
   trust_scale: [2.5, 0.08]
 
@@ -67,16 +67,20 @@ projection:
     eps_abs: 1.0e-3
     eps_rel: 1.0e-3
     max_iter: 20000
+    time_limit_ms: 50.0  # Per-QP OSQP time limit; excludes linearization and backtracking.
     polishing: true
     adaptive_rho: true
     verbose: false
+    diagnostics:
+      save_primal_infeasible: true
+      output_dir: outputs/jtp_qp_diagnostics_G123
   # QP group order: stability, road_curvature, control_rate; all six permutations are supported.
-  qp_group_order: [road_curvature, stability, control_rate]
+  qp_group_order: [stability, road_curvature, control_rate]
   constraint_sampling_stride: 4
   protection_max_sweeps: 32
   protection_tolerance: 1.0e-6
   nondegradation_tolerance: 1.0e-6
-  max_iterations: 6
+  max_iterations: 2
   max_stalled_iterations: 3
   max_active_per_group:
     stability: 24

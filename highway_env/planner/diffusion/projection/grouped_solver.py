@@ -313,12 +313,12 @@ def protect_direction(d, history, chol, cfg, lower=None, upper=None):
 
 def solve_groups(controls, groups, selected, rows, thresholds, metric, order, cfg,
                  scale, trust, damping_multiplier, control_lower, control_upper,
-                 control_weights=None):
+                 control_weights=None, diagnostic_context=None):
     if cfg["solver_method"] == "constrained_qp":
         from .qp_solver import solve_groups_qp
         return solve_groups_qp(
             controls, groups, selected, rows, thresholds, order, cfg,
-            control_lower, control_upper, control_weights)
+            control_lower, control_upper, control_weights, diagnostic_context)
     return _solve_groups_ls(
         controls, groups, selected, rows, thresholds, metric, order, cfg,
         scale, trust, damping_multiplier, control_lower, control_upper)

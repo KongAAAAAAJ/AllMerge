@@ -165,6 +165,16 @@ def validate_jtp_config(cfg: dict) -> None:
             raise ValueError("projection.qp.eps_abs and eps_rel must be positive and finite")
         if int(qp.get("max_iter", 0)) < 1:
             raise ValueError("projection.qp.max_iter must be positive")
+        time_limit_ms = float(qp.get("time_limit_ms", 0))
+        if not math.isfinite(time_limit_ms) or time_limit_ms <= 0:
+            raise ValueError("projection.qp.time_limit_ms must be positive and finite")
+        diagnostics = qp.setdefault("diagnostics", {})
+        diagnostics.setdefault("save_primal_infeasible", False)
+        diagnostics.setdefault("output_dir", "outputs/jtp_qp_diagnostics")
+        if not isinstance(diagnostics["save_primal_infeasible"], bool):
+            raise ValueError("projection.qp.diagnostics.save_primal_infeasible must be boolean")
+        if not str(diagnostics["output_dir"]).strip():
+            raise ValueError("projection.qp.diagnostics.output_dir must be nonempty")
     stride = int(proj.get("constraint_sampling_stride", 0))
     if stride < 1 or stride > int(execution["horizon_steps"]):
         raise ValueError("projection.constraint_sampling_stride must be within the prediction horizon")

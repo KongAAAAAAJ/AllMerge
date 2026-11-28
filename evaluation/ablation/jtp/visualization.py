@@ -94,7 +94,7 @@ def _draw_geometry(output_dir, figures):
         bounds.append((points.min(axis=0), points.max(axis=0)))
     span = np.max([high - low for low, high in bounds], axis=0) + [8, 30]  # 横纵向坐标轴留白
     plot_width = 2.95
-    vertical_scale = 0.2
+    vertical_scale = 0.5
     plot_height = plot_width * span[1] / span[0] * vertical_scale
     bottom, gap, top = .95, .60, .28
     height = bottom + 3 * plot_height + 2 * gap + top

@@ -82,10 +82,10 @@ def _summary(rows):
                 [row['projection_control_delta_norm'] for row in rows])),
             'projection_control_delta_norm_p95': float(np.percentile(
                 [row['projection_control_delta_norm'] for row in rows], 95)),
-            'projection_latency_ms_mean': float(np.mean(
-                [row['projection_latency_ms'] for row in rows])),
-            'projection_latency_ms_p95': float(np.percentile(
-                [row['projection_latency_ms'] for row in rows], 95)),
+            'optimization_time_ms_mean': float(np.mean(
+                [row['optimization_time_ms'] for row in rows])),
+            'optimization_time_ms_p95': float(np.percentile(
+                [row['optimization_time_ms'] for row in rows], 95)),
             'projection_iterations_mean': float(np.mean(
                 [row['projection_iterations'] for row in rows])),
         })
@@ -95,8 +95,8 @@ def _summary(rows):
             'projection_applied_pct': None,
             'projection_control_delta_norm_mean': None,
             'projection_control_delta_norm_p95': None,
-            'projection_latency_ms_mean': None,
-            'projection_latency_ms_p95': None,
+            'optimization_time_ms_mean': None,
+            'optimization_time_ms_p95': None,
             'projection_iterations_mean': None,
         })
     return summary
@@ -118,8 +118,8 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
                          ('Steering rate satisfaction (%)', 'steering_rate_violation_pct'))),
             ('Overall feasibility', (('Individual vehicle-step feasibility (%)', 'feasibility_pct'),
                                      ('Synchronized platoon-step feasibility (%)', 'joint_feasibility_pct'))),
-            ('Real-time', (('Mean projection latency (ms)', 'projection_latency_ms_mean'),
-                           ('P95 projection latency (ms)', 'projection_latency_ms_p95'))),
+            ('Real-time', (('Mean optimization time (ms)', 'optimization_time_ms_mean'),
+                           ('P95 optimization time (ms)', 'optimization_time_ms_p95'))),
         )
         lines = [
             r'\begin{table}[!t]',

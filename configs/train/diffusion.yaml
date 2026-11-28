@@ -15,7 +15,7 @@ control:
     dt: 0.1
     wheelbase_m: 5.5
     max_accel_mps2: 2.5
-    max_steer_rad: 0.08
+    max_steer_rad: 0.61
     num_train_timesteps: 1000
     inference_steps: 2
     inference_start_timestep: 8
@@ -75,7 +75,7 @@ control:
     safety:
       vehicle_length_m: 8.0
       vehicle_width_m: 2.6
-      collision_margin_m: 0.2
+      collision_margin_m: 0.1
       ttc_threshold_s: 1.0
       softplus_temperature_m: 0.2
       collision_distance_scale_m: 1.0

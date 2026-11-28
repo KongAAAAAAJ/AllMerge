@@ -12,10 +12,22 @@ import torch
 
 from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.diffusion.projection.types import RoadGeometry
+from highway_env.planner.diffusion.projection.constraints import stability_limits
 
 
-def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_seed: int):
-    """Select complete synchronized frames directly from the current raw dataset."""
+def _expert_stability_bad(state, ltr, payload, mu, jtp_config, tolerances):
+    state = torch.as_tensor(state, dtype=torch.float64)
+    limits = stability_limits(state[0], torch.as_tensor(payload, dtype=torch.float64),
+                              torch.as_tensor(mu, dtype=torch.float64), jtp_config)
+    values = torch.stack((state[2], torch.atan2(state[1], state[0]), state[3],
+                          state.new_tensor(ltr)))
+    tolerance = state.new_tensor([tolerances['stability_rad']] * 3 + [tolerances['ltr']])
+    return bool((values.abs() - limits > tolerance).any())
+
+
+def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_seed: int,
+                    jtp_config: dict, tolerances: dict):
+    """Sample 60% expert-current stability-violating frames, or all when N=0."""
     ds = RawExpertDataset(dataset_root, split=split)
     by_shard = defaultdict(list)
     for global_i, (shard_idx, sample_i) in enumerate(ds._index):
@@ -28,6 +40,10 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         if not rows:
             continue
         with np.load(shard_path, allow_pickle=False) as shard:
+            states = shard['koopman_state_hist_si'][:, -1]
+            ltr = shard['koopman_ltr0']
+            payload = shard['koopman_payload_kg']
+            mu = shard['koopman_road_mu']
             for global_i, sample_i in rows:
                 episode = int(np.asarray(shard["episode_index"][sample_i]).item())
                 frame = int(np.asarray(shard["frame_index"][sample_i]).item())
@@ -38,6 +54,9 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
                     "episode_index": episode,
                     "frame_index": frame,
                     "ego_index": ego,
+                    "stability_violation": _expert_stability_bad(
+                        states[sample_i], ltr[sample_i], payload[sample_i], mu[sample_i],
+                        jtp_config, tolerances),
                 }
 
     complete = []
@@ -49,13 +68,27 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         raise RuntimeError(f"No complete synchronized frames found in split={split}")
 
     complete.sort(key=lambda x: x[0])
-    if num_frames > 0 and num_frames < len(complete):
+    violating = [frame for frame in complete
+                 if any(meta[i]['stability_violation'] for i in frame[1])]
+    compliant = [frame for frame in complete
+                 if not any(meta[i]['stability_violation'] for i in frame[1])]
+    if num_frames > 0:
+        n_violating = math.floor(num_frames * .60 + .5)
+        n_compliant = num_frames - n_violating
+        if len(violating) < n_violating or len(compliant) < n_compliant:
+            raise ValueError(
+                f'Expert stability sampling needs {n_violating} violating and '
+                f'{n_compliant} compliant frames; available: '
+                f'{len(violating)} violating and {len(compliant)} compliant')
         rng = np.random.default_rng(int(sample_seed))
-        selected = [complete[int(i)] for i in np.sort(
-            rng.choice(len(complete), size=int(num_frames), replace=False)
-        )]
+        selected = [violating[int(i)] for i in rng.choice(
+            len(violating), size=n_violating, replace=False)]
+        selected += [compliant[int(i)] for i in rng.choice(
+            len(compliant), size=n_compliant, replace=False)]
+        selected.sort(key=lambda frame: frame[0])
     else:
         selected = complete
+        n_violating, n_compliant = len(violating), len(compliant)
 
     samples = []
     selected_keys = []
@@ -75,6 +108,11 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         "selected_samples": sum(len(x[1]) for x in samples),
         "sample_seed": int(sample_seed),
         "selected_frame_keys": [list(x) for x in selected_keys],
+        "frame_sampling": "expert_current_stability_60pct" if num_frames > 0 else "all_frames",
+        "sampling_basis": "Any vehicle current yaw rate, sideslip, roll or LTR violation; expert truth, not model prediction",
+        "expert_stability_fraction": .60,
+        "selected_expert_stability_violating_frames": n_violating,
+        "selected_expert_stability_compliant_frames": n_compliant,
     }
     return samples, manifest
 

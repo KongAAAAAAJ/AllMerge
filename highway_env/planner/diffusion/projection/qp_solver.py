@@ -5,6 +5,8 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 
+from .qp_diagnostics import family_row_labels
+
 
 def _family_balanced_weights(labels):
     labels = np.asarray(labels)
@@ -72,7 +74,7 @@ def _build_qp_problem(control_diagonal, control_lower, control_upper,
     return P, q, A, lower, upper
 
 
-def _solve_osqp(problem, cfg):
+def _solve_osqp(problem, cfg, *, diagnostic_metadata=None):
     import osqp
 
     P, q, A, lower, upper = problem
@@ -88,6 +90,7 @@ def _solve_osqp(problem, cfg):
         eps_abs=float(qp_cfg["eps_abs"]),
         eps_rel=float(qp_cfg["eps_rel"]),
         max_iter=int(qp_cfg["max_iter"]),
+        time_limit=float(qp_cfg["time_limit_ms"]) / 1000.0,
         polishing=bool(qp_cfg["polishing"]),
         adaptive_rho=bool(qp_cfg["adaptive_rho"]),
     )
@@ -98,12 +101,31 @@ def _solve_osqp(problem, cfg):
         "solver_status": str(info.status),
         "solver_status_val": int(info.status_val),
         "solver_iterations": int(info.iter),
+        "solver_time_limit_ms": float(qp_cfg["time_limit_ms"]),
         "primal_residual": float(info.prim_res),
         "dual_residual": float(info.dual_res),
         "solver_objective": float(info.obj_val),
         "solver_setup_time_s": float(info.setup_time),
         "solver_solve_time_s": float(info.solve_time),
     }
+    if (diagnostic_metadata is not None
+            and cfg["qp"]["diagnostics"]["save_primal_infeasible"]
+            and int(info.status_val) in (3, 4)):
+        from .qp_diagnostics import write_primal_infeasibility_diagnostic
+        artifact = write_primal_infeasibility_diagnostic(
+            problem,
+            metadata=diagnostic_metadata["metadata"],
+            arrays=diagnostic_metadata["arrays"],
+            solver_status=str(info.status),
+            solver_status_val=int(info.status_val),
+            solver_info=diagnostics,
+            primal_certificate=result.prim_inf_cert,
+            dual_certificate=result.dual_inf_cert,
+            solver_x=result.x,
+            solver_y=result.y,
+            output_dir=cfg["qp"]["diagnostics"]["output_dir"],
+        )
+        diagnostics["infeasibility_diagnostic"] = artifact
     if int(info.status_val) != 1:
         return None, diagnostics
     return np.asarray(result.x, dtype=np.float64), diagnostics
@@ -149,7 +171,8 @@ def _protection_bounds(base_residual, cumulative_change, protection_tolerance,
 
 
 def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
-                    control_lower, control_upper, control_weights):
+                    control_lower, control_upper, control_weights,
+                    diagnostic_context=None):
     """Solve hard-box restoration and all rows in each of the three priority groups."""
     flat = controls.detach().reshape(-1)
     nu = flat.numel()
@@ -169,6 +192,7 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
         "backend": "osqp",
         "solver_status": "not_required",
         "solver_iterations": 0,
+        "solver_solve_time_s": 0.0,
         "primal_residual": 0.0,
         "dual_residual": 0.0,
     }
@@ -183,6 +207,7 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
         if solution is None:
             return None, {
                 "reason": "hard_box_restoration_qp_failed",
+                "solver_solve_time_total_s": restoration_info["solver_solve_time_s"],
                 "hard_box_restoration": restoration_info,
                 "solver_method": "constrained_qp",
                 "trust_region_enabled": False,
@@ -193,11 +218,14 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
     history_jacobian = empty_jacobian
     history_base_residual = empty_vector
     history_labels = np.empty(0, dtype=object)
+    history_row_labels = []
     group_details = []
     total_solver_iterations = int(restoration_info.get("solver_iterations", 0))
-    total_solve_time = float(restoration_info.get("solver_solve_time_s", 0.0))
+    total_solve_time = float(restoration_info["solver_solve_time_s"])
+    diagnostics_enabled = cfg["qp"].get("diagnostics", {}).get(
+        "save_primal_infeasible", False)
 
-    for names in order:
+    for group_index, names in enumerate(order, start=1):
         use = [name for name in names if name in rows and rows[name].shape[0]]
         if not use:
             continue
@@ -213,6 +241,14 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
         base_residual = np.concatenate(base_residual_parts)
         residual = base_residual + jac @ p
         labels = _family_labels(use, rows)
+        state_row_labels = []
+        if diagnostics_enabled:
+            circle_count = int((diagnostic_context or {})["footprint_circle_count"])
+            horizon_steps = int((diagnostic_context or {})["horizon_steps"])
+            for name in use:
+                state_row_labels.extend(family_row_labels(
+                    name, selected[name].detach().cpu().tolist(),
+                    horizon_steps, circle_count))
         state_weights = _family_balanced_weights(labels)
         state_slack_upper = _state_slack_upper(
             base_residual, cfg["nondegradation_tolerance"])
@@ -235,10 +271,118 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
             jac, residual, state_slack_upper, state_weights,
             history_jacobian, protection_bound, protection_slack_upper,
             protection_weights, cfg)
-        solution, solve_info = _solve_osqp(problem, cfg)
+        diagnostic_metadata = None
+        if diagnostics_enabled and ("road" in use or "curvature" in use):
+            state_family_labels = [name for name in use for _ in selected[name].tolist()]
+            protection_family_labels = history_labels.tolist()
+            control_variable_labels = [
+                f"delta_u.{('acceleration' if index % 2 == 0 else 'steering')}@t={index // 2 + 1}"
+                for index in range(nu)
+            ]
+            state_variable_labels = [f"state_slack::{label}" for label in state_row_labels]
+            protection_variable_labels = [
+                f"protection_slack::{label}" for label in history_row_labels]
+            state_slack_labels = [
+                f"state_slack.nonnegative::{label}" for label in state_row_labels]
+            protection_slack_labels = [
+                f"protection_slack.nonnegative::{label}" for label in history_row_labels]
+            row_labels = (
+                control_variable_labels + state_row_labels + state_slack_labels
+                + history_row_labels + protection_slack_labels)
+            row_blocks = (
+                ["control_box"] * nu
+                + ["state_inequality"] * len(state_row_labels)
+                + ["state_slack_nonnegative"] * len(state_row_labels)
+                + ["protection_inequality"] * len(history_row_labels)
+                + ["protection_slack_nonnegative"] * len(history_row_labels))
+            row_families = (
+                ["control_box"] * nu
+                + state_family_labels + state_family_labels
+                + protection_family_labels + protection_family_labels)
+            state_row_start = nu
+            state_slack_start = state_row_start + len(state_row_labels)
+            protection_start = state_slack_start + len(state_row_labels)
+            protection_slack_start = protection_start + len(history_row_labels)
+            diagnostic_metadata = {
+                "metadata": {
+                    "context": dict(diagnostic_context or {}),
+                    "iteration": int((diagnostic_context or {}).get("iteration", 0)),
+                    "group_index": group_index,
+                    "group_role": "road_curvature",
+                    "group_families": list(use),
+                    "qp_group_order": [list(group) for group in order],
+                    "qp_settings": {
+                        "eps_abs": float(cfg["qp"]["eps_abs"]),
+                        "eps_rel": float(cfg["qp"]["eps_rel"]),
+                        "max_iter": int(cfg["qp"]["max_iter"]),
+                        "time_limit_ms": float(cfg["qp"]["time_limit_ms"]),
+                        "polishing": bool(cfg["qp"]["polishing"]),
+                        "adaptive_rho": bool(cfg["qp"]["adaptive_rho"]),
+                    },
+                    "row_labels": row_labels,
+                    "row_blocks": row_blocks,
+                    "row_families": row_families,
+                    "variable_labels": (
+                        control_variable_labels + state_variable_labels
+                        + protection_variable_labels),
+                    "variable_blocks": {
+                        "control_delta": [0, nu],
+                        "state_slack": [nu, nu + len(state_row_labels)],
+                        "protection_slack": [
+                            nu + len(state_row_labels),
+                            nu + len(state_row_labels) + len(history_row_labels)],
+                    },
+                    "row_block_ranges": {
+                        "control_box": [0, nu],
+                        "state_inequality": [state_row_start, state_slack_start],
+                        "state_slack_nonnegative": [state_slack_start, protection_start],
+                        "protection_inequality": [protection_start, protection_slack_start],
+                        "protection_slack_nonnegative": [
+                            protection_slack_start,
+                            protection_slack_start + len(history_row_labels)],
+                    },
+                    "control_bounds": {
+                        "absolute_lower": control_lo.tolist(),
+                        "absolute_upper": control_hi.tolist(),
+                        "delta_lower_at_group_entry": lower_step.tolist(),
+                        "delta_upper_at_group_entry": upper_step.tolist(),
+                        "cumulative_delta_lower": hard_lower.tolist(),
+                        "cumulative_delta_upper": hard_upper.tolist(),
+                    },
+                    "constraint_families": {
+                        "state": list(use),
+                        "protection": list(dict.fromkeys(protection_family_labels)),
+                    },
+                },
+                "arrays": {
+                    "state_jacobian": jac,
+                    "state_residual_at_group_entry": residual,
+                    "state_residual_at_outer_start": base_residual,
+                    "state_slack_upper": state_slack_upper,
+                    "state_slack_weights": state_weights,
+                    "protection_jacobian": history_jacobian,
+                    "protection_bound": protection_bound,
+                    "protection_slack_upper": protection_slack_upper,
+                    "protection_slack_weights": protection_weights,
+                    "nominal_control": flat.cpu().numpy(),
+                    "control_at_group_entry": flat.cpu().numpy() + p,
+                    "cumulative_control_correction": p,
+                    "control_lower_absolute": control_lo,
+                    "control_upper_absolute": control_hi,
+                    "control_delta_lower_at_group_entry": lower_step,
+                    "control_delta_upper_at_group_entry": upper_step,
+                },
+            }
+        if diagnostic_metadata is None:
+            solution, solve_info = _solve_osqp(problem, cfg)
+        else:
+            solution, solve_info = _solve_osqp(
+                problem, cfg, diagnostic_metadata=diagnostic_metadata)
+        total_solve_time += float(solve_info["solver_solve_time_s"])
         if solution is None:
             return None, {
                 "reason": "priority_group_qp_failed",
+                "solver_solve_time_total_s": total_solve_time,
                 "failed_group": names,
                 "failed_group_solver": solve_info,
                 "groups": group_details,
@@ -283,11 +427,12 @@ def solve_groups_qp(controls, groups, selected, rows, thresholds, order, cfg,
             "linear_violation_count_after": int((predicted_residual > 0.0).sum()),
         })
         total_solver_iterations += int(solve_info["solver_iterations"])
-        total_solve_time += float(solve_info["solver_solve_time_s"])
 
         history_jacobian = np.concatenate((history_jacobian, jac), axis=0)
         history_base_residual = np.concatenate((history_base_residual, base_residual))
         history_labels = np.concatenate((history_labels, labels))
+        if diagnostics_enabled:
+            history_row_labels.extend(state_row_labels)
         p = p + delta
 
     final_controls = flat.cpu().numpy() + p

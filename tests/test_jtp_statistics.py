@@ -96,17 +96,17 @@ def test_projection_timing_uses_individual_vehicle_calls(tmp_path):
     other_seed = [{**r, 'seed': 1} for r in rows]
     frames = [
         dict(seed=0, episode_index=1, frame_index=2,
-             projection_latency_ms_by_vehicle=[10., 20., 30.]),
+             optimization_time_ms_by_vehicle=[10., 20., 30.]),
         dict(seed=0, episode_index=1, frame_index=3,
-             projection_latency_ms_by_vehicle=[30., 40., 50.]),
+             optimization_time_ms_by_vehicle=[30., 40., 50.]),
         dict(seed=1, episode_index=1, frame_index=2,
-             projection_latency_ms_by_vehicle=[80., 100., 120.]),
+             optimization_time_ms_by_vehicle=[80., 100., 120.]),
     ]
     result = write_reports(tmp_path, rows+small+other_seed, 'step', [0, 1], 0, 1, frames)
     ours = result['summary']['Ours']
-    assert result['summary']['Baseline']['projection_latency_ms_mean'] == 0.
-    assert ours['projection_latency_ms_mean'] == pytest.approx(480. / 9.)
-    assert ours['projection_latency_ms_p95'] == pytest.approx(np.percentile(
+    assert result['summary']['Baseline']['optimization_time_ms_mean'] == 0.
+    assert ours['optimization_time_ms_mean'] == pytest.approx(480. / 9.)
+    assert ours['optimization_time_ms_p95'] == pytest.approx(np.percentile(
         [10., 20., 30., 30., 40., 50., 80., 100., 120.], 95))
     assert ours['num_vehicle_projections'] == 9
     assert result['timing']['unit'] == 'ms_per_vehicle_projection'
@@ -117,12 +117,12 @@ def test_projection_timing_uses_individual_vehicle_calls(tmp_path):
         '1': {'Baseline': 0., 'Ours': 100.},
     }
     table = (tmp_path/'step/projection_ablation_table_step.tex').read_text()
-    assert 'Mean projection latency' in table and 'P95 projection latency' in table and '53.33' in table
+    assert 'Mean optimization time' in table and 'P95 optimization time' in table and '53.33' in table
     assert 'Mean Time' not in paper_table(result['summary'], 'trajectory')
     empty = {'Baseline': {}, 'Ours': {}}
     add_projection_timing(empty, [])
-    assert empty['Baseline']['projection_latency_ms_mean'] == 0.
-    assert empty['Ours']['projection_latency_ms_mean'] is None
+    assert empty['Baseline']['optimization_time_ms_mean'] == 0.
+    assert empty['Ours']['optimization_time_ms_mean'] is None
 
 
 def test_cluster_bootstrap_uses_physical_frames():
@@ -139,14 +139,14 @@ def test_cluster_bootstrap_uses_physical_frames():
     assert c['joint_feasibility_pct']['bootstrap_95ci_pp'] == pytest.approx([0., 75.])
 
 
-def test_trajectory_summary_preserves_existing_metrics():
+def test_trajectory_summary_preserves_existing_metrics(tmp_path):
     rows = []
     for method in ('Baseline', 'Ours'):
         for ego in range(2):
             row = dict(method=method, seed=0, episode_index=1, frame_index=1, ego_index=ego,
                        joint_frame_feasible=False, joint_feasible=ego == 0, deviation_m=.2,
                        projection_applied=True, projection_control_delta_norm=0.,
-                       projection_latency_ms=1., projection_iterations=1)
+                       optimization_time_ms=1., projection_iterations=1)
             for flag in FLAGS:
                 row[flag] = False
             for name in ('geometric', 'stability', 'collision', 'external_collision', 'intertruck_collision',
@@ -164,6 +164,13 @@ def test_trajectory_summary_preserves_existing_metrics():
     assert after['feasibility_pct'] == 50.
     assert after['joint_feasibility_pct'] == 0.
     assert 'tab:projection_ablation_trajectory' in paper_table(report(rows, 'trajectory', 0)[0])
+    frames = [dict(seed=0, optimization_time_ms_by_vehicle=[1., 1.])]
+    result = write_reports(tmp_path, rows, 'trajectory', [0], 0, 1, frames)
+    assert result['summary']['Baseline']['optimization_time_ms_mean'] == 0.
+    assert result['summary']['Ours']['optimization_time_ms_mean'] == 1.
+    assert result['summary']['Ours']['optimization_time_ms_max'] == 1.
+    assert result['timing']['per_seed']['0']['Ours'] == 1.
+
 
 
 @pytest.mark.parametrize('unit', [None, 'both', 'trajectory', 'step'])

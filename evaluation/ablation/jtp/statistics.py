@@ -127,22 +127,22 @@ def report(rows, unit, repeats=2000, seed=2026):
 
 
 def add_projection_timing(summaries, frames):
-    """Summarize one independently measured _project_single wall time per vehicle."""
+    """Summarize cumulative OSQP solve time per vehicle projection."""
     values = np.asarray([
-        float(latency)
+        float(optimization_time)
         for frame in frames
-        for latency in frame['projection_latency_ms_by_vehicle']
+        for optimization_time in frame['optimization_time_ms_by_vehicle']
     ], dtype=np.float64)
     summaries['Baseline'].update(
-        projection_latency_ms_mean=0.0,
-        projection_latency_ms_p95=0.0,
-        projection_latency_ms_max=0.0,
+        optimization_time_ms_mean=0.0,
+        optimization_time_ms_p95=0.0,
+        optimization_time_ms_max=0.0,
         num_vehicle_projections=0,
     )
     summaries['Ours'].update(
-        projection_latency_ms_mean=float(values.mean()) if values.size else None,
-        projection_latency_ms_p95=float(np.percentile(values, 95)) if values.size else None,
-        projection_latency_ms_max=float(values.max()) if values.size else None,
+        optimization_time_ms_mean=float(values.mean()) if values.size else None,
+        optimization_time_ms_p95=float(np.percentile(values, 95)) if values.size else None,
+        optimization_time_ms_max=float(values.max()) if values.size else None,
         num_vehicle_projections=int(values.size),
     )
 
@@ -151,8 +151,7 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
     directory = output / unit
     directory.mkdir(parents=True, exist_ok=True)
     summaries, deltas, confidence = report(rows, unit, repeats, bootstrap_seed)
-    if unit == 'step':
-        add_projection_timing(summaries, frame_diagnostics)
+    add_projection_timing(summaries, frame_diagnostics)
     empty_columns = ['seed', 'episode_index', 'frame_index', 'ego_index', 'method',
                      'prediction_step', *FLAGS, 'stability_violation', 'geometric_violation',
                      'collision_violation', 'control_magnitude_violation', 'control_rate_violation',
@@ -162,8 +161,7 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
     per_seed = []
     for seed in seeds:
         by_method, _, _ = report([r for r in rows if r['seed'] == seed], unit, 0, bootstrap_seed)
-        if unit == 'step':
-            add_projection_timing(by_method, [f for f in frame_diagnostics if f['seed'] == seed])
+        add_projection_timing(by_method, [f for f in frame_diagnostics if f['seed'] == seed])
         per_seed.extend({'seed': seed, 'method': m, **v} for m, v in by_method.items())
     write_csv(directory/f'jtp_per_seed_{unit}.csv', per_seed)
     write_json(directory/f'jtp_paired_statistics_{unit}.json', {'statistics_unit': unit,
@@ -173,29 +171,28 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
     result = {'summary': summaries, 'paired_deltas': deltas,
             'prediction_steps': '1..H; curvature and control rates 2..H' if unit == 'step' else '1..H; control rates 2..H',
             'denominator': 'synchronized platoon prediction steps for Joint; valid vehicle prediction steps per constraint otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
-    if unit == 'step':
-        result['timing'] = {
-            'unit': 'ms_per_vehicle_projection',
-            'num_vehicle_projections': sum(
-                len(frame['projection_latency_ms_by_vehicle']) for frame in frame_diagnostics),
-            'num_synchronized_frames': len(frame_diagnostics),
-            'definition': (
-                'Mean and P95 of independently measured per-vehicle _project_single wall time. '
-                'Each vehicle projection is timed separately with CUDA synchronization at both '
-                'boundaries. The serial three-vehicle project-call wall time is retained only in '
-                'frame diagnostics and is excluded from these summaries. Baseline adds no JTP time.'
-            ),
-            'per_seed': {
-                str(seed): {
-                    r['method']: r['projection_latency_ms_mean']
-                    for r in per_seed if r['seed'] == seed
-                } for seed in seeds
-            },
-            'per_seed_p95': {
-                str(seed): {
-                    r['method']: r.get('projection_latency_ms_p95')
-                    for r in per_seed if r['seed'] == seed
-                } for seed in seeds
-            },
-        }
+    result['timing'] = {
+        'unit': 'ms_per_vehicle_projection',
+        'num_vehicle_projections': sum(
+            len(frame['optimization_time_ms_by_vehicle']) for frame in frame_diagnostics),
+        'num_synchronized_frames': len(frame_diagnostics),
+        'definition': (
+            'Mean and P95 of cumulative OSQP solve time per vehicle, including all '
+            'iterations, control restoration and failed or timed-out QPs. Excludes '
+            'linearization, QP construction, data transfer, backtracking and diagnostics. '
+            'Baseline adds no optimization time; each QP has its own time limit.'
+        ),
+        'per_seed': {
+            str(seed): {
+                r['method']: r['optimization_time_ms_mean']
+                for r in per_seed if r['seed'] == seed
+            } for seed in seeds
+        },
+        'per_seed_p95': {
+            str(seed): {
+                r['method']: r.get('optimization_time_ms_p95')
+                for r in per_seed if r['seed'] == seed
+            } for seed in seeds
+        },
+    }
     return result

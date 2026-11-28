@@ -22,11 +22,11 @@ python evaluation/ablation/run_jtp.py ^
   --jtp-config configs/projection/jtp.yaml ^
   --checkpoint outputs/anchor_ablation/diffusion_ckpt/dual/A0_new/best.pt ^
   --split test ^
-  --num-frames 20 ^
+  --num-frames 30 ^
   --seeds "0" ^
   --workers 1 ^
   --worker-threads 1 ^
-  --output-dir outputs/jtp_ablation/A0_stride_4_eps3_iter_6_G213 ^
+  --output-dir outputs/jtp_ablation/A0_stride_4_frame_30_iter_2_G123_2 ^
   --constraint-distributions
 
 
@@ -79,3 +79,5 @@ python evaluation/ablation/plot_jtp_distributions.py --data outputs/jtp_ablation
 横摆角速度、侧偏角、侧倾角保留原始物理量，不显示动态阈值线；其余阈值线显示运行配置的名义阈值。每个子图同时标注有效时间步样本数、按评估容差计算的时间步违规率（step）与轨迹违规率（traj）。动态指标的违规率仍使用每个样本实际工况阈值。道路和碰撞的 step 以每车每步最不利余量判定。
 
 旧 A0/A0_smoke 输出没有保存完整分布，必须重新运行评估后绘制，不能从汇总 CSV 还原。建议新建输出目录以保留历史结果。
+
+JTP 表格的 Mean/P95 optimization time 以每次单车投影为样本，累计所有迭代中 OSQP 的 `solver_solve_time_s`（含控制恢复及失败、超时 QP），转换为毫秒；不包含线性化、QP 构造、数据搬运、回溯及诊断耗时。无需求解及 Baseline 计为 0。50ms 限时针对每个 QP，累计优化耗时仍可能超过 50ms。step、trajectory 及每种子报告统一使用 `optimization_time_ms` 口径。
