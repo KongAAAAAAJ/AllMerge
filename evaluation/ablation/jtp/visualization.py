@@ -92,9 +92,10 @@ def _draw_geometry(output_dir, figures):
                             paths[:, :2] + normal * size[1] / 2,
                             _vehicle_corners(data['projected_world'][i, 0], size)))
         bounds.append((points.min(axis=0), points.max(axis=0)))
-    span = np.max([high - low for low, high in bounds], axis=0) + [6, 16]  # 横纵向坐标轴留白
+    span = np.max([high - low for low, high in bounds], axis=0) + [8, 30]  # 横纵向坐标轴留白
     plot_width = 2.95
-    plot_height = plot_width * span[1] / span[0]
+    vertical_scale = 0.2
+    plot_height = plot_width * span[1] / span[0] * vertical_scale
     bottom, gap, top = .95, .60, .28
     height = bottom + 3 * plot_height + 2 * gap + top
     fig = plt.figure(figsize=(3.5, height))
@@ -120,11 +121,6 @@ def _draw_geometry(output_dir, figures):
                 ax.plot(edge[:, 0], edge[:, 1], color='#15803d',
                         ls='--', lw=.85, alpha=.75)
         sizes = np.asarray(data['vehicle_sizes_m'])
-        for i, (path, size) in enumerate(zip(projected, sizes)):
-            if i != exemplar:
-                _trajectory_band(ax, path, size[1], grey)
-        for path, size in zip(data['external_actors'], data['external_actor_sizes_m']):
-            _trajectory_band(ax, path, size[1], grey)
         _trajectory_band(ax, original[exemplar], sizes[exemplar, 1], blue,
                          alpha=(.60, .20), zorder=2.5)
         _trajectory_band(ax, projected[exemplar], sizes[exemplar, 1], orange,
@@ -138,7 +134,7 @@ def _draw_geometry(output_dir, figures):
         ax.set(title=f'({chr(97 + panel)}) Episode {data["episode_index"]}, '
                      f'frame {data["frame_index"]}, truck {data["ego_index"]}',
                xlabel='World X (m)', ylabel='World Y (m)')
-        ax.set_aspect('equal', adjustable='box')
+        ax.set_aspect(vertical_scale, adjustable='box')
         ax.tick_params(labelsize=7, pad=2)
         ax.title.set_fontsize(8)
         ax.xaxis.label.set_size(7)
@@ -146,7 +142,7 @@ def _draw_geometry(output_dir, figures):
         ax.grid(alpha=.2)
     fig.legend(handles=[Patch(facecolor=orange, alpha=.60, label='Selected truck JTP'),
                         Patch(facecolor=blue, alpha=.60, label='Selected truck baseline'),
-                        Patch(facecolor=grey, alpha=.45, label='Other vehicle trajectories'),
+                        Patch(facecolor=grey, alpha=.45, label='Other vehicles'),
                         Line2D([0], [0], color='#6b7280', label='Road boundary'),
                         Line2D([0], [0], color='#15803d', ls='--', label='Safety inset')],
                loc='lower center', ncol=2, fontsize=7, frameon=False,
