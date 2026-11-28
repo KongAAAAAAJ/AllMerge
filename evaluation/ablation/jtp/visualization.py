@@ -12,19 +12,53 @@ def _road_pair(edges, vehicle_index: int, vehicle_count: int):
     return np.asarray(edges[vehicle_index]), np.asarray(edges[vehicle_count + vehicle_index])
 
 
-def _trajectory_band(ax, path, width, color):
-    """Draw a vehicle-width ribbon with fading future segments in world metres."""
-    from matplotlib.collections import PolyCollection
-    from matplotlib.colors import to_rgba
+def _trajectory_band(ax, path, width, color, *, alpha=(.45, .04), zorder=1):
+    """Draw one seamless RGBA ribbon at 300 dpi, with width in world metres."""
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.colors import to_rgb
+    from matplotlib.path import Path as PlotPath
+    from matplotlib.transforms import Affine2D
 
     path = np.asarray(path)
     normal = np.column_stack((-np.sin(path[:, 2]), np.cos(path[:, 2])))
     left = path[:, :2] + normal * width / 2
     right = path[:, :2] - normal * width / 2
-    polygons = np.stack((left[:-1], right[:-1], right[1:], left[1:]), axis=1)
-    colors = np.tile(to_rgba(color), (len(polygons), 1))
-    colors[:, 3] = np.linspace(.45, .04, len(polygons))
-    ax.add_collection(PolyCollection(polygons, facecolors=colors, edgecolors='none'))
+    boundary = np.vstack((left, right[::-1]))
+    ax.update_datalim(boundary)
+    ax.autoscale_view()
+    low, high = boundary.min(axis=0), boundary.max(axis=0)
+    pixel_size = np.ptp(ax.get_xlim()) / (ax.figure.get_figwidth() * 300)
+    nx, ny = np.ceil((high - low) / pixel_size).astype(int)
+    renderer = RendererAgg(int(nx), int(ny), 300)
+    transform = Affine2D().translate(*-low).scale(nx / (high[0] - low[0]),
+                                                ny / (high[1] - low[1]))
+    gc = renderer.new_gc()
+    gc.set_linewidth(0)
+    gc.set_foreground((0, 0, 0, 0))
+    outline = PlotPath(np.vstack((boundary, boundary[0])), closed=True)
+    renderer.draw_path(gc, outline, transform, rgbFace=(1, 1, 1, 1))
+    mask = np.asarray(renderer.buffer_rgba())[::-1, :, 3] / 255.
+    gc.restore()
+
+    x = low[0] + (np.arange(nx) + .5) * (high[0] - low[0]) / nx
+    y = low[1] + (np.arange(ny) + .5) * (high[1] - low[1]) / ny
+    xx, yy = np.meshgrid(x, y)
+    nearest = np.full((ny, nx), np.inf)
+    progress = np.zeros((ny, nx))
+    for i, (start, end) in enumerate(zip(path[:-1, :2], path[1:, :2])):
+        direction = end - start
+        fraction = np.clip(((xx - start[0]) * direction[0] +
+                            (yy - start[1]) * direction[1]) / np.dot(direction, direction), 0, 1)
+        distance = (xx - start[0] - fraction * direction[0]) ** 2 + \
+                   (yy - start[1] - fraction * direction[1]) ** 2
+        closer = distance < nearest
+        progress[closer] = (i + fraction[closer]) / (len(path) - 1)
+        nearest[closer] = distance[closer]
+    rgba = np.empty((ny, nx, 4), dtype=np.float32)
+    rgba[:, :, :3] = to_rgb(color)
+    rgba[:, :, 3] = mask * (alpha[0] + (alpha[1] - alpha[0]) * progress)
+    ax.imshow(rgba, origin='lower', extent=(low[0], high[0], low[1], high[1]),
+              interpolation='bilinear', zorder=zorder)
 
 
 def _vehicle_rectangle(ax, pose, size, color):
@@ -46,7 +80,7 @@ def _draw_geometry(output_dir, figures):
     if len(figures) != 3:
         raise ValueError('Geometry figure requires three distinct scene frames')
     orange, blue, grey = '#ea580c', '#2563eb', '#737373'
-    fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+    fig, axes = plt.subplots(3, 1, figsize=(15, 7), layout='compressed')
     for panel, (ax, data) in enumerate(zip(axes, figures)):
         original = np.asarray(data['nominal_world'])
         projected = np.asarray(data['projected_world'])
@@ -63,15 +97,21 @@ def _draw_geometry(output_dir, figures):
                 ax.plot(edge[:, 0], edge[:, 1], color='#15803d',
                         ls='--', lw=.85, alpha=.75)
         sizes = np.asarray(data['vehicle_sizes_m'])
-        _trajectory_band(ax, original[exemplar], sizes[exemplar, 1], grey)
-        for path, size in zip(projected, sizes):
-            _trajectory_band(ax, path, size[1], orange)
+        for i, (path, size) in enumerate(zip(projected, sizes)):
+            if i != exemplar:
+                _trajectory_band(ax, path, size[1], grey)
         for path, size in zip(data['external_actors'], data['external_actor_sizes_m']):
-            _trajectory_band(ax, path, size[1], blue)
-        for path, size in zip(projected, sizes):
-            _vehicle_rectangle(ax, path[0], size, orange)
+            _trajectory_band(ax, path, size[1], grey)
+        _trajectory_band(ax, original[exemplar], sizes[exemplar, 1], blue,
+                         alpha=(.60, .20), zorder=2.5)
+        _trajectory_band(ax, projected[exemplar], sizes[exemplar, 1], orange,
+                         alpha=(.60, .20), zorder=3)
+        for i, (path, size) in enumerate(zip(projected, sizes)):
+            if i != exemplar:
+                _vehicle_rectangle(ax, path[0], size, orange)
         for path, size in zip(data['external_actors'], data['external_actor_sizes_m']):
             _vehicle_rectangle(ax, path[0], size, blue)
+        _vehicle_rectangle(ax, projected[exemplar, 0], sizes[exemplar], orange)
         ax.set(title=f'({chr(97 + panel)}) Episode {data["episode_index"]}, '
                      f'frame {data["frame_index"]}, truck {data["ego_index"]}',
                xlabel='World X (m)', ylabel='World Y (m)')
@@ -79,14 +119,14 @@ def _draw_geometry(output_dir, figures):
         ax.autoscale_view()
         ax.margins(.05)
         ax.grid(alpha=.2)
-    fig.legend(handles=[Patch(facecolor=orange, alpha=.45, label='Platoon / JTP'),
-                        Patch(facecolor=blue, alpha=.45, label='Background / CV prediction'),
-                        Patch(facecolor=grey, alpha=.45, label='Selected truck baseline'),
+    fig.legend(handles=[Patch(facecolor=orange, alpha=.60, label='Selected truck JTP'),
+                        Patch(facecolor=blue, alpha=.60, label='Selected truck baseline'),
+                        Patch(facecolor=grey, alpha=.45, label='Other vehicle trajectories'),
                         Line2D([0], [0], color='#6b7280', label='Road boundary'),
                         Line2D([0], [0], color='#15803d', ls='--', label='Safety inset')],
                loc='lower center', ncol=5, frameon=False)
-    fig.tight_layout(rect=(0, .10, 1, 1))
-    fig.savefig(output_dir / 'projection_ablation_geometry.pdf', bbox_inches='tight')
+    fig.get_layout_engine().set(rect=(0, .07, 1, .93), h_pad=.02, hspace=.02)
+    fig.savefig(output_dir / 'projection_ablation_geometry.pdf', dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
