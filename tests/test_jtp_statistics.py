@@ -11,7 +11,7 @@ def make_records():
     n, h = 2, 4
     values = {k: [np.zeros(h-1 if k in ('curvature', 'acceleration_rate', 'steering_rate') else h) for _ in range(n)] for k in KEYS}
     bad = {k: [v.astype(bool) for v in vs] for k, vs in values.items()}
-    # Road violation at step 1 is excluded from step reports.
+    # Node constraints include step 1; interval constraints begin at step 2.
     bad['road'][0][0] = True
     # Different vehicles violate at different prediction steps.
     bad['curvature'][0][0] = True  # curvature belongs to step 2
@@ -29,17 +29,40 @@ def test_step_alignment_joint_and_single_vehicle():
     summaries, _, confidence = report(rows, 'step', 20)
     for m in ('Baseline', 'Ours'):
         s = summaries[m]
-        assert s['num_samples'] == 6
-        assert s['num_joint_samples'] == 3
-        assert s['joint_feasibility_pct'] == pytest.approx(100/3)
-        assert s['feasibility_pct'] == pytest.approx(200/3)
-        assert s['geometric_violation_pct'] == pytest.approx(100/6)
-        assert s['stability_violation_pct'] == pytest.approx(100/6)
-        assert s['road_violation_pct'] == 0
-    assert summaries['Ours']['deviation_m'] == 3.5
+        assert s['num_samples'] == 8
+        assert s['num_joint_samples'] == 4
+        assert s['joint_feasibility_pct'] == pytest.approx(25.)
+        assert s['feasibility_pct'] == pytest.approx(62.5)
+        assert s['geometric_violation_pct'] == pytest.approx(25.)
+        assert s['stability_violation_pct'] == pytest.approx(12.5)
+        assert s['road_violation_pct'] == pytest.approx(12.5)
+        assert s['curvature_violation_pct'] == pytest.approx(100/6)
+        assert s['yaw_violation_pct'] == pytest.approx(12.5)
+        assert s['acceleration_rate_violation_pct'] == 0.
+    assert summaries['Ours']['deviation_m'] == pytest.approx(27.625)
     assert confidence['feasibility_pct']['bootstrap_95ci_pp'] == [0., 0.]
-    assert all(r['prediction_step'] in (2, 3, 4) for r in rows)
+    assert all(r['prediction_step'] in (1, 2, 3, 4) for r in rows)
+    assert all(r['curvature_violation'] is None for r in rows if r['prediction_step'] == 1)
 
+
+
+def test_distribution_interval_indices_match_step_statistics(tmp_path):
+    from evaluation.ablation.jtp.distributions import DistributionRecorder
+    h = 4
+    values = {k: [np.zeros(h-1 if k in ('curvature', 'acceleration_rate', 'steering_rate') else h)]
+              for k in KEYS}
+    bad = {k: [np.zeros(len(v[0]), dtype=bool)] for k, v in values.items()}
+    expected = [{flag: False for flag in FLAGS}]
+    recorder = DistributionRecorder.__new__(DistributionRecorder)
+    recorder.metadata = {}
+    recorder.parts = {}
+    for method in ('Baseline', 'Ours'):
+        recorder.add(method, (values, bad), 0, 1, 2, [3], expected)
+    path = recorder.save(tmp_path)
+    with np.load(path, allow_pickle=False) as data:
+        assert data['Baseline_road_ids'][:, 4].tolist() == [1, 2, 3, 4]
+        assert data['Baseline_curvature_ids'][:, 4].tolist() == [2, 3, 4]
+        assert data['Baseline_acceleration_rate_ids'][:, 4].tolist() == [2, 3, 4]
 
 def test_output_names_csv_recomputation_and_empty(tmp_path):
     rows = make_records()
@@ -53,7 +76,11 @@ def test_output_names_csv_recomputation_and_empty(tmp_path):
     assert not (tmp_path/'jtp_summary.csv').exists()
     table = (directory/'projection_ablation_table_step.tex').read_text()
     assert 'tab:projection_ablation_step' in table
-    assert 'lccccc' in table
+    assert r'\begin{tabular}{@{}lcc@{}}' in table
+    assert 'Road boundary satisfaction' in table
+    assert 'Collision constraints remain included in overall feasibility' in table
+    assert 'Collision satisfaction' not in table
+    assert 'Inter-truck collision &' not in table and 'External collision &' not in table
     empty, _, _ = report([], 'step')
     assert empty['Ours']['num_samples'] == 0
     assert empty['Ours']['joint_feasibility_pct'] is None
@@ -90,14 +117,12 @@ def test_projection_timing_uses_individual_vehicle_calls(tmp_path):
         '1': {'Baseline': 0., 'Ours': 100.},
     }
     table = (tmp_path/'step/projection_ablation_table_step.tex').read_text()
-    assert 'Mean Time' in table and 'lcccccc' in table and '53.33' in table
-    assert all(line.count('&') == 6 for line in table.splitlines() if line.startswith(('Baseline &', r'\textbf{Ours} &')))
+    assert 'Mean projection latency' in table and 'P95 projection latency' in table and '53.33' in table
     assert 'Mean Time' not in paper_table(result['summary'], 'trajectory')
     empty = {'Baseline': {}, 'Ours': {}}
     add_projection_timing(empty, [])
     assert empty['Baseline']['projection_latency_ms_mean'] == 0.
     assert empty['Ours']['projection_latency_ms_mean'] is None
-    assert empty['Ours']['projection_latency_ms_p95'] is None
 
 
 def test_cluster_bootstrap_uses_physical_frames():
@@ -111,7 +136,7 @@ def test_cluster_bootstrap_uses_physical_frames():
             r['joint_frame_feasible'] = True
     rows += [{**r, 'seed': 1} for r in rows] + more
     _, _, c = report(rows, 'step', 100, 5)
-    assert c['joint_feasibility_pct']['bootstrap_95ci_pp'] == pytest.approx([0., 200/3])
+    assert c['joint_feasibility_pct']['bootstrap_95ci_pp'] == pytest.approx([0., 75.])
 
 
 def test_trajectory_summary_preserves_existing_metrics():

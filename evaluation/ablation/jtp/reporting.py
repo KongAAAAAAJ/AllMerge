@@ -103,7 +103,63 @@ def _summary(rows):
 
 
 def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
-    """Paper table with an explicit statistical unit and step-only JTP timing."""
+    """Generate the detailed step table or the existing trajectory-level table."""
+    if unit == 'step':
+        groups = (
+            ('Geometry', (('Road boundary satisfaction (%)', 'road_violation_pct'),
+                          ('Curvature satisfaction (%)', 'curvature_violation_pct'))),
+            ('Stability', (('Yaw rate satisfaction (%)', 'yaw_violation_pct'),
+                           ('Sideslip angle satisfaction (%)', 'sideslip_violation_pct'),
+                           ('Roll angle satisfaction (%)', 'roll_violation_pct'),
+                           ('Lateral load transfer ratio (LTR) satisfaction (%)', 'ltr_violation_pct'))),
+            ('Control', (('Acceleration magnitude satisfaction (%)', 'acceleration_violation_pct'),
+                         ('Steering magnitude satisfaction (%)', 'steering_violation_pct'),
+                         ('Acceleration rate satisfaction (%)', 'acceleration_rate_violation_pct'),
+                         ('Steering rate satisfaction (%)', 'steering_rate_violation_pct'))),
+            ('Overall feasibility', (('Individual vehicle-step feasibility (%)', 'feasibility_pct'),
+                                     ('Synchronized platoon-step feasibility (%)', 'joint_feasibility_pct'))),
+            ('Real-time', (('Mean projection latency (ms)', 'projection_latency_ms_mean'),
+                           ('P95 projection latency (ms)', 'projection_latency_ms_p95'))),
+        )
+        lines = [
+            r'\begin{table}[!t]',
+            r'\centering',
+            r'\caption{Per-constraint Satisfaction, Overall Feasibility, and Projection Latency (step statistics)}',
+            r'\label{tab:projection_ablation_step}',
+            r'\scriptsize',
+            r'\renewcommand{\arraystretch}{1.12}',
+            r'\setlength{\tabcolsep}{4pt}',
+            r'\begin{tabular}{@{}lcc@{}}',
+            r'\hline',
+            r'\textbf{Constraint / Metric} & \textbf{Baseline} & \textbf{JTP} \\',
+            r'\hline',
+        ]
+        for group, metrics in groups:
+            lines.append(r'\multicolumn{3}{@{}l}{\textbf{' + group + r'}} \\')
+            for label, metric in metrics:
+                cells = []
+                for method in ('Baseline', 'Ours'):
+                    value = by_method[method].get(metric)
+                    if value is None:
+                        cell = 'N/A'
+                    elif metric.endswith('_violation_pct'):
+                        cell = f'{100.0-value:.2f}'
+                    else:
+                        cell = f'{value:.2f}'
+                    if method == 'Ours':
+                        cell = r'\textbf{' + cell + '}'
+                    cells.append(cell)
+                lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
+        lines.extend([
+            r'\hline',
+            r'\multicolumn{3}{@{}l}{\footnotesize Collision constraints remain included in overall feasibility; latency is measured per vehicle projection.} \\',
+            r'\hline',
+            r'\end{tabular}',
+            r'\end{table}',
+            '',
+        ])
+        return '\n'.join(lines)
+
     caption = f'Effects of Joint Trajectory Projection on Constraint Satisfaction ({unit} statistics)'
     lines = [
         r'\begin{table}[!t]',
@@ -113,14 +169,13 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
         r'\scriptsize',
         r'\renewcommand{\arraystretch}{1.15}',
         r'\setlength{\tabcolsep}{2.5pt}',
-        r'\begin{tabular}{@{}l' + 'c' * (6 if unit == 'step' else 5) + r'@{}}',
+        r'\begin{tabular}{@{}lccccc@{}}',
         r'\hline',
         r'\textbf{Method} & \shortstack{\textbf{Joint}\\\textbf{Feas. (\%)}} & '
         r'\textbf{Feas. (\%)} & '
         r'\shortstack{\textbf{Geometric}\\\textbf{Viol. (\%)}} & '
         r'\shortstack{\textbf{Stability}\\\textbf{Viol. (\%)}} & '
-        r'\shortstack{\textbf{Deviation}\\\textbf{(m)}}'
-        + (r' & \shortstack{\textbf{Mean Time}\\\textbf{(ms)}}' if unit == 'step' else '') + r' \\',
+        r'\shortstack{\textbf{Deviation}\\\textbf{(m)}} \\',
         r'\hline',
     ]
     for key, label in (('Baseline', 'Baseline'), ('Ours', r'\textbf{Ours}')):
@@ -135,8 +190,6 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
             formatted('stability_violation_pct'),
             'N/A' if key == 'Baseline' else formatted('deviation_m', 3),
         ]
-        if unit == 'step':
-            cells.append('0.00' if key == 'Baseline' else formatted('projection_latency_ms_mean'))
         if key == 'Ours':
             cells = [r'\textbf{' + cell + '}' for cell in cells]
         lines.append(label + ' & ' + ' & '.join(cells) + r' \\')

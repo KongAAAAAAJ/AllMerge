@@ -50,7 +50,7 @@ def test_distribution_roundtrip_and_evaluator_parity(tmp_path):
     with np.load(path, allow_pickle=False) as data:
         assert len(data.files) == 12*2*3
         assert data['Baseline_acceleration_rate_ids'][:, 4].tolist() == [2, 3, 4]*n
-        assert metadata_version(path) == 2
+        assert metadata_version(path) == 3
         for k in KEYS:
             assert np.array_equal(data[f'Baseline_{k}_ids'], data[f'Ours_{k}_ids'])
     metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))

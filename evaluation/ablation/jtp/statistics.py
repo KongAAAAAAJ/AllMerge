@@ -5,28 +5,37 @@ from .reporting import _summary, write_csv, write_json, paper_table
 
 
 def step_records(collected, metadata, method, deviation):
-    """Align all twelve constraints at interval-ending steps 2..H."""
+    """Align node constraints at steps 1..H and interval constraints at 2..H."""
     _, bad = collected
     h = deviation.shape[1]
+    interval_constraints = ('curvature', 'acceleration_rate', 'steering_rate')
     records = []
     for i, base in enumerate(metadata):
-        for t in range(2, h+1):
+        for t in range(1, h+1):
             row = {**base, 'method': method, 'prediction_step': t}
             for k, flag in zip(KEYS, FLAGS):
-                index = t-2 if k in ('curvature', 'acceleration_rate', 'steering_rate') else t-1
-                row[flag] = bool(bad[k][i][index]) if len(bad[k][i]) else False
+                if k in interval_constraints and t == 1:
+                    row[flag] = None
+                else:
+                    index = t-2 if k in interval_constraints else t-1
+                    row[flag] = bool(bad[k][i][index]) if index < len(bad[k][i]) else False
             for name, components in (
                     ('stability', ('yaw', 'sideslip', 'roll', 'ltr')),
                     ('geometric', ('road', 'curvature')),
                     ('collision', ('external_collision', 'intertruck_collision')),
                     ('control_magnitude', ('acceleration', 'steering')),
                     ('control_rate', ('acceleration_rate', 'steering_rate'))):
-                row[name+'_violation'] = any(row[c+'_violation'] for c in components)
-            row['control_violation'] = row['control_magnitude_violation'] or row['control_rate_violation']
-            row['joint_feasible'] = not any(row[k+'_violation'] for k in ('stability', 'geometric', 'collision', 'control'))
+                valid = [row[c+'_violation'] for c in components if row[c+'_violation'] is not None]
+                row[name+'_violation'] = any(valid) if valid else None
+            control = [row[k+'_violation'] for k in ('control_magnitude', 'control_rate')
+                       if row[k+'_violation'] is not None]
+            row['control_violation'] = any(control) if control else None
+            applicable = [row[k+'_violation'] for k in ('stability', 'geometric', 'collision', 'control')
+                          if row[k+'_violation'] is not None]
+            row['joint_feasible'] = not any(applicable)
             row['deviation_m'] = float(deviation[i, t-1]) if method == 'Ours' else None
             records.append(row)
-    for t in range(2, h+1):
+    for t in range(1, h+1):
         group = [r for r in records if r['prediction_step'] == t]
         feasible = all(r['joint_feasible'] for r in group)
         for row in group:
@@ -37,7 +46,9 @@ def step_records(collected, metadata, method, deviation):
 RATE_KEYS = ('joint_feasibility_pct', 'feasibility_pct', 'geometric_violation_pct',
              'stability_violation_pct', 'collision_violation_pct', 'control_violation_pct',
              'control_rate_violation_pct', 'control_magnitude_violation_pct',
-             'external_collision_violation_pct', 'intertruck_collision_violation_pct')
+             'external_collision_violation_pct', 'intertruck_collision_violation_pct') + tuple(
+                 flag+'_pct' for flag in FLAGS
+                 if flag+'_pct' not in ('external_collision_violation_pct', 'intertruck_collision_violation_pct'))
 
 
 def summary(rows, unit):
@@ -52,14 +63,16 @@ def summary(rows, unit):
             result['joint_feasibility_pct'] = 100*float(np.mean(list(joint.values())))
             result['feasibility_pct'] = 100*float(np.mean([r['joint_feasible'] for r in rows]))
             for k in RATE_KEYS[2:]:
-                result[k] = 100*float(np.mean([r[k.replace('_pct', '')] for r in rows]))
+                values = [r[k[:-4]] for r in rows if r[k[:-4]] is not None]
+                result[k] = 100*float(np.mean(values)) if values else None
             if rows[0]['method'] == 'Ours':
                 result['deviation_m'] = float(np.mean([r['deviation_m'] for r in rows]))
     result.update(statistics_unit=unit, num_samples=len(rows),
                   num_joint_samples=len({(r['seed'], r['episode_index'], r['frame_index'], r.get('prediction_step')) for r in rows}),
                   num_vehicle_trajectories=len({(r['seed'], r['episode_index'], r['frame_index'], r['ego_index']) for r in rows}))
     for flag in FLAGS:
-        result[flag+'_pct'] = 100*float(np.mean([r[flag] for r in rows])) if rows else None
+        values = [r[flag] for r in rows if r[flag] is not None]
+        result[flag+'_pct'] = 100*float(np.mean(values)) if values else None
     return result
 
 
@@ -97,8 +110,10 @@ def report(rows, unit, repeats=2000, seed=2026):
                 sums[m][i, 0] += r['joint_frame_feasible']; counts[m][i, 0] += 1
                 seen_joint.add(joint_key)
             for j, k in enumerate(RATE_KEYS[1:], 1):
-                sums[m][i, j] += r['joint_feasible'] if k == 'feasibility_pct' else r[k.replace('_pct', '')]
-                counts[m][i, j] += 1
+                value = r['joint_feasible'] if k == 'feasibility_pct' else r[k[:-4]]
+                if value is not None:
+                    sums[m][i, j] += value
+                    counts[m][i, j] += 1
     samples = []
     rng = np.random.default_rng(seed)
     for _ in range(repeats if clusters else 0):
@@ -156,8 +171,8 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
                'resampling_unit': 'physical episode/frame, preserving seeds, trucks and steps'})
     (directory/f'projection_ablation_table_{unit}.tex').write_text(paper_table(summaries, unit), encoding='utf-8')
     result = {'summary': summaries, 'paired_deltas': deltas,
-            'prediction_steps': '2..H' if unit == 'step' else '1..H; control rates 2..H',
-            'denominator': 'synchronized platoon steps for Joint; vehicle steps otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
+            'prediction_steps': '1..H; curvature and control rates 2..H' if unit == 'step' else '1..H; control rates 2..H',
+            'denominator': 'synchronized platoon prediction steps for Joint; valid vehicle prediction steps per constraint otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
     if unit == 'step':
         result['timing'] = {
             'unit': 'ms_per_vehicle_projection',

@@ -30,10 +30,10 @@ def specifications(cfg, ev):
     limits += [[ev['limits']['collision_clearance_m']]] * 2
     limits += [[c['acceleration_min_mps2'], c['acceleration_max_mps2']],
                [c['steering_min_rad'], c['steering_max_rad']]]
-    return {'version': 2, 'methods': ['Baseline', 'Ours'],
+    return {'version': 3, 'methods': ['Baseline', 'Ours'],
             'control_rate_scope': 'prediction_steps_2_to_H; history-to-step-1 excluded; projector still includes it',
             'id_columns': ['seed', 'episode', 'frame', 'ego', 'future_step'],
-            'definition': 'All future steps; road minimum margin over circles/sides; collision minimum envelope gap per controlled vehicle. Missing collision objects omitted. Curvature uses H-1 future intervals. Control rates use prediction steps 2..H only.',
+            'definition': 'All future steps; road minimum margin over circles/sides; collision minimum envelope gap per controlled vehicle. Missing collision objects omitted. Curvature is assigned to interval-ending prediction steps 2..H. Control rates use prediction steps 2..H only.',
             'tolerances': t, 'evaluation_limits': ev['limits'],
             'projection_config': cfg,
             'constraints': {k: {'label': label, 'thresholds': lim, 'trajectory_flag': flag,
@@ -107,7 +107,7 @@ class DistributionRecorder:
                 v, b = values[k][i], bad[k][i]
                 if bool(np.any(b)) != bool(expected[i][flag]):
                     raise ValueError(f'Distribution/evaluator mismatch: {method}/{k}/{ego}')
-                start = 2 if k in ('acceleration_rate', 'steering_rate') else 1
+                start = 2 if k in ('curvature', 'acceleration_rate', 'steering_rate') else 1
                 ids = np.array([[seed, episode, frame, ego, t] for t in range(start, start+len(v))], dtype=np.int64).reshape(-1, 5)
                 for suffix, item in (('values', v), ('bad', b), ('ids', ids)):
                     self.parts.setdefault(f'{method}_{k}_{suffix}', []).append(item)

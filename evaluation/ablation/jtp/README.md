@@ -33,8 +33,35 @@ with `--dataset-root`, `--jtp-config`, `--diffusion-config`, and `--output-dir`.
 
 ## Evaluation metrics
 
-The paper metrics remain joint feasibility, individual-vehicle feasibility, geometric violation, stability violation, and mean trajectory deviation. Joint feasibility is computed by the independent evaluator from full-horizon stability, geometry, collision, control-magnitude, and control-rate checks. Collision and control metrics remain supplementary diagnostics.
+Trajectory-level reports retain the existing joint-feasibility, individual-vehicle feasibility,
+geometric-violation, stability-violation, and mean trajectory-deviation metrics.
 
-The independent evaluator excludes the history-to-first-prediction control-rate transition. Projection itself includes the previous applied control to step 1. Baseline and Ours use the same nominal controls, K2 model, road geometry, and external-actor evaluation set.
+The step-level paper table reports the satisfaction rate of each displayed constraint,
+overall constraint feasibility, and per-vehicle projection latency:
 
-The evaluation is offline expert-data open loop. It does not measure TruckSim closed-loop task success, executed spacing, fuel, or physical closed-loop stability.
+- **Geometry:** road-boundary and curvature satisfaction.
+- **Stability:** yaw-rate, sideslip-angle, roll-angle, and lateral-load-transfer-ratio (LTR) satisfaction.
+- **Control:** acceleration magnitude, steering magnitude, acceleration-rate, and steering-rate satisfaction.
+- **Overall feasibility:** individual vehicle-step feasibility and synchronized platoon-step feasibility.
+- **Real-time:** mean and P95 latency of one independently timed single-vehicle projection.
+
+Node-state constraints use prediction steps 1..H. Curvature and control-rate constraints
+are interval quantities and use steps 2..H. Each individual constraint satisfaction rate
+uses only its valid samples. Collision constraints are omitted as separate table rows but
+remain included in individual vehicle-step and synchronized platoon-step feasibility.
+
+Individual vehicle-step feasibility requires all applicable constraints, including collision
+checks, to be satisfied by one vehicle at one prediction step. Synchronized platoon-step
+feasibility requires all vehicles to satisfy all applicable constraints at the same prediction
+step. Curvature and control rates are not applicable at step 1.
+
+The latency mean and P95 are computed from one independently measured `_project_single`
+call per vehicle. The serial three-vehicle `project()` wall time remains a frame diagnostic
+and is not used as the single-vehicle latency statistic.
+
+The independent evaluator excludes the history-to-first-prediction control-rate transition.
+Projection itself includes the previous applied control to step 1. Baseline and Ours use the
+same nominal controls, K2 model, road geometry, and external-actor evaluation set.
+
+The evaluation is offline expert-data open loop. It does not measure TruckSim closed-loop
+task success, executed spacing, fuel, or physical closed-loop stability.

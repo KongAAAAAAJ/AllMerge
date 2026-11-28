@@ -92,7 +92,7 @@ def _draw_geometry(output_dir, figures):
                             paths[:, :2] + normal * size[1] / 2,
                             _vehicle_corners(data['projected_world'][i, 0], size)))
         bounds.append((points.min(axis=0), points.max(axis=0)))
-    span = np.max([high - low for low, high in bounds], axis=0) + 4
+    span = np.max([high - low for low, high in bounds], axis=0) + [6, 16]  # 横纵向坐标轴留白
     plot_width = 2.95
     plot_height = plot_width * span[1] / span[0]
     bottom, gap, top = .95, .60, .28
