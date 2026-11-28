@@ -2,47 +2,69 @@
 import numpy as np
 
 
-KINDS = ('stability', 'control')
-VALUES = {'stability': ('yaw', 'beta', 'roll', 'ltr'),
-          'control': ('acceleration', 'steering')}
+STABILITY_KEYS = ('yaw', 'beta', 'roll', 'ltr')
+CONTROL_KEYS = ('acceleration', 'steering')
 
 
-def violation_steps(kind, bad, i):
-    return np.logical_or.reduce([bad[k][i] for k in VALUES[kind]])
-
-
-def candidate_rank(kind, before, after, before_count, after_count, change):
-    flag = kind + '_violation'
-    prefix = 'stability' if kind == 'stability' else 'control_magnitude'
-    mean_key, max_key = prefix+'_excess_mean_norm', prefix+'_excess_max_norm'
+def control_candidate_rank(before, after, before_count, after_count, change):
+    mean_key, max_key = 'control_magnitude_excess_mean_norm', 'control_magnitude_excess_max_norm'
     count_gain = before_count-after_count
     mean_gain = before[mean_key]-after[mean_key]
     peak_gain = before[max_key]-after[max_key]
-    if before[flag] and not after[flag]:
+    if before['control_violation'] and not after['control_violation']:
         return (3, before[max_key], before[mean_key], change), 'complete_repair'
-    if before[flag] and (count_gain > 0 or mean_gain > 0):
+    if before['control_violation'] and (count_gain > 0 or mean_gain > 0):
         return (2, count_gain, mean_gain, peak_gain), 'partial_improvement'
-    if not before[flag] and not after[flag]:
+    if not before['control_violation'] and not after['control_violation']:
         return (1, change, 0., 0.), 'remains_feasible'
     return (0, count_gain, mean_gain, peak_gain), 'least_degradation'
 
 
-def frame_candidates(pair, collected, meta, seed, episode, frame, cfg):
-    scales = dict(zip(('yaw', 'beta', 'roll', 'ltr'), cfg['projection']['residual_scales']['stability']))
+def stability_candidate_rank(before, after, before_bound, after_bound, before_count, after_count, scale):
+    before, after = np.abs(before), np.abs(after)
+    excess_before = np.maximum(before-before_bound, 0.)/scale
+    excess_after = np.maximum(after-after_bound, 0.)/scale
+    count_gain = before_count-after_count
+    mean_gain = float(excess_before.mean()-excess_after.mean())
+    peak_gain = float(excess_before.max()-excess_after.max())
+    change = float(np.max(np.abs(before-after)))/scale
+    if before_count and not after_count:
+        return (3, float(excess_before.max()), float(excess_before.mean()), change, 0.), 'complete_repair'
+    if before_count and (count_gain > 0 or mean_gain > 0):
+        return (2, count_gain, mean_gain, peak_gain, 0.), 'partial_improvement'
+    if not before_count and not after_count:
+        response_peak_gain = float(before.max()-after.max())/scale
+        response_mean_gain = float(before.mean()-after.mean())/scale
+        if response_peak_gain > 0 or (response_peak_gain == 0 and response_mean_gain > 0):
+            return (1, 1., response_peak_gain, response_mean_gain, -change), 'remains_feasible'
+        return (1, 0., -change, 0., 0.), 'remains_feasible'
+    return (0, count_gain, mean_gain, peak_gain, -change), 'least_degradation'
+
+
+def frame_candidates(pair, collected, meta, seed, episode, frame, cfg, bounds):
+    scales = dict(zip(STABILITY_KEYS, cfg['projection']['residual_scales']['stability']))
     scales.update(acceleration=cfg['control']['acceleration_max_mps2']-cfg['control']['acceleration_min_mps2'],
                   steering=cfg['control']['steering_max_rad']-cfg['control']['steering_min_rad'])
     result = {}
-    for kind in KINDS:
+    for key in (*STABILITY_KEYS, 'control'):
         candidates = []
         for i, item in enumerate(meta):
-            counts = [int(violation_steps(kind, collected[m][1], i).sum()) for m in ('Baseline', 'Ours')]
-            change = max((float(np.max(np.abs(collected['Baseline'][0][k][i]-collected['Ours'][0][k][i]))) / scales[k]
-                          for k in VALUES[kind] if len(collected['Baseline'][0][k][i])), default=0.)
-            rank, grade = candidate_rank(kind, pair['before'][i], pair['after'][i], *counts, change)
+            keys = CONTROL_KEYS if key == 'control' else (key,)
+            counts = [int(np.logical_or.reduce([collected[m][1][k][i] for k in keys]).sum())
+                      for m in ('Baseline', 'Ours')]
+            if key == 'control':
+                change = max(float(np.max(np.abs(collected['Baseline'][0][k][i]-collected['Ours'][0][k][i]))) / scales[k]
+                             for k in CONTROL_KEYS)
+                rank, grade = control_candidate_rank(pair['before'][i], pair['after'][i], *counts, change)
+            else:
+                channel = STABILITY_KEYS.index(key)
+                rank, grade = stability_candidate_rank(
+                    collected['Baseline'][0][key][i], collected['Ours'][0][key][i],
+                    bounds['Baseline'][i,:,channel], bounds['Ours'][i,:,channel], *counts, scales[key])
             identity = (seed, episode, frame, int(item['ego_index']))
             candidates.append({'rank': rank, 'grade': grade, 'identity': identity,
                                'exemplar_index': i, 'before_count': counts[0], 'after_count': counts[1]})
-        result[kind] = max(candidates, key=candidate_key)
+        result[key] = max(candidates, key=candidate_key)
     return result
 
 

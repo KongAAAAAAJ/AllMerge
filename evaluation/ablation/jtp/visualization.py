@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 from .payload import PAYLOAD_GROUPS, PAYLOAD_LABELS
+from .cases import STABILITY_KEYS
 
 
 def draw_projection_figures(output_dir: Path, cases: dict):
@@ -14,7 +15,7 @@ def draw_projection_figures(output_dir: Path, cases: dict):
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    for kind, strata in cases.items():
+    for kind in dict.fromkeys('control' if key == 'control' else 'stability' for key in cases):
         # Figure typography (sizes in points).
         with matplotlib.rc_context({
             'font.family': 'Times New Roman',
@@ -28,39 +29,28 @@ def draw_projection_figures(output_dir: Path, cases: dict):
             columns = 4 if kind == 'stability' else 2
             fig, axes = plt.subplots(3, columns, figsize=(columns*6, 12))
             for row, group in enumerate(PAYLOAD_GROUPS):
-                figure = strata[group]
-                original = np.asarray(figure['nominal_world'])
-                nominal_states = np.asarray(figure['nominal_states'])
-                projected_states = np.asarray(figure['projected_states'])
-                nominal_ltr = np.asarray(figure['nominal_ltr'])
-                projected_ltr = np.asarray(figure['projected_ltr'])
-                bounds_nominal = np.asarray(figure['nominal_stability_bounds'])
-                bounds_projected = np.asarray(figure['projected_stability_bounds'])
-                dt = float(figure['dt_s'])
-                _, steps, _ = original.shape
-
-                exemplar = int(figure['exemplar_index'])
-                times = np.arange(1, steps) * float(dt)
                 primary, second = '#2563eb', '#ea580c'
-
                 if kind == 'stability':
-                    yaw_ax, beta_ax, roll_ax, ltr_ax = axes[row]
-                    sn, sp = nominal_states[exemplar], projected_states[exemplar]
-                    ln, lp = nominal_ltr[exemplar], projected_ltr[exemplar]
-                    bn, bp = bounds_nominal[exemplar], bounds_projected[exemplar]
-                    beta_n = np.abs(np.arctan2(sn[1:, 1], sn[1:, 0]))
-                    beta_p = np.abs(np.arctan2(sp[1:, 1], sp[1:, 0]))
-                    panel_specs = (
-                        (yaw_ax, np.abs(sn[1:, 2]), np.abs(sp[1:, 2]), bn[:, 0], bp[:, 0],
-                         '(a) Yaw rate', '|r| (rad/s)'),
-                        (beta_ax, beta_n, beta_p, bn[:, 1], bp[:, 1],
-                         '(b) Sideslip angle', '|β| (rad)'),
-                        (roll_ax, np.abs(sn[1:, 3]), np.abs(sp[1:, 3]), bn[:, 2], bp[:, 2],
-                         '(c) Roll angle', '|φ| (rad)'),
-                        (ltr_ax, np.abs(ln[1:]), np.abs(lp[1:]), bn[:, 3], bp[:, 3],
-                         '(d) Lateral load transfer ratio', '|LTR|'),
-                    )
-                    for ax, series_n, series_p, limit_n, limit_p, title, ylabel in panel_specs:
+                    labels = (('(a) Yaw rate', '|r| (rad/s)'),
+                              ('(b) Sideslip angle', '|β| (rad)'),
+                              ('(c) Roll angle', '|φ| (rad)'),
+                              ('(d) Lateral load transfer ratio', '|LTR|'))
+                    for column, key in enumerate(STABILITY_KEYS):
+                        figure = cases[key][group]
+                        exemplar = int(figure['exemplar_index'])
+                        sn = np.asarray(figure['nominal_states'])[exemplar]
+                        sp = np.asarray(figure['projected_states'])[exemplar]
+                        series_n, series_p = (
+                            (np.abs(state[1:, 2]) if key == 'yaw' else
+                             np.abs(np.arctan2(state[1:, 1], state[1:, 0])) if key == 'beta' else
+                             np.abs(state[1:, 3]) if key == 'roll' else
+                             np.abs(np.asarray(figure[ltr_key])[exemplar, 1:]))
+                            for state, ltr_key in ((sn, 'nominal_ltr'), (sp, 'projected_ltr')))
+                        limit_n = np.asarray(figure['nominal_stability_bounds'])[exemplar, :, column]
+                        limit_p = np.asarray(figure['projected_stability_bounds'])[exemplar, :, column]
+                        times = np.arange(1, len(sn)) * float(figure['dt_s'])
+                        ax = axes[row, column]
+                        title, ylabel = labels[column]
                         ax.plot(times, series_n, c=primary, ls='--', lw=1.45, label='Baseline')
                         ax.plot(times, series_p, c=second, ls='-', lw=1.5, label='JTP')
                         ax.plot(times, limit_n, c='#333333', ls=':', lw=1.0, label='Baseline limit')
@@ -70,11 +60,18 @@ def draw_projection_figures(output_dir: Path, cases: dict):
                                         color=primary, alpha=0.10, interpolate=True)
                         ax.fill_between(times, limit_p, series_p, where=series_p > limit_p,
                                         color=second, alpha=0.12, interpolate=True)
-                        ax.set(title=f'{PAYLOAD_LABELS[group]} ({float(figure["payload_kg"]):g} kg)\n{title}', xlabel='Time (s)', ylabel=ylabel)
+                        status = {'remains_feasible': 'Originally feasible',
+                                  'least_degradation': 'Not improved'}.get(str(figure['selection_grade']), '')
+                        identity = f'Ep {int(figure["episode_index"])}, frame {int(figure["frame_index"])}, truck {int(figure["ego_index"])}'
+                        heading = f'{PAYLOAD_LABELS[group]} ({float(figure["payload_kg"]):g} kg)'
+                        if status:
+                            heading += f' — {status}'
+                        ax.set(title=f'{heading}\n{identity}\n{title}', xlabel='Time (s)', ylabel=ylabel)
                         ax.grid(alpha=0.2)
-
-
                 else:
+                    figure = cases['control'][group]
+                    exemplar = int(figure['exemplar_index'])
+                    times = np.arange(1, np.asarray(figure['nominal_world']).shape[1]) * float(figure['dt_s'])
                     controls_n = np.asarray(figure['nominal_controls'])[exemplar]
                     controls_p = np.asarray(figure['projected_controls'])[exemplar]
                     lower = np.asarray(figure['control_lower'])

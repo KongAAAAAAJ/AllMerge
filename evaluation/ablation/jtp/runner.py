@@ -164,7 +164,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
     from .distributions import collect, KEYS, FLAGS
     from .statistics import step_records, write_reports
-    from .cases import frame_candidates, candidate_key, save_case
+    from .cases import STABILITY_KEYS, frame_candidates, candidate_key, save_case
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -209,8 +209,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                                          jtp_config=jtp_cfg,tolerances=ev["tolerances"])
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
-    best_cases = {kind: {} for kind in ('stability', 'control')}
-    case_figures = {kind: {} for kind in ('stability', 'control')}
+    best_cases = {key: {} for key in (*STABILITY_KEYS, 'control')}
+    case_figures = {key: {} for key in (*STABILITY_KEYS, 'control')}
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     from .parallel import frame_results
     jobs = ((seed, index, key, entries) for seed in seed_values
@@ -285,16 +285,18 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'rollout_consistency': data['consistency_max_abs'],
                 'projection_diagnostics': data['diagnostics'],
             })
-            candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg)
-            improved = {kind: c for kind, c in candidates.items()
-                        if group not in best_cases[kind] or candidate_key(c) > candidate_key(best_cases[kind][group])}
+            nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
+            for i in range(len(entries)):
+                bounds_a.append(stability_limits(nom['states'][i,1:,0].detach(),
+                    context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
+                bounds_b.append(stability_limits(post['states'][i,1:,0].detach(),
+                    context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
+            bounds_a, bounds_b = np.stack(bounds_a), np.stack(bounds_b)
+            candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg,
+                                          {'Baseline': bounds_a, 'Ours': bounds_b})
+            improved = {key: c for key, c in candidates.items()
+                        if group not in best_cases[key] or candidate_key(c) > candidate_key(best_cases[key][group])}
             if improved:
-                nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
-                for i in range(len(entries)):
-                    bounds_a.append(stability_limits(nom['states'][i,1:,0].detach(),
-                        context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
-                    bounds_b.append(stability_limits(post['states'][i,1:,0].detach(),
-                        context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
                 frame_figure={'seed':seed,'episode_index':episode,'frame_index':frame,
                     'ego_ids':np.asarray([int(item['ego_index']) for item in meta]),
                     'dt_s':np.asarray(jtp_cfg['execution']['dt_s']),
@@ -308,12 +310,13 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'projected_states':post['states'].detach().cpu().numpy(),
                     'nominal_ltr':nom['ltr'].detach().cpu().numpy(),
                     'projected_ltr':post['ltr'].detach().cpu().numpy(),
-                    'nominal_stability_bounds':np.stack(bounds_a),
-                    'projected_stability_bounds':np.stack(bounds_b),
+                    'nominal_stability_bounds':bounds_a,
+                    'projected_stability_bounds':bounds_b,
                     }
                 for kind, candidate in improved.items():
                     i = candidate['exemplar_index']
-                    chosen = {**frame_figure, 'case_kind': kind, 'exemplar_index': i,
+                    chosen = {**frame_figure, 'case_kind': 'control' if kind == 'control' else 'stability',
+                              'case_metric': kind, 'exemplar_index': i,
                               'payload_group': group, 'payload_kg': float(context['koopman_payload_kg'][i].item()),
                               'ego_index': int(meta[i]['ego_index']),
                               'selection_grade': candidate['grade'], 'selection_score': candidate['rank'],
@@ -341,9 +344,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
     draw_projection_figures(output, case_figures)
-    for kind in ('stability', 'control'):
+    for key, strata in case_figures.items():
         for group in PAYLOAD_GROUPS:
-            save_case(output/f'projection_ablation_{kind}_{group}_data.npz', case_figures[kind][group])
+            name = f'control_{group}' if key == 'control' else f'stability_{group}_{key}'
+            save_case(output/f'projection_ablation_{name}_data.npz', strata[group])
     def selection_metadata(c):
         return {'seed': c['identity'][0], 'episode_index': c['identity'][1],
                 'frame_index': c['identity'][2], 'ego_index': c['identity'][3],
@@ -351,9 +355,12 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'before_violation_steps': c['before_count'],
                 'after_violation_steps': c['after_count']}
 
-    selection_cases = {kind: {group: {**selection_metadata(c),
-                                    'payload_kg': case_figures[kind][group]['payload_kg']}
-                             for group, c in strata.items()} for kind, strata in best_cases.items()}
+    def selected(key, group):
+        return {**selection_metadata(best_cases[key][group]),
+                'payload_kg': case_figures[key][group]['payload_kg']}
+    selection_cases = {
+        'stability': {group: {key: selected(key, group) for key in STABILITY_KEYS} for group in PAYLOAD_GROUPS},
+        'control': {group: selected('control', group) for group in PAYLOAD_GROUPS}}
     manifest = dict(
         study='Single-QP stability and control-magnitude ablation',
         projection_method='Independent single-vehicle stability QP with hard control bounds',
