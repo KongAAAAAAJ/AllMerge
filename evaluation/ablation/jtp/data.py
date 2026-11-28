@@ -70,7 +70,7 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
     compliant = [frame for frame in complete
                  if not any(meta[i]['stability_violation'] for i in frame[1])]
     if num_frames > 0:
-        n_violating = math.floor(num_frames * .60 + .5)
+        n_violating = math.floor(num_frames * .70 + .5)
         n_compliant = num_frames - n_violating
         if len(violating) < n_violating or len(compliant) < n_compliant:
             raise ValueError(

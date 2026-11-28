@@ -109,5 +109,12 @@ def validate_jtp_config(cfg: dict) -> None:
     for key in ('eps_abs', 'eps_rel', 'time_limit_ms', 'control_correction_weight'):
         if not math.isfinite(float(qp[key])) or float(qp[key]) <= 0:
             raise ValueError(f'projection.qp.{key} must be positive and finite')
-    if qp['max_iter'] < 1 or min(qp['state_slack'].values()) <= 0:
+    if qp['max_iter'] < 1 or min(qp['state_slack'][key] for key in ('linear_penalty', 'quadratic_penalty')) <= 0:
         raise ValueError('Invalid QP iteration limit or slack penalties')
+    bounds = qp['state_slack'].get('bounds', {})
+    if set(bounds) != {'yaw', 'sideslip', 'roll', 'ltr'}:
+        raise ValueError('state_slack.bounds requires yaw, sideslip, roll and ltr')
+    for key, pair in bounds.items():
+        if (len(pair) != 2 or not all(math.isfinite(float(value)) for value in pair)
+                or not 0 <= float(pair[0]) <= float(pair[1])):
+            raise ValueError(f'Invalid state_slack.bounds.{key}: require finite 0 <= lower <= upper')

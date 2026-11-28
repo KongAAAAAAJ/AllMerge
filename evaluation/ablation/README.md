@@ -22,11 +22,11 @@ python evaluation/ablation/run_jtp.py ^
   --jtp-config configs/projection/jtp.yaml ^
   --checkpoint outputs/anchor_ablation/diffusion_ckpt/dual/A0_new/best.pt ^
   --split test ^
-  --num-frames 30 ^
-  --seeds "0" ^
+  --num-frames 50 ^
+  --seeds "0, 1, 3" ^
   --workers 1 ^
   --worker-threads 1 ^
-  --output-dir outputs/jtp_ablation/A0_frame_30_iter_10 ^
+  --output-dir outputs/jtp_ablation/A0_frame_30_iter_10_3 ^
   --constraint-distributions
 
 

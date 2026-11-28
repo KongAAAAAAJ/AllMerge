@@ -88,6 +88,8 @@ def _summary(rows):
 
 def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
     """Generate the six-constraint table for the requested statistics unit."""
+    methods = ('Expert', 'Baseline', 'Ours') if 'Expert' in by_method else ('Baseline', 'Ours')
+    ncols = len(methods)+1
     groups = (
         ('Stability', (('Yaw rate satisfaction (%)', 'yaw_violation_pct'),
                        ('Sideslip angle satisfaction (%)', 'sideslip_violation_pct'),
@@ -108,16 +110,16 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
         r'\scriptsize',
         r'\renewcommand{\arraystretch}{1.12}',
         r'\setlength{\tabcolsep}{4pt}',
-        r'\begin{tabular}{@{}lcc@{}}',
+        r'\begin{tabular}{@{}l' + 'c'*len(methods) + '@{}}',
         r'\hline',
-        r'\textbf{Constraint / Metric} & \textbf{Baseline} & \textbf{JTP} \\',
+        r'\textbf{Constraint / Metric} & ' + ' & '.join(r'\textbf{' + ('JTP' if m=='Ours' else m) + '}' for m in methods) + r' \\',
         r'\hline',
     ]
     for group, metrics in groups:
-        lines.append(r'\multicolumn{3}{@{}l}{\textbf{' + group + r'}} \\')
+        lines.append(r'\multicolumn{' + str(ncols) + r'}{@{}l}{\textbf{' + group + r'}} \\')
         for label, metric in metrics:
             cells = []
-            for method in ('Baseline', 'Ours'):
+            for method in methods:
                 value = by_method[method].get(metric)
                 if value is None:
                     cell = 'N/A'
@@ -129,9 +131,13 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
                     cell = r'\textbf{' + cell + '}'
                 cells.append(cell)
             lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
+    note = 'Feasibility includes stability and control magnitude only; timing is per vehicle.'
+    if 'Expert' in by_method:
+        note = f"Paired complete frames: {by_method['Expert']['num_physical_frames']}; Expert is recorded TruckSim truth; Expert optimization time N/A."
+        lines = [line.replace('tab:projection_ablation_step','tab:projection_ablation_step_expert') for line in lines]
     lines.extend([
         r'\hline',
-        r'\multicolumn{3}{@{}l}{\footnotesize Feasibility includes stability and control magnitude only; timing is per vehicle.} \\',
+        r'\multicolumn{' + str(ncols) + r'}{@{}l}{\footnotesize ' + note + r'} \\',
         r'\hline',
         r'\end{tabular}',
         r'\end{table}',

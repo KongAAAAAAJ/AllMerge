@@ -52,6 +52,11 @@ projection:
     state_slack:
       linear_penalty: 10.0
       quadratic_penalty: 1.0
+      bounds:
+        yaw: [0.0, 0.01]      # rad/s
+        sideslip: [0.0, 0.01] # rad
+        roll: [0.0, 0.01]     # rad
+        ltr: [0.0, 0.01]      # dimensionless
     eps_abs: 0.001
     eps_rel: 0.001
     max_iter: 20000

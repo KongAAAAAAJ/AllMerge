@@ -5,7 +5,7 @@ import scipy.sparse as sp
 import torch
 
 
-def _build_qp_problem(control_diagonal, lower, upper, jacobian, residual, slack_upper, cfg):
+def _build_qp_problem(control_diagonal, lower, upper, jacobian, residual, slack_lower, slack_upper, cfg):
     nu, ns = len(control_diagonal), len(residual)
     penalty = cfg['qp']['state_slack']
     weights = np.full(ns, 1. / ns) if ns else np.empty(0)
@@ -14,7 +14,7 @@ def _build_qp_problem(control_diagonal, lower, upper, jacobian, residual, slack_
     A = sp.bmat([[sp.eye(nu), sp.csc_matrix((nu, ns))],
                  [sp.csc_matrix(jacobian), -sp.eye(ns)],
                  [sp.csc_matrix((ns, nu)), sp.eye(ns)]], format='csc')
-    return P, q, A, np.r_[lower, np.full(ns, -np.inf), np.zeros(ns)], np.r_[upper, -residual, slack_upper]
+    return P, q, A, np.r_[lower, np.full(ns, -np.inf), slack_lower], np.r_[upper, -residual, slack_upper]
 
 
 def _solve_osqp(problem, cfg):
@@ -64,10 +64,15 @@ def solve_qp(controls, stability, selected, jacobian, thresholds, cfg, lower, up
     margin = max(float(torch.finfo(controls.dtype).eps) * 4.,
                  float(cfg['qp']['eps_abs']) * 10.) * max(1., float(abs(lo).max()), float(abs(hi).max()))
     residual = (stability[selected] - thresholds[selected]).detach().cpu().double().numpy()
-    slack_upper = np.where(residual > 0, residual + cfg['nondegradation_tolerance'], 0.)
+    bounds = np.asarray([cfg['qp']['state_slack']['bounds'][key]
+                         for key in ('yaw', 'sideslip', 'roll', 'ltr')], dtype=np.float64)
+    bounds /= np.asarray(cfg['residual_scales']['stability'])[:, None]
+    channels = selected.detach().cpu().numpy() % 4
+    slack_lower = np.where(residual > 0, bounds[channels, 0], 0.)
+    slack_upper = np.where(residual > 0, bounds[channels, 1], 0.)
     diagonal = float(cfg['qp']['control_correction_weight']) * np.tile(weights, controls.numel() // 2)
     problem = _build_qp_problem(diagonal, lo + margin - flat, hi - margin - flat,
-                               jacobian.detach().cpu().double().numpy(), residual, slack_upper, cfg)
+                               jacobian.detach().cpu().double().numpy(), residual, slack_lower, slack_upper, cfg)
     solution, info = _solve_osqp(problem, cfg)
     if solution is None:
         return None, info
