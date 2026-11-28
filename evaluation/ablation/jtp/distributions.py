@@ -1,97 +1,38 @@
-"""Full-horizon physical constraint distributions, independent of the solver."""
+"""Six-constraint independent observations and paired distributions."""
 from pathlib import Path
 import json
 import numpy as np
-import torch
-
-from .metrics import _circle_centers, _actor_circles, prediction_control_rates
 from highway_env.planner.diffusion.projection.constraints import stability_limits
-from highway_env.planner.diffusion.projection.geometry import geometry_residual, wrap_angle
 
-KEYS = ('road', 'curvature', 'yaw', 'beta', 'roll', 'ltr',
-        'acceleration_rate', 'steering_rate', 'intertruck', 'external', 'acceleration', 'steering')
-LABELS = ('Road safety margin (m)', 'Curvature (1/m)', 'Yaw rate (rad/s)',
-          'Sideslip (rad)', 'Roll (rad)', 'LTR', 'Acceleration rate (m/s³)',
-          'Steering rate (rad/s)', 'Inter-truck envelope gap (m)',
-          'External envelope gap (m)', 'Acceleration (m/s²)', 'Steering (rad)')
-FLAGS = ('road_violation', 'curvature_violation', 'yaw_violation', 'sideslip_violation',
-         'roll_violation', 'ltr_violation', 'acceleration_rate_violation',
-         'steering_rate_violation', 'intertruck_collision_violation',
-         'external_collision_violation', 'acceleration_violation', 'steering_violation')
+KEYS = ('yaw', 'beta', 'roll', 'ltr', 'acceleration', 'steering')
+FLAGS = ('yaw_violation', 'sideslip_violation', 'roll_violation', 'ltr_violation',
+         'acceleration_violation', 'steering_violation')
+LABELS = ('Yaw rate (rad/s)', 'Sideslip angle (rad)', 'Roll angle (rad)',
+          'LTR', 'Acceleration (m/s?)', 'Steering (rad)')
 
 
 def specifications(cfg, ev):
-    c, g, t = cfg['control'], cfg['geometry'], ev['tolerances']
-    limits = [[0.], [-g['curvature_limit_per_m'], g['curvature_limit_per_m']],
-              [], [], [], [-cfg['stability']['ltr_limit'], cfg['stability']['ltr_limit']]]
-    for name in ('acceleration_rate_max_mps3', 'steering_rate_max_rad_s'):
-        v = ev['limits'][name]
-        limits.append([-v, v])
-    limits += [[ev['limits']['collision_clearance_m']]] * 2
-    limits += [[c['acceleration_min_mps2'], c['acceleration_max_mps2']],
-               [c['steering_min_rad'], c['steering_max_rad']]]
-    return {'version': 3, 'methods': ['Baseline', 'Ours'],
-            'control_rate_scope': 'prediction_steps_2_to_H; history-to-step-1 excluded; projector still includes it',
-            'id_columns': ['seed', 'episode', 'frame', 'ego', 'future_step'],
-            'definition': 'All future steps; road minimum margin over circles/sides; collision minimum envelope gap per controlled vehicle. Missing collision objects omitted. Curvature is assigned to interval-ending prediction steps 2..H. Control rates use prediction steps 2..H only.',
-            'tolerances': t, 'evaluation_limits': ev['limits'],
-            'projection_config': cfg,
-            'constraints': {k: {'label': label, 'thresholds': lim, 'trajectory_flag': flag,
-                                'dynamic_threshold': k in ('yaw', 'beta', 'roll')}
-                            for k, label, lim, flag in zip(KEYS, LABELS, limits, FLAGS)}}
+    return dict(version=4, methods=['Baseline', 'Ours'],
+                id_columns=['seed', 'episode', 'frame', 'ego', 'future_step'],
+                definition='Six constraints at future steps 1..H; no geometry, collision or rate constraints',
+                projection_config=cfg, tolerances=ev['tolerances'], keys=list(KEYS))
 
 
-def collect(controls, rollout, context, roads, actors, cfg, ev):
-    """Return per-vehicle/per-step values and exact evaluator violation flags."""
+def collect(controls, rollout, context, cfg, ev):
     def array(x):
         return x.detach().cpu().numpy().astype(np.float64)
-    u = array(controls)
-    pose = array(rollout['trajectory'])
-    states = array(rollout['states'])
-    ltr = array(rollout['ltr'])
-    n, h, _ = u.shape
-    tol, lim = ev['tolerances'], ev['limits']
-    rate = prediction_control_rates(u, cfg['execution']['dt_s'])
-    values = {k: [] for k in KEYS}
-    bad = {k: [] for k in KEYS}
-    footprint = cfg['geometry']['footprint']
-    radius = footprint['circle_radius_m']
-    centers = [_circle_centers(pose[i, 1:], np.asarray(footprint['circle_offsets_m'])) for i in range(n)]
-    for i in range(n):
-        with torch.no_grad():
-            bounds = array(stability_limits(rollout['states'][i, 1:, 0], context['koopman_payload_kg'][i], context['koopman_road_mu'][i], cfg))
-            geom, meta = geometry_residual(rollout['trajectory'][i], roads[i], cfg)
-            geom = array(geom)
-        road_raw = geom[:meta['road_count']].reshape(h, -1).max(axis=1)
-        delta = rollout['trajectory'][i, 2:, :2] - rollout['trajectory'][i, 1:-1, :2]
-        curvature = array(wrap_angle(rollout['trajectory'][i, 2:, 2] - rollout['trajectory'][i, 1:-1, 2]) / torch.linalg.vector_norm(delta, dim=-1).clamp_min(1e-4))
-        row = {'road': -road_raw, 'curvature': curvature,
-               'yaw': states[i, 1:, 2], 'beta': np.arctan2(states[i, 1:, 1], states[i, 1:, 0]),
-               'roll': states[i, 1:, 3], 'ltr': ltr[i, 1:],
-               'acceleration_rate': rate[i, :, 0], 'steering_rate': rate[i, :, 1],
-               'acceleration': u[i, :, 0], 'steering': u[i, :, 1]}
-        flags = {'road': road_raw > tol['road_m'],
-                 'curvature': geom[meta['road_count']:] > tol['curvature_per_m2']}
-        for j, k in enumerate(('yaw', 'beta', 'roll', 'ltr')):
-            tolerance = tol.get('ltr', tol['stability_rad']) if k == 'ltr' else tol['stability_rad']
-            flags[k] = np.abs(row[k]) - bounds[:, j] > tolerance
-        for k, name in (('acceleration_rate', 'acceleration_rate_max_mps3'), ('steering_rate', 'steering_rate_max_rad_s')):
-            flags[k] = np.abs(row[k]) > lim[name] + tol['control_si']
-        for k, unit in (('acceleration', 'mps2'), ('steering', 'rad')):
-            flags[k] = (row[k] < cfg['control'][f'{k}_min_{unit}'] - tol['control_si']) | (row[k] > cfg['control'][f'{k}_max_{unit}'] + tol['control_si'])
-        for k in ('intertruck', 'external'):
-            gaps = []
-            others = [(centers[j], radius) for j in range(n) if j != i] if k == 'intertruck' else [(_actor_circles(a)[0][1:], _actor_circles(a)[1]) for a in actors]
-            for other, r in others:
-                distance = np.sqrt(np.maximum(np.sum((centers[i][:, :, None] - other[:, None]) ** 2, axis=-1), 1e-12))
-                gaps.append((distance - radius - r).min(axis=(1, 2)))
-            row[k] = np.min(gaps, axis=0) if gaps else np.empty(0)
-            flags[k] = lim['collision_clearance_m'] - row[k] > tol['collision_m']
-        for k in KEYS:
-            if not np.isfinite(row[k]).all():
-                raise ValueError(f'Nonfinite distribution values: {k}')
-            values[k].append(row[k])
-            bad[k].append(flags[k])
+    states, u, ltr = array(rollout['states'])[:, 1:], array(controls), array(rollout['ltr'])[:, 1:]
+    tolerance = ev['tolerances']
+    values = dict(yaw=states[:, :, 2], beta=np.arctan2(states[:, :, 1], states[:, :, 0]),
+                  roll=states[:, :, 3], ltr=ltr, acceleration=u[:, :, 0], steering=u[:, :, 1])
+    bounds = np.stack([array(stability_limits(rollout['states'][i, 1:, 0],
+                       context['koopman_payload_kg'][i], context['koopman_road_mu'][i], cfg))
+                       for i in range(len(u))])
+    bad = {key: abs(values[key]) - bounds[:, :, j] > tolerance['ltr' if key == 'ltr' else 'stability_rad']
+           for j, key in enumerate(KEYS[:4])}
+    for key, unit in (('acceleration', 'mps2'), ('steering', 'rad')):
+        bad[key] = ((values[key] < cfg['control'][f'{key}_min_{unit}'] - tolerance['control_si']) |
+                    (values[key] > cfg['control'][f'{key}_max_{unit}'] + tolerance['control_si']))
     return values, bad
 
 
@@ -107,7 +48,7 @@ class DistributionRecorder:
                 v, b = values[k][i], bad[k][i]
                 if bool(np.any(b)) != bool(expected[i][flag]):
                     raise ValueError(f'Distribution/evaluator mismatch: {method}/{k}/{ego}')
-                start = 2 if k in ('curvature', 'acceleration_rate', 'steering_rate') else 1
+                start = 1
                 ids = np.array([[seed, episode, frame, ego, t] for t in range(start, start+len(v))], dtype=np.int64).reshape(-1, 5)
                 for suffix, item in (('values', v), ('bad', b), ('ids', ids)):
                     self.parts.setdefault(f'{method}_{k}_{suffix}', []).append(item)
@@ -125,93 +66,66 @@ class DistributionRecorder:
         return path
 
 
+
 def draw(data_path, output_dir):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from matplotlib.patches import FancyBboxPatch
+
     path, output = Path(data_path), Path(output_dir)
-    if not path.is_file() or not path.with_suffix('.json').is_file():
-        raise ValueError('Missing full distribution data/metadata; rerun run_jtp.py with --constraint-distributions. Summary CSV cannot reconstruct these distributions.')
     metadata = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+    cfg = metadata['projection_config']
+    thresholds = {'ltr': [-cfg['stability']['ltr_limit'], cfg['stability']['ltr_limit']],
+                  'acceleration': [cfg['control']['acceleration_min_mps2'], cfg['control']['acceleration_max_mps2']],
+                  'steering': [cfg['control']['steering_min_rad'], cfg['control']['steering_max_rad']]}
+    y_limits = {'yaw': (0, 5), 'beta': (0, 30), 'roll': (0, 40),
+                'ltr': (0, 2), 'acceleration': (0, 5), 'steering': (0, 42)}
     output.mkdir(parents=True, exist_ok=True)
-
-    # 绘图字体配置：
     with matplotlib.rc_context({
-        'font.family': 'Times New Roman',
-        'font.size': 14,
-        'axes.labelsize': 16,
-        'xtick.labelsize': 14,
-        'ytick.labelsize': 14,
-        'legend.fontsize': 16,
+        'font.family': 'Times New Roman', 'font.size': 14,
+        'axes.labelsize': 16, 'xtick.labelsize': 14,
+        'ytick.labelsize': 14, 'legend.fontsize': 16,
     }), np.load(path, allow_pickle=False) as data:
-        for name, keys in (('geometry_stability', KEYS[:6]), ('control_safety', KEYS[6:])):
-            fig, axes = plt.subplots(3, 2, figsize=(12, 12))
-            for ax, k in zip(axes.flat, keys):
-                spec = metadata['constraints'][k]
-                combined = np.concatenate([data[f'{m}_{k}_values'] for m in metadata['methods']])
-                thresholds = spec['thresholds']
-                if len(combined):
-                    # 用两种方法合并数据的0.5%～99.5%分位数确定绘图范围
-                    low, high = np.quantile(combined, [0.005, 0.995])
-                    pad = max((high - low) * .03, max(abs(low), abs(high), 1.) * 1e-6)
-                    bins = np.linspace(low - pad, high + pad, 41)
-                    violation_rates = []
-                    for m, color in zip(metadata['methods'], ('#0072BD', '#EDB120')):
-                        v, b = (data[f'{m}_{k}_{s}'] for s in ('values', 'bad'))
-                        if len(v):
-                            density, _ = np.histogram(v, bins=bins, density=True)
-                            widths = np.diff(bins)
-                            centers = (bins[:-1] + bins[1:]) / 2
-                            ax.bar(centers, density, width=widths*.9, color=color,
-                                   alpha=.5, linewidth=0, label=m, zorder=2)
-                            violation_rates.append((100*b.mean(), color))
-                    annotation = ax.inset_axes([.02, .77, .38, .20])
-                    annotation.set_axis_off()
-                    annotation.add_patch(FancyBboxPatch(
-                        (-.03, -.03), 1.06, 1.06, transform=annotation.transAxes,
-                        boxstyle='round,pad=0.015,rounding_size=0.06',
-                        facecolor='lightgray', alpha=.1, edgecolor='none',
-                        clip_on=False, zorder=0))
-                    annotation.set_xlim(0, 1.65)
-                    annotation.set_ylim(-.5, 2.1)
-                    annotation.text(.825, 2.05, 'Violations', ha='center', va='top', fontsize=14)
-                    maximum_rate = max(rate for rate, _ in violation_rates)
-                    for y, (rate, color) in zip((1, 0), violation_rates):
-                        length = rate/maximum_rate if maximum_rate else 0
-                        annotation.barh(y, length, height=.35, color=color, alpha=.5, linewidth=0)
-                        annotation.text(length+.04, y, f'{rate:.2f}%', va='center', fontsize=14)
-                else:
-                    message = 'No eligible collision objects' if k in ('intertruck', 'external') else 'No evaluable prediction intervals'
-                    ax.text(.5, .5, message+'\nn=0; violation rates N/A', ha='center', transform=ax.transAxes)
-                for threshold in thresholds:
-                    ax.axvline(threshold, color='black', linestyle='--', linewidth=1, zorder=3)
-                ax.set(xlabel=spec['label'],
-                       ylabel='Density' if ax.get_subplotspec().is_first_col() else '')
-                ax.set_axisbelow(True)
-                ax.grid(alpha=.2)
-
-                y_limits = {
-                    'road':              (0, 0.9),
-                    'curvature':         (0, 120),
-                    'yaw':               (0, 5),
-                    'beta':              (0, 30),
-                    'roll':              (0, 40),
-                    'ltr':               (0, 2),
-                    'acceleration_rate': (0, 1.5),
-                    'steering_rate':     (0, 5),
-                    'intertruck':        (0, 1.4),
-                    'external':          (0, 0.16),
-                    'acceleration':      (0, 5),
-                    'steering':          (0, 42),
-                }
-
-                ax.set_ylim(*y_limits[k])
-
-
-            fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center',
-                       bbox_to_anchor=(.5, .01), ncol=2, frameon=False)
-            fig.tight_layout(rect=(0, .05, 1, 1))
-            for extension in ('pdf', 'png'):
-                fig.savefig(output / f'jtp_distributions_{name}.{extension}', dpi=300)
-            plt.close(fig)
+        fig, axes = plt.subplots(3, 2, figsize=(12, 12))
+        for ax, key, label in zip(axes.flat, KEYS, LABELS):
+            combined = np.concatenate([data[f'{method}_{key}_values'] for method in metadata['methods']])
+            low, high = np.quantile(combined, [.005, .995])
+            pad = max((high-low)*.03, max(abs(low), abs(high), 1.)*1e-6)
+            bins = np.linspace(low-pad, high+pad, 41)
+            widths = np.diff(bins)
+            centers = (bins[:-1]+bins[1:])/2
+            violation_rates = []
+            for method, color in zip(metadata['methods'], ('#0072BD', '#EDB120')):
+                values = data[f'{method}_{key}_values']
+                bad = data[f'{method}_{key}_bad']
+                density, _ = np.histogram(values, bins=bins, density=True)
+                ax.bar(centers, density, width=widths*.9, color=color,
+                       alpha=.5, linewidth=0, label=method, zorder=2)
+                violation_rates.append((100*bad.mean(), color))
+            annotation = ax.inset_axes([.02, .77, .38, .20])
+            annotation.set_axis_off()
+            annotation.add_patch(FancyBboxPatch(
+                (-.03, -.03), 1.06, 1.06, transform=annotation.transAxes,
+                boxstyle='round,pad=0.015,rounding_size=0.06',
+                facecolor='lightgray', alpha=.1, edgecolor='none', clip_on=False, zorder=0))
+            annotation.set_xlim(0, 1.65)
+            annotation.set_ylim(-.5, 2.1)
+            annotation.text(.825, 2.05, 'Violations', ha='center', va='top', fontsize=14)
+            maximum_rate = max(rate for rate, _ in violation_rates)
+            for y, (rate, color) in zip((1, 0), violation_rates):
+                length = rate/maximum_rate if maximum_rate else 0
+                annotation.barh(y, length, height=.35, color=color, alpha=.5, linewidth=0)
+                annotation.text(length+.04, y, f'{rate:.2f}%', va='center', fontsize=14)
+            for threshold in thresholds.get(key, ()):
+                ax.axvline(threshold, color='black', linestyle='--', linewidth=1, zorder=3)
+            ax.set(xlabel=label, ylabel='Density' if ax.get_subplotspec().is_first_col() else '')
+            ax.set_ylim(*y_limits[key])
+            ax.set_axisbelow(True)
+            ax.grid(alpha=.2)
+        fig.legend(*axes[0, 0].get_legend_handles_labels(), loc='lower center',
+                   bbox_to_anchor=(.5, .01), ncol=2, frameon=False)
+        fig.tight_layout(rect=(0, .05, 1, 1))
+        for suffix in ('pdf', 'png'):
+            fig.savefig(output/f'jtp_distributions_stability_control.{suffix}', dpi=300)
+        plt.close(fig)

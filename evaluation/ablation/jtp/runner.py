@@ -2,7 +2,7 @@
 
 Every selected synchronized frame is evaluated with the controls and execution
 trajectory returned by JTP. Full paper feasibility is measured independently
-from the complete constraint set; no nominal-output fallback is applied.
+from stability and control magnitude only; no fallback is applied.
 """
 from __future__ import annotations
 
@@ -20,8 +20,7 @@ from highway_env.planner.diffusion.config.experiment import resolve_repo_file, l
 from highway_env.planner.diffusion.training.control import load_control_checkpoint
 from highway_env.planner.diffusion.projection import JointTrajectoryProjector, load_jtp_config
 from highway_env.planner.diffusion.projection.constraints import stability_limits
-from .data import (selected_frames, collate_frame, build_road_geometry,
-                   build_external_traffic, local_to_world)
+from .data import selected_frames, collate_frame, local_to_world
 from .metrics import evaluate_group, trajectory_deviation_m, validate_evaluation_config
 from .reporting import write_json
 from .visualization import draw_projection_figures
@@ -49,142 +48,21 @@ def _seed_for_frame(seed, episode, frame):
 
 
 
-def _road_safety_edges_world(road_meta, pose0, safety_margin_m):
-    """Inset the measured road edges by the configured footprint safety margin."""
-    center = np.asarray(road_meta['center_local'], dtype=np.float64)
-    half_width = np.asarray(road_meta['half_width_m'], dtype=np.float64)
-    left = np.asarray(road_meta['left_edge_local'], dtype=np.float64)
-    right = np.asarray(road_meta['right_edge_local'], dtype=np.float64)
-    ratio = np.divide(float(safety_margin_m), half_width,
-                      out=np.full_like(half_width, np.nan), where=half_width > 1.0e-9)
-    # A non-positive residual corridor is represented as NaN and is not drawn
-    # as a feasible safety envelope. This avoids visually inventing safe space.
-    valid = ratio < 1.0
-    ratio = np.where(valid, ratio, np.nan)
-    safe_left = left + ratio[:, None] * (center - left)
-    safe_right = right + ratio[:, None] * (center - right)
-    zeros = np.zeros((len(center), 1), dtype=np.float64)
-    safe_left_world = local_to_world(np.column_stack((safe_left, zeros[:, 0])), pose0)[:, :2]
-    safe_right_world = local_to_world(np.column_stack((safe_right, zeros[:, 0])), pose0)[:, :2]
-    return safe_left_world, safe_right_world, bool(np.all(valid))
-
-
-def _summarize_solver_diagnostics(frame_diagnostics):
-    """Aggregate termination, active-set truncation, and group-wise progress."""
+def _summarize_solver_diagnostics(frames):
     from collections import Counter
-
-    status_counts = Counter()
-    group_values = {name: {key: [] for key in (
-        'initial_max_violation', 'final_max_violation', 'max_violation_reduction',
-        'initial_violation_count', 'final_violation_count', 'violation_count_reduction',
-        'initial_violation_l2', 'final_violation_l2', 'violation_l2_reduction')}
-        for name in ('stability', 'road', 'curvature', 'control', 'control_rate')}
-    active_total = Counter(); active_selected = Counter(); active_truncated = Counter()
-    sampling_omitted = Counter(); topk_truncated = Counter()
-    iterations = []; accepted_iterations = []
-    linearization_ms = []; solver_ms = []; validation_ms = []; group_steps = []
-    cache_builds = []; linearization_counts = []; validation_counts = []; methods = Counter()
-    sampled_rows = {name: [] for name in ('stability', 'road', 'curvature', 'control_rate')}
-    refinement_events = []
-    protection_failures = 0
-    protection_excesses = []
-    internal_feasible = 0
-    for frame in frame_diagnostics:
-        diag = frame.get('active_set_diagnostics') or {}
-        status = str(frame.get('projection_status', 'unknown'))
-        status_counts[status] += 1
-        internal_feasible += int(bool(frame.get('projector_constraints_satisfied', False)))
-        iterations.extend(int(value) for value in frame.get(
-            'iterations_by_vehicle', [frame.get('iterations', 0)]))
-        accepted_iterations.append(float(diag.get('mean_accepted_iterations_per_vehicle',
-                                                   diag.get('accepted_iterations', 0))))
-        for name, values in (diag.get('group_progress') or {}).items():
-            if name in group_values:
-                for key in group_values[name]:
-                    if key in values:
-                        group_values[name][key].append(float(values[key]))
-        cache_builds.append(int(diag.get('static_cache_builds', 0)))
-        linearization_counts.append(int(diag.get('linearization_count', 0)))
-        validation_counts.append(int(diag.get('nonlinear_validation_count', 0)))
-        methods[str(diag.get('solver_method', 'unknown'))] += 1
-        for vehicle_sampling in diag.get('constraint_sampling_by_vehicle', []):
-            for name in sampled_rows:
-                sampled_rows[name].append(int(vehicle_sampling['sampled_rows_by_family'][name]))
-            refinement_events.extend(vehicle_sampling.get('refinement_events', []))
-        for step in diag.get('projection', []):
-            linearization_ms.append(float(step.get('linearization_ms', 0)))
-            solver_ms.append(float(step.get('grouped_solver_ms', 0)))
-            validation_ms.append(float(step.get('nonlinear_validation_ms', 0)))
-            group_steps.extend(step.get('groups', []))
-            for group in step.get('groups', []):
-                if 'protection_ok' in group:
-                    protection_failures += int(not bool(group['protection_ok']))
-                    protection_excesses.append(float(group.get('protection_peak', 0.0)))
-                else:
-                    excess = float(group.get('protection_linearized_regression_max', 0.0))
-                    protection_failures += int(excess > 1.0e-6)
-                    protection_excesses.append(excess)
-            for name, value in (step.get('active_total_counts') or {}).items():
-                active_total[name] += int(value)
-            for name, value in (step.get('active_counts') or {}).items():
-                active_selected[name] += int(value)
-            for name, value in (step.get('active_truncated_counts') or {}).items():
-                active_truncated[name] += int(value)
-            for name, value in (step.get('active_sampling_omitted_counts') or {}).items():
-                sampling_omitted[name] += int(value)
-            for name, value in (step.get('active_topk_truncated_counts') or {}).items():
-                topk_truncated[name] += int(value)
-
-    mean_progress = {name: {key: (float(np.mean(values)) if values else None)
-                             for key, values in metrics.items()}
-                     for name, metrics in group_values.items()}
-    truncation = {}
-    temporal_omission = {}
-    for name in ('stability', 'road', 'curvature', 'control_rate'):
-        total = int(active_total[name]); selected = int(active_selected[name])
-        truncation[name] = {
-            'sparse_candidate_violations': max(total - int(sampling_omitted[name]), 0),
-            'active_constraints_selected': selected,
-            'topk_truncated': int(topk_truncated[name]),
-            'topk_truncation_rate_pct': (100.0 * topk_truncated[name] / max(total - sampling_omitted[name], 1)),
-        }
-        temporal_omission[name] = {
-            'full_horizon_violations': total,
-            'omitted_by_temporal_sampling': int(sampling_omitted[name]),
-            'temporal_omission_rate_pct': (100.0 * sampling_omitted[name] / total) if total else 0.0,
-            'combined_omitted_by_sampling_and_topk': int(active_truncated[name]),
-        }
-    count = len(frame_diagnostics)
-    return {
-        'num_frame_seed_projections': count,
-        'termination_status_counts': dict(status_counts),
-        'internal_projector_feasible_pct': 100.0 * internal_feasible / count if count else None,
-        'mean_iterations': float(np.mean(iterations)) if iterations else None,
-        'mean_accepted_iterations': float(np.mean(accepted_iterations)) if accepted_iterations else None,
-        'solver_method_counts': dict(methods),
-        'mean_static_cache_builds': float(np.mean(cache_builds)) if cache_builds else None,
-        'mean_linearization_count': float(np.mean(linearization_counts)) if linearization_counts else None,
-        'mean_nonlinear_validation_count': float(np.mean(validation_counts)) if validation_counts else None,
-        'mean_linearization_ms_per_outer': float(np.mean(linearization_ms)) if linearization_ms else None,
-        'mean_grouped_solver_ms_per_outer': float(np.mean(solver_ms)) if solver_ms else None,
-        'mean_nonlinear_validation_ms_per_outer': float(np.mean(validation_ms)) if validation_ms else None,
-        'num_group_solves': len(group_steps),
-        'num_group_protection_or_own_group_rejections': protection_failures,
-        'max_applied_linear_protection_excess': max(protection_excesses, default=0.),
-        'mean_group_progress': mean_progress,
-        'active_set_topk_truncation': truncation,
-        'temporal_sampling_omission': temporal_omission,
-        'constraint_sampling_stride': (
-            int(frame_diagnostics[0].get('active_set_diagnostics', {}).get('constraint_sampling_stride', 0))
-            if frame_diagnostics else None),
-        'mean_sampled_rows_by_family': {
-            name: (float(np.mean(values)) if values else None)
-            for name, values in sampled_rows.items()},
-        'adaptive_refinement_event_count': len(refinement_events),
-    }
+    vehicles = [v for frame in frames for v in frame['projection_diagnostics']['per_vehicle']]
+    steps = [step for v in vehicles for step in v['projection']]
+    return dict(num_frame_seed_projections=len(frames), num_vehicle_projections=len(vehicles),
+                termination_status_counts=dict(Counter(v['termination_status'] for v in vehicles)),
+                num_qp_solves=len(steps),
+                solver_status_counts=dict(Counter(step['solver_status'] for step in steps)),
+                mean_iterations=float(np.mean([len(v['projection']) for v in vehicles])),
+                mean_accepted_iterations=float(np.mean([v['accepted_iterations'] for v in vehicles])),
+                mean_linearization_ms_per_outer=float(np.mean([step['linearization_ms'] for step in steps])) if steps else None,
+                mean_qp_solve_ms=float(np.mean([step['solver_solve_time_s']*1000 for step in steps])) if steps else None)
 
 
-def _projection_pair(model, projector, features, context, roads, actors, cfg, ev_cfg,
+def _projection_pair(model, projector, features, context, cfg, ev_cfg,
                      *, seed, episode, frame, consistency_tol):
     device = next(model.parameters()).device
     rng = torch.Generator(device=device)
@@ -212,18 +90,12 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
                 f'tolerance {consistency_tol:.4g}; paired evaluation invalid')
         before = evaluate_group(
             nominal_u, nominal_rollout['trajectory'], nominal_rollout['states'],
-            nominal_rollout['ltr'], context, roads, actors, cfg, ev_cfg)
+            nominal_rollout['ltr'], context, cfg, ev_cfg)
 
     # A returned JTP iterate is always evaluated, regardless of whether all
     # projector-internal constraints reached their tolerances. Exceptions are
     # surfaced and abort the evaluation; there is no nominal-trajectory fallback.
-    result = projector.project(
-        nominal_u, context, roads,
-        diagnostic_context={
-            "seed": int(seed),
-            "episode": int(episode),
-            "frame": int(frame),
-        })
+    result = projector.project(nominal_u, context)
     optimization_time_ms_by_vehicle = np.asarray(
         result.diagnostics["optimization_time_ms_by_vehicle"], dtype=np.float64)
 
@@ -236,7 +108,7 @@ def _projection_pair(model, projector, features, context, roads, actors, cfg, ev
     with torch.no_grad():
         after = evaluate_group(
             projected_u, candidate['trajectory'], candidate['states'], candidate['ltr'],
-            context, roads, actors, cfg, ev_cfg)
+            context, cfg, ev_cfg)
 
     control_scale = projected_u.new_tensor(cfg['control']['trust_scale']).view(1, 1, 2)
     delta_norm = torch.linalg.vector_norm(
@@ -274,27 +146,10 @@ def _evaluate_frame(job, model, projector, jtp_cfg, ev, device):
     seed, frame_index, key, entries = job
     episode, frame = key
     features,context,meta=collate_frame(entries,device)
-    if not {'agent_states','agent_valid_mask','map_polylines','map_valid_mask'}.issubset(features):
-        raise KeyError('Missing world traffic/map features for paper JTP evaluation')
-    pose0=context['koopman_pose0_si'].detach().cpu().numpy()
-    roads=[]; roads_meta=[]
-    try:
-        for i in range(len(entries)):
-            road,rmeta=build_road_geometry({k:v[i] for k,v in features.items()},pose0[i])
-            roads.append(road); roads_meta.append(rmeta)
-    except Exception as exc:
-        error={'episode_index':episode,'frame_index':frame,'seed':seed,'reason':f'{type(exc).__name__}: {exc}'}
-        raise RuntimeError(
-            f'Invalid road frame {key}; every selected synchronized frame must produce a JTP result. '
-            f'{error}') from exc
-    actors=build_external_traffic(features,context,int(jtp_cfg['execution']['horizon_steps']),
-                                  float(jtp_cfg['execution']['dt_s']),
-                                  max_actors=int(ev['max_external_actors']),
-                                  max_distance_m=float(ev['max_external_distance_m']))
-    data=_projection_pair(model,projector,features,context,roads,actors,jtp_cfg,ev,
+    data=_projection_pair(model,projector,features,context,jtp_cfg,ev,
                          seed=seed,episode=episode,frame=frame,
                          consistency_tol=float(ev.get('k2_consistency_tolerance',1.e-4)))
-    return context, meta, pose0, roads, roads_meta, actors, data
+    return context, meta, data
 
 
 def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
@@ -308,7 +163,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
     from .distributions import collect, KEYS, FLAGS
     from .statistics import step_records, write_reports
-    from .cases import frame_candidates, candidate_key, save_case, select_geometry_cases
+    from .cases import frame_candidates, candidate_key, save_case
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -355,7 +210,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
     best_cases = {}
     case_figures = {}
-    geometry_cases = []
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     from .parallel import frame_results
     jobs = ((seed, index, key, entries) for seed in seed_values
@@ -368,7 +222,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
         for job, result in results:
             seed, frame_index, key, entries = job
             episode, frame = key
-            context, meta, pose0, roads, roads_meta, actors, data = result
+            context, meta, data = result
             collected_pair = {}
             step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
                               'ego_index': int(item['ego_index'])} for item in meta]
@@ -379,7 +233,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     ('Baseline', 'nominal_u', 'nominal', 'before'),
                     ('Ours', 'projected_u', 'projected', 'after')):
                 collected = collect(data[control_key], data[rollout_key], context,
-                                    roads, actors, jtp_cfg, ev)
+                                    jtp_cfg, ev)
                 collected_pair[method] = collected
                 for k, flag in zip(KEYS, FLAGS):
                     for i, evaluated in enumerate(data[expected_key]):
@@ -396,7 +250,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                       'dataset_seed':int(item.get('seed',-1)),
                       'payload_kg':float(context['koopman_payload_kg'][i].item()),
                       'road_mu':float(context['koopman_road_mu'][i].item()),
-                      'group_size':len(entries),'external_actors':len(actors)}
+                      'group_size':len(entries)}
                 for method,values in [('Baseline',data['before'][i]),('Ours',data['after'][i])]:
                     frame_joint=all(r['joint_feasible'] for r in (data['before'] if method=='Baseline' else data['after']))
                     record={**base,'method':method,**values,'joint_frame_feasible':frame_joint,
@@ -423,16 +277,11 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'mean_vehicle_optimization_time_ms': float(np.mean(data['optimization_time_ms_by_vehicle'])),
                 'max_vehicle_optimization_time_ms': float(np.max(data['optimization_time_ms_by_vehicle'])),
                 'rollout_consistency': data['consistency_max_abs'],
-                'active_set_diagnostics': data['diagnostics'],
+                'projection_diagnostics': data['diagnostics'],
             })
             candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg)
             improved = {kind: c for kind, c in candidates.items()
-                        if kind != 'geometry' and
-                        (kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind]))}
-            geometry_candidate = candidates['geometry']
-            ranked = select_geometry_cases([*geometry_cases, geometry_candidate])
-            if any(c is geometry_candidate for c in ranked):
-                improved['geometry'] = geometry_candidate
+                        if kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind])}
             if improved:
                 nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
                 for i in range(len(entries)):
@@ -440,10 +289,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
                     bounds_b.append(stability_limits(post['states'][i,1:,0].detach(),
                         context['koopman_payload_kg'][i],context['koopman_road_mu'][i],jtp_cfg).detach().cpu().numpy())
-                safety_margin=float(jtp_cfg['geometry']['road_clearance_m']) + float(
-                    jtp_cfg['geometry']['footprint']['circle_radius_m'])
-                safety_edge_pairs=[_road_safety_edges_world(m, pose0[i], safety_margin)
-                                   for i,m in enumerate(roads_meta)]
                 frame_figure={'seed':seed,'episode_index':episode,'frame_index':frame,
                     'ego_ids':np.asarray([int(item['ego_index']) for item in meta]),
                     'dt_s':np.asarray(jtp_cfg['execution']['dt_s']),
@@ -451,7 +296,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'projected_controls':data['projected_u'].detach().cpu().numpy(),
                     'control_lower':np.asarray([jtp_cfg['control']['acceleration_min_mps2'], jtp_cfg['control']['steering_min_rad']]),
                     'control_upper':np.asarray([jtp_cfg['control']['acceleration_max_mps2'], jtp_cfg['control']['steering_max_rad']]),
-                    'control_rate_limits':np.asarray([ev['limits']['acceleration_rate_max_mps3'], ev['limits']['steering_rate_max_rad_s']]),
                     'nominal_world':nom['trajectory'].detach().cpu().numpy(),
                     'projected_world':post['trajectory'].detach().cpu().numpy(),
                     'nominal_states':nom['states'].detach().cpu().numpy(),
@@ -460,20 +304,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     'projected_ltr':post['ltr'].detach().cpu().numpy(),
                     'nominal_stability_bounds':np.stack(bounds_a),
                     'projected_stability_bounds':np.stack(bounds_b),
-                    'road_edge_world':[local_to_world(np.column_stack((m['left_edge_local'],
-                                                np.zeros(len(m['left_edge_local'])))),pose0[i])[:,:2]
-                                       for i,m in enumerate(roads_meta)]+
-                                      [local_to_world(np.column_stack((m['right_edge_local'],
-                                                np.zeros(len(m['right_edge_local'])))),pose0[i])[:,:2]
-                                       for i,m in enumerate(roads_meta)],
-                    'road_safety_edge_world':[pair[0] for pair in safety_edge_pairs]+
-                                             [pair[1] for pair in safety_edge_pairs],
-                    'road_safety_envelope_valid_by_vehicle':[pair[2] for pair in safety_edge_pairs],
-                    'road_safety_margin_m':safety_margin,
-                    'external_actors':[a.pose for a in actors],
-                    'vehicle_sizes_m':np.tile([model.loss_config['safety']['vehicle_length_m'],
-                                               model.loss_config['safety']['vehicle_width_m']], (len(entries), 1)),
-                    'external_actor_sizes_m':np.asarray([[a.length_m, a.width_m] for a in actors]).reshape(-1, 2)}
+                    }
                 for kind, candidate in improved.items():
                     i = candidate['exemplar_index']
                     chosen = {**frame_figure, 'case_kind': kind, 'exemplar_index': i,
@@ -481,18 +312,11 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                               'selection_grade': candidate['grade'], 'selection_score': candidate['rank'],
                               'before_violation_steps': candidate['before_count'],
                               'after_violation_steps': candidate['after_count']}
-                    if kind == 'geometry':
-                        geometry_cases = select_geometry_cases(
-                            [*geometry_cases, {**candidate, 'figure': chosen}])
-                    else:
-                        best_cases[kind] = candidate
-                        case_figures[kind] = chosen
+                    best_cases[kind] = candidate
+                    case_figures[kind] = chosen
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
-    if len(geometry_cases) != 3:
-        raise ValueError('Geometry figure requires three distinct scene frames')
-    case_figures['geometry'] = [c['figure'] for c in geometry_cases]
     evaluation_wall_s = time.perf_counter() - evaluation_start
     if not frame_diagnostics:raise RuntimeError('No valid paired JTP observations')
     output.mkdir(parents=True,exist_ok=True)
@@ -507,8 +331,6 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
     draw_projection_figures(output, case_figures)
-    for index, figure in enumerate(case_figures['geometry'], 1):
-        save_case(output/f'projection_ablation_geometry_{index}_data.npz', figure)
     for kind in ('stability', 'control'):
         save_case(output/f'projection_ablation_{kind}_data.npz', case_figures[kind])
     def selection_metadata(c):
@@ -519,49 +341,25 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'after_violation_steps': c['after_count']}
 
     selection_cases = {kind: selection_metadata(c) for kind, c in best_cases.items()}
-    selection_cases['geometry'] = [selection_metadata(c) for c in geometry_cases]
-    manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
-                           'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
-                           'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
-                           'optimization_time_scope': 'per-vehicle sum of OSQP solver_solve_time_s across all iterations and QPs, including control restoration and failed or timed-out solves'},
-               'optimization_time_definition': 'OSQP solve time summed per vehicle and converted to milliseconds; excludes linearization, QP construction, data transfer, backtracking and diagnostics. The 50 ms limit applies to each QP, not the cumulative time.',
-              'study':'TRACE Ablation 3: Joint Trajectory Projection',
-              'projection_method':'Independent single-vehicle 80-D priority-grouped JTP (structured K2)',
-              'projection_solver_method':jtp_cfg['projection']['solver_method'],
-              'constraint_sampling_stride':jtp_cfg['projection']['constraint_sampling_stride'],
-              'vehicle_projection_scope':'independent_single_vehicle_80d',
-              'projection_output_policy':'Always retain the returned JTP controls and Koopman rollout; no nominal-output fallback. Projection exceptions abort the evaluation.',
-                            'projector_constraint_families':['full-horizon yaw-rate, sideslip, roll and LTR stability',
-                                               'road-boundary clearance','trajectory curvature',
-                                               'acceleration and steering magnitude',
-                                               'acceleration and steering control rates'],
-              'collision_handling':'inter-truck and external-actor collisions are evaluated independently over the full horizon and do not enter JTP projection',
-              'control_rate_handling':'JTP projection and solver diagnostics include previous-applied-control to step 1; independent evaluation and distributions use only prediction-internal differences at steps 2..H',
-              'control_rate_evaluation_scope':'prediction_steps_2_to_H',
-              'control_rate_first_step_excluded':True,
-              'projector_constraints_satisfied_definition':'diagnostic flag for only the constraint families implemented inside JTP; not used as paper joint feasibility',
-              'projection_applied_definition':'per-vehicle normalized control correction L2 norm exceeds configs/projection/jtp.yaml projection.change_tolerance',
-              'reference_trajectories':'single shared frozen K2 inference per synchronized frame and seed',
-              'deviation_definition':'per-vehicle mean pointwise Euclidean XY distance t=1..H from the paired nominal K2 execution trajectory, metres',
-              'violation_denominator':'see statistics entries for each selected unit',
-              'uncertainty_unit':'cluster bootstrap resampling physical synchronized frames, preserving every inference seed and truck',
-              'paper_metrics':['joint feasibility rate','single-vehicle feasibility rate','geometric violation rate','stability violation rate','mean trajectory deviation'],
-              'supplementary_metrics':['collision violation rates','control magnitude/rate violation rates',
-                                       'normalized constraint-excess magnitudes','projection applied rate',
-                                       'normalized control correction','optimization time','projection iterations'],
-              'evaluation_scope':'offline expert-data open loop, not TruckSim closed loop',
-              'dataset':data_manifest,'evaluated_seed_count':len(seed_values),
-              'included_frames_across_seeds':len(frame_diagnostics),
-              'excluded_frames':len(errors),'plot_selection':{
-                   'method':'independent ranked repair examples; not representative aggregate performance',
-                   'cases':selection_cases},
-              'checkpoint':{'path':str(checkpoint_path),'sha256':_sha256(checkpoint_path),
-                  'model_execution':model.vehicle_model.kind,'anchor_strategy':model.anchors_config.get('strategy')},
-              'configs':{'diffusion':str(diffusion_path),'jtp':str(jtp_path),
-                         'jtp_sha256':_sha256(jtp_path),'evaluation':str(config_path),
-                         'evaluation_sha256':_sha256(config_path)},
-              'statistics_unit':statistics_unit,'statistics':statistics,
-              'solver_summary':solver_summary}
+    manifest = dict(
+        study='Single-QP stability and control-magnitude ablation',
+        projection_method='Independent single-vehicle stability QP with hard control bounds',
+        constraint_families=['yaw', 'sideslip', 'roll', 'ltr', 'acceleration', 'steering'],
+        prediction_steps='1..H',
+        projection_output_policy='Evaluate returned controls; exceptions abort; no fallback',
+        optimization_time_definition='Per-vehicle cumulative OSQP solve time, including failed/time-limited QPs; excludes linearization, setup and backtracking',
+        evaluation_scope='offline expert-data open loop',
+        execution=dict(workers=workers, worker_threads=worker_threads if workers > 1 else torch.get_num_threads(),
+                       device=str(device), evaluation_wall_s=evaluation_wall_s,
+                       frame_seed_pairs_per_second=len(frame_diagnostics)/evaluation_wall_s),
+        dataset=data_manifest, evaluated_seed_count=len(seed_values),
+        included_frames_across_seeds=len(frame_diagnostics), excluded_frames=len(errors),
+        plot_selection=dict(method='ranked repair examples; not representative aggregate performance', cases=selection_cases),
+        checkpoint=dict(path=str(checkpoint_path), sha256=_sha256(checkpoint_path),
+                        model_execution=model.vehicle_model.kind, anchor_strategy=model.anchors_config.get('strategy')),
+        configs=dict(diffusion=str(diffusion_path), jtp=str(jtp_path), evaluation=str(config_path),
+                     jtp_sha256=_sha256(jtp_path), evaluation_sha256=_sha256(config_path)),
+        statistics_unit=statistics_unit, statistics=statistics, solver_summary=solver_summary)
     write_json(output/'jtp_manifest.json',manifest)
     print(f'[COMPLETE] {output}; statistics units: {", ".join(units)}', flush=True)
     return manifest
@@ -579,7 +377,7 @@ def main(argv=None):
     parser.add_argument('--seeds',default=None,help='Comma-separated diffusion noise seeds')
     parser.add_argument('--device',default=None)
     parser.add_argument('--output-dir',default=None)
-    parser.add_argument('--constraint-distributions',action='store_true',help='Save full twelve-constraint distributions and plot two 3x2 figures')
+    parser.add_argument('--constraint-distributions',action='store_true',help='Save six-constraint distributions and plot one 3x2 figure')
     parser.add_argument('--workers', type=int, default=None, help='Parallel frame processes; default 1 (serial)')
     parser.add_argument('--worker-threads', type=int, default=None, help='CPU threads per parallel worker; default 1')
     parser.add_argument('--statistics-unit', choices=('both', 'trajectory', 'step'), default='both')

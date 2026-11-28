@@ -1,35 +1,26 @@
-"""Deterministic, independent selection of the three case-study examples."""
+"""Deterministic, independent selection of stability and control case-study examples."""
 import numpy as np
 
 
-KINDS = ('geometry', 'stability', 'control')
-METRICS = {
-    'geometry': ('geometric_violation', 'road_excess_mean_norm', 'geometry_excess_max_norm'),
-    'stability': ('stability_violation', 'stability_excess_mean_norm', 'stability_excess_max_norm'),
-    'control': ('control_violation', 'control_rate_excess_mean_norm', 'control_rate_excess_max_norm'),
-}
-VALUES = {'geometry': ('road', 'curvature'), 'stability': ('yaw', 'beta', 'roll', 'ltr'),
-          'control': ('acceleration_rate', 'steering_rate')}
+KINDS = ('stability', 'control')
+VALUES = {'stability': ('yaw', 'beta', 'roll', 'ltr'),
+          'control': ('acceleration', 'steering')}
 
 
 def violation_steps(kind, bad, i):
-    if kind == 'geometry':
-        result = bad['road'][i].copy()
-        result[1:] |= bad['curvature'][i]
-        return result
     return np.logical_or.reduce([bad[k][i] for k in VALUES[kind]])
 
 
 def candidate_rank(kind, before, after, before_count, after_count, change):
-    flag, mean_key, max_key = METRICS[kind]
+    flag = kind + '_violation'
+    prefix = 'stability' if kind == 'stability' else 'control_magnitude'
+    mean_key, max_key = prefix+'_excess_mean_norm', prefix+'_excess_max_norm'
     count_gain = before_count-after_count
     mean_gain = before[mean_key]-after[mean_key]
     peak_gain = before[max_key]-after[max_key]
-    originally_violated = before['road_violation'] if kind == 'geometry' else (
-        before['control_rate_violation'] if kind == 'control' else before[flag])
-    if originally_violated and not after[flag]:
+    if before[flag] and not after[flag]:
         return (3, before[max_key], before[mean_key], change), 'complete_repair'
-    if originally_violated and (count_gain > 0 or mean_gain > 0):
+    if before[flag] and (count_gain > 0 or mean_gain > 0):
         return (2, count_gain, mean_gain, peak_gain), 'partial_improvement'
     if not before[flag] and not after[flag]:
         return (1, change, 0., 0.), 'remains_feasible'
@@ -37,11 +28,9 @@ def candidate_rank(kind, before, after, before_count, after_count, change):
 
 
 def frame_candidates(pair, collected, meta, seed, episode, frame, cfg):
-    scales = {'road': cfg['geometry']['road_clearance_m'],
-              'curvature': cfg['geometry']['curvature_limit_per_m'],
-              **dict(zip(('yaw', 'beta', 'roll', 'ltr'), cfg['projection']['residual_scales']['stability'])),
-              'acceleration_rate': cfg['control']['acceleration_rate_max_mps3'],
-              'steering_rate': cfg['control']['steering_rate_max_rad_s']}
+    scales = dict(zip(('yaw', 'beta', 'roll', 'ltr'), cfg['projection']['residual_scales']['stability']))
+    scales.update(acceleration=cfg['control']['acceleration_max_mps2']-cfg['control']['acceleration_min_mps2'],
+                  steering=cfg['control']['steering_max_rad']-cfg['control']['steering_min_rad'])
     result = {}
     for kind in KINDS:
         candidates = []
@@ -61,25 +50,5 @@ def candidate_key(candidate):
     return candidate['rank'] + tuple(-int(v) for v in candidate['identity'])
 
 
-def select_geometry_cases(candidates):
-    """Keep the three highest-ranked repairs from distinct physical frames."""
-    selected = {}
-    for candidate in sorted(candidates, key=candidate_key, reverse=True):
-        frame = candidate['identity'][1:3]
-        if frame not in selected:
-            selected[frame] = candidate
-    return list(selected.values())[:3]
-
-
 def save_case(path, figure):
-    arrays = {k: np.asarray(v) for k, v in figure.items()
-              if k not in ('road_edge_world', 'road_safety_edge_world')}
-    for key in ('road_edge_world', 'road_safety_edge_world'):
-        values = figure[key]
-        lengths = np.asarray([len(v) for v in values], dtype=np.int32)
-        packed = np.full((len(values), int(lengths.max()), 2), np.nan)
-        for i, value in enumerate(values):
-            packed[i, :len(value)] = value
-        arrays[key] = packed
-        arrays[key+'_lengths'] = lengths
-    np.savez_compressed(path, **arrays)
+    np.savez_compressed(path, **{key: np.asarray(value) for key,value in figure.items()})

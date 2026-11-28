@@ -624,13 +624,7 @@ class MultiAgentAction(ActionType):
                 builder.config_path = str(runtime_context_path)
                 self.env.jtp_live_context_builder = builder
 
-            feature_builder = getattr(self.env, "planner_feature_builder", None)
-            live = builder.build(
-                self.env,
-                feature_builder,
-                target_lane_indices,
-                include_projection_inputs=jtp_enabled,
-            )
+            live = builder.build(self.env)
             self.env.latest_diffusion_jtp_context_status = live.get("status", "unknown")
             if not live.get("ready", False):
                 # Five synchronized 10-Hz states and four applied controls are

@@ -49,30 +49,14 @@ def _summary(rows):
         'num_frames': len({(row['seed'], row['episode_index'], row['frame_index']) for row in rows}),
         'joint_feasibility_pct': 100.0 * sum(distinct_frames.values()) / len(distinct_frames),
         'joint_vehicle_feasibility_pct': pct('joint_feasible'),
-        'geometric_violation_pct': pct('geometric_violation'),
         'stability_violation_pct': pct('stability_violation'),
-        'collision_violation_pct': pct('collision_violation'),
-        'external_collision_violation_pct': pct('external_collision_violation'),
-        'intertruck_collision_violation_pct': pct('intertruck_collision_violation'),
         'control_violation_pct': pct('control_violation'),
         'control_magnitude_violation_pct': pct('control_magnitude_violation'),
-        'control_rate_violation_pct': pct('control_rate_violation'),
     }
 
-    continuous_diagnostics = {
-        'stability_excess_mean_norm': 'stability_excess_mean_norm',
-        'mean_vehicle_max_stability_excess_norm': 'stability_excess_max_norm',
-        'geometry_excess_mean_norm': 'geometry_excess_mean_norm',
-        'mean_vehicle_max_geometry_excess_norm': 'geometry_excess_max_norm',
-        'control_magnitude_excess_mean_norm': 'control_magnitude_excess_mean_norm',
-        'mean_vehicle_max_control_magnitude_excess_norm': 'control_magnitude_excess_max_norm',
-        'control_rate_excess_mean_norm': 'control_rate_excess_mean_norm',
-        'mean_vehicle_max_control_rate_excess_norm': 'control_rate_excess_max_norm',
-        'collision_penetration_mean_m': 'collision_penetration_mean_m',
-        'mean_vehicle_max_collision_penetration_m': 'collision_penetration_max_m',
-    }
-    for summary_key, row_key in continuous_diagnostics.items():
-        summary[summary_key] = float(np.mean([row[row_key] for row in rows]))
+    for family in ('stability', 'control_magnitude'):
+        summary[family+'_excess_mean_norm'] = float(np.mean([r[family+'_excess_mean_norm'] for r in rows]))
+        summary['mean_vehicle_max_'+family+'_excess_norm'] = float(np.mean([r[family+'_excess_max_norm'] for r in rows]))
 
     if rows[0]['method'] == 'Ours':
         summary.update({
@@ -103,95 +87,54 @@ def _summary(rows):
 
 
 def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
-    """Generate the detailed step table or the existing trajectory-level table."""
-    if unit == 'step':
-        groups = (
-            ('Geometry', (('Road boundary satisfaction (%)', 'road_violation_pct'),
-                          ('Curvature satisfaction (%)', 'curvature_violation_pct'))),
-            ('Stability', (('Yaw rate satisfaction (%)', 'yaw_violation_pct'),
-                           ('Sideslip angle satisfaction (%)', 'sideslip_violation_pct'),
-                           ('Roll angle satisfaction (%)', 'roll_violation_pct'),
-                           ('Lateral load transfer ratio (LTR) satisfaction (%)', 'ltr_violation_pct'))),
-            ('Control', (('Acceleration magnitude satisfaction (%)', 'acceleration_violation_pct'),
-                         ('Steering magnitude satisfaction (%)', 'steering_violation_pct'),
-                         ('Acceleration rate satisfaction (%)', 'acceleration_rate_violation_pct'),
-                         ('Steering rate satisfaction (%)', 'steering_rate_violation_pct'))),
-            ('Overall feasibility', (('Individual vehicle-step feasibility (%)', 'feasibility_pct'),
-                                     ('Synchronized platoon-step feasibility (%)', 'joint_feasibility_pct'))),
-            ('Real-time', (('Mean optimization time (ms)', 'optimization_time_ms_mean'),
-                           ('P95 optimization time (ms)', 'optimization_time_ms_p95'))),
-        )
-        lines = [
-            r'\begin{table}[!t]',
-            r'\centering',
-            r'\caption{Per-constraint Satisfaction, Overall Feasibility, and Projection Latency (step statistics)}',
-            r'\label{tab:projection_ablation_step}',
-            r'\scriptsize',
-            r'\renewcommand{\arraystretch}{1.12}',
-            r'\setlength{\tabcolsep}{4pt}',
-            r'\begin{tabular}{@{}lcc@{}}',
-            r'\hline',
-            r'\textbf{Constraint / Metric} & \textbf{Baseline} & \textbf{JTP} \\',
-            r'\hline',
-        ]
-        for group, metrics in groups:
-            lines.append(r'\multicolumn{3}{@{}l}{\textbf{' + group + r'}} \\')
-            for label, metric in metrics:
-                cells = []
-                for method in ('Baseline', 'Ours'):
-                    value = by_method[method].get(metric)
-                    if value is None:
-                        cell = 'N/A'
-                    elif metric.endswith('_violation_pct'):
-                        cell = f'{100.0-value:.2f}'
-                    else:
-                        cell = f'{value:.2f}'
-                    if method == 'Ours':
-                        cell = r'\textbf{' + cell + '}'
-                    cells.append(cell)
-                lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
-        lines.extend([
-            r'\hline',
-            r'\multicolumn{3}{@{}l}{\footnotesize Collision constraints remain included in overall feasibility; latency is measured per vehicle projection.} \\',
-            r'\hline',
-            r'\end{tabular}',
-            r'\end{table}',
-            '',
-        ])
-        return '\n'.join(lines)
-
-    caption = f'Effects of Joint Trajectory Projection on Constraint Satisfaction ({unit} statistics)'
+    """Generate the six-constraint table for the requested statistics unit."""
+    groups = (
+        ('Stability', (('Yaw rate satisfaction (%)', 'yaw_violation_pct'),
+                       ('Sideslip angle satisfaction (%)', 'sideslip_violation_pct'),
+                       ('Roll angle satisfaction (%)', 'roll_violation_pct'),
+                       ('Lateral load transfer ratio (LTR) satisfaction (%)', 'ltr_violation_pct'))),
+        ('Control', (('Acceleration magnitude satisfaction (%)', 'acceleration_violation_pct'),
+                     ('Steering magnitude satisfaction (%)', 'steering_violation_pct'))),
+        ('Overall feasibility', (('Individual vehicle-step feasibility (%)', 'feasibility_pct'),
+                                 ('Synchronized platoon-step feasibility (%)', 'joint_feasibility_pct'))),
+        ('Real-time', (('Mean optimization time (ms)', 'optimization_time_ms_mean'),
+                       ('P95 optimization time (ms)', 'optimization_time_ms_p95'))),
+    )
     lines = [
         r'\begin{table}[!t]',
         r'\centering',
-        r'\caption{' + caption + '}',
-        r'\label{tab:projection_ablation_' + unit + '}',
+        r'\caption{Per-constraint Satisfaction, Overall Feasibility, and Projection Latency (step statistics)}',
+        r'\label{tab:projection_ablation_step}',
         r'\scriptsize',
-        r'\renewcommand{\arraystretch}{1.15}',
-        r'\setlength{\tabcolsep}{2.5pt}',
-        r'\begin{tabular}{@{}lccccc@{}}',
+        r'\renewcommand{\arraystretch}{1.12}',
+        r'\setlength{\tabcolsep}{4pt}',
+        r'\begin{tabular}{@{}lcc@{}}',
         r'\hline',
-        r'\textbf{Method} & \shortstack{\textbf{Joint}\\\textbf{Feas. (\%)}} & '
-        r'\textbf{Feas. (\%)} & '
-        r'\shortstack{\textbf{Geometric}\\\textbf{Viol. (\%)}} & '
-        r'\shortstack{\textbf{Stability}\\\textbf{Viol. (\%)}} & '
-        r'\shortstack{\textbf{Deviation}\\\textbf{(m)}} \\',
+        r'\textbf{Constraint / Metric} & \textbf{Baseline} & \textbf{JTP} \\',
         r'\hline',
     ]
-    for key, label in (('Baseline', 'Baseline'), ('Ours', r'\textbf{Ours}')):
-        value = by_method[key]
-        def formatted(name, digits=2):
-            v = value.get(name)
-            return 'N/A' if v is None else f'{v:.{digits}f}'
-        cells = [
-            formatted('joint_feasibility_pct'),
-            formatted('feasibility_pct'),
-            formatted('geometric_violation_pct'),
-            formatted('stability_violation_pct'),
-            'N/A' if key == 'Baseline' else formatted('deviation_m', 3),
-        ]
-        if key == 'Ours':
-            cells = [r'\textbf{' + cell + '}' for cell in cells]
-        lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
-    lines.extend([r'\hline', r'\end{tabular}', r'\end{table}', ''])
-    return '\n'.join(lines)
+    for group, metrics in groups:
+        lines.append(r'\multicolumn{3}{@{}l}{\textbf{' + group + r'}} \\')
+        for label, metric in metrics:
+            cells = []
+            for method in ('Baseline', 'Ours'):
+                value = by_method[method].get(metric)
+                if value is None:
+                    cell = 'N/A'
+                elif metric.endswith('_violation_pct'):
+                    cell = f'{100.0-value:.2f}'
+                else:
+                    cell = f'{value:.2f}'
+                if method == 'Ours':
+                    cell = r'\textbf{' + cell + '}'
+                cells.append(cell)
+            lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
+    lines.extend([
+        r'\hline',
+        r'\multicolumn{3}{@{}l}{\footnotesize Feasibility includes stability and control magnitude only; timing is per vehicle.} \\',
+        r'\hline',
+        r'\end{tabular}',
+        r'\end{table}',
+        '',
+    ])
+    return '\n'.join(lines).replace('step statistics', unit+' statistics').replace('ablation_step', 'ablation_'+unit).replace('vehicle-step', 'vehicle-'+unit).replace('platoon-step', 'platoon-'+unit)

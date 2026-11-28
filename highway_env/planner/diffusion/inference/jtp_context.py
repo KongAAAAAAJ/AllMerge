@@ -1,4 +1,4 @@
-"""Live, synchronized K2 and geometric context for online JTP inference.
+"""Live, synchronized K2 context for online JTP inference.
 
 The K2 predictor was trained on 10-Hz SI histories:
   state = [vx, vy, body yaw rate, roll, Euler roll rate]
@@ -18,7 +18,6 @@ from typing import Any
 import numpy as np
 import torch
 
-from highway_env.planner.diffusion.projection.types import RoadGeometry
 
 
 @dataclass
@@ -41,7 +40,6 @@ class LiveK2ContextBuilder:
         self.config = dict(config)
         runtime = self.config.get("runtime", {}) or {}
         self.context_cfg = dict(runtime.get("context", {}) or {})
-        self.road_cfg = dict(runtime.get("road", {}) or {})
         self._histories: dict[int, _VehicleHistory] = {}
 
         self.sample_dt_s = float(self.context_cfg.get("sample_dt_s", 0.1))
@@ -226,121 +224,10 @@ class LiveK2ContextBuilder:
         history.last_pose = pose
         return history, len(history.states) == 5 and len(history.controls) == 4
 
-    def _build_road_geometry(self, env, vehicle, target_lane_index) -> RoadGeometry:
-        network = env.road.network
-        lane_dict = network.lanes_dict()
-        current_index = tuple(vehicle.lane_index)
-        target_index = tuple(target_lane_index) if target_lane_index is not None else current_index
-        groups = []
-        for index in (current_index, target_index):
-            group = tuple(index[:2])
-            if group not in groups:
-                groups.append(group)
-
-        sample_count = int(self.road_cfg.get("sample_points", 64))
-        backward = float(self.road_cfg.get("backward_range_m", 20.0))
-        forward = float(self.road_cfg.get("forward_range_m", 180.0))
-        if sample_count < 3 or backward < 0 or forward <= 0:
-            raise ValueError("Invalid JTP road sampling configuration")
-
-        # Include nearby successor/merge road segments so that the corridor
-        # covers the complete four-second execution horizon, including cases
-        # where the current lane segment ends before the prediction horizon.
-        if bool(self.road_cfg.get("include_connected_road_segments", True)):
-            ego_heading = float(vehicle.heading)
-            ego_tangent = np.asarray([np.cos(ego_heading), np.sin(ego_heading)])
-            ego_position = np.asarray(vehicle.position, dtype=np.float64)
-            lateral_range = float(self.road_cfg.get("search_lateral_range_m", 40.0))
-            for lane_index, lane in lane_dict.items():
-                group = tuple(lane_index[:2])
-                if group in groups or bool(getattr(lane, "forbidden", False)):
-                    continue
-                start_point = np.asarray(lane.position(0.0, 0.0), dtype=np.float64)
-                delta = start_point - ego_position
-                forward_distance = float(np.dot(delta, ego_tangent))
-                lateral_distance = float(ego_tangent[0] * delta[1] - ego_tangent[1] * delta[0])
-                heading_error = float(np.arctan2(
-                    np.sin(float(lane.heading_at(0.0)) - ego_heading),
-                    np.cos(float(lane.heading_at(0.0)) - ego_heading)))
-                if (-backward <= forward_distance <= forward + 30.0
-                        and abs(lateral_distance) <= lateral_range
-                        and abs(heading_error) <= 0.5 * np.pi):
-                    groups.append(group)
-
-        centerlines, left_widths, right_widths = [], [], []
-        for group in groups:
-            lanes = [(tuple(index), lane) for index, lane in lane_dict.items()
-                     if tuple(index[:2]) == group and not bool(getattr(lane, "forbidden", False))]
-            if not lanes:
-                continue
-
-            # Determine physical left/right using the local road tangent,
-            # rather than assuming that lane IDs encode a world-y ordering.
-            reference_lane = network.get_lane(current_index) if tuple(current_index[:2]) == group else lanes[0][1]
-            s_ref = float(np.clip(reference_lane.local_coordinates(vehicle.position)[0],
-                                  0.0, float(reference_lane.length)))
-            reference_position = np.asarray(reference_lane.position(s_ref, 0.0), dtype=np.float64)
-            reference_heading = float(reference_lane.heading_at(s_ref))
-            tangent = np.asarray([np.cos(reference_heading), np.sin(reference_heading)])
-
-            lateral_positions = []
-            for lane_index, lane in lanes:
-                s0 = float(np.clip(lane.local_coordinates(vehicle.position)[0],
-                                   0.0, float(lane.length)))
-                center = np.asarray(lane.position(s0, 0.0), dtype=np.float64)
-                delta = center - reference_position
-                lateral = float(tangent[0] * delta[1] - tangent[1] * delta[0])
-                lateral_positions.append((lateral, lane_index, lane, s0))
-            lateral_positions.sort(key=lambda item: item[0])
-            right_lane, left_lane = lateral_positions[0], lateral_positions[-1]
-            right_obj, right_s0 = right_lane[2], right_lane[3]
-            left_obj, left_s0 = left_lane[2], left_lane[3]
-
-            left_start, left_end = max(0.0, left_s0 - backward), min(float(left_obj.length), left_s0 + forward)
-            right_start, right_end = max(0.0, right_s0 - backward), min(float(right_obj.length), right_s0 + forward)
-            if min(left_end - left_start, right_end - right_start) < 1.0:
-                continue
-            left_s = np.linspace(left_start, left_end, sample_count)
-            right_s = np.linspace(right_start, right_end, sample_count)
-            left_boundary, right_boundary = [], []
-            for s_value in left_s:
-                width = float(left_obj.width_at(float(s_value)))
-                left_boundary.append(left_obj.position(float(s_value), 0.5 * width))
-            for s_value in right_s:
-                width = float(right_obj.width_at(float(s_value)))
-                right_boundary.append(right_obj.position(float(s_value), -0.5 * width))
-            left_boundary = np.asarray(left_boundary, dtype=np.float32)
-            right_boundary = np.asarray(right_boundary, dtype=np.float32)
-            centerline = 0.5 * (left_boundary + right_boundary)
-            half_width = 0.5 * np.linalg.norm(left_boundary - right_boundary, axis=-1)
-            if (np.linalg.norm(np.diff(centerline, axis=0), axis=-1) <= 1.0e-5).any():
-                raise RuntimeError(f"Degenerate JTP road corridor for road group {group}")
-            if not np.isfinite(centerline).all() or not np.isfinite(half_width).all() or (half_width <= 0).any():
-                raise RuntimeError(f"Invalid JTP road corridor for road group {group}")
-            centerlines.append(centerline)
-            left_widths.append(half_width)
-            right_widths.append(half_width)
-
-        if not centerlines:
-            raise RuntimeError(
-                f"Cannot construct a JTP drivable corridor for current/target lanes "
-                f"{current_index} / {target_index}"
-            )
-        return RoadGeometry(
-            centerlines_xy=torch.as_tensor(np.stack(centerlines), dtype=torch.float32),
-            left_width_m=torch.as_tensor(np.stack(left_widths), dtype=torch.float32),
-            right_width_m=torch.as_tensor(np.stack(right_widths), dtype=torch.float32),
-        )
-
-    def build(self, env, feature_builder, target_lane_indices, *, include_projection_inputs: bool) -> dict[str, Any]:
+    def build(self, env) -> dict[str, Any]:
         vehicles = list(env.controlled_vehicles)
         if not vehicles:
             raise RuntimeError("JTP live context requires at least one controlled vehicle")
-        if target_lane_indices is None:
-            target_lane_indices = [vehicle.lane_index for vehicle in vehicles]
-        if len(target_lane_indices) != len(vehicles):
-            raise ValueError("JTP target lane count must match controlled vehicles")
-
         env_config = getattr(env, "config", {}) or {}
         policy_hz = float(env_config.get("policy_frequency", 1.0 / self.sample_dt_s))
         simulation_hz = float(env_config.get("simulation_frequency", policy_hz))
@@ -389,9 +276,4 @@ class LiveK2ContextBuilder:
         }
 
         result = {"ready": True, "status": "ready", "context": context}
-        if include_projection_inputs:
-            result["road_geometry"] = [
-                self._build_road_geometry(env, vehicle, lane_index)
-                for vehicle, lane_index in zip(vehicles, target_lane_indices)
-            ]
         return result

@@ -20,31 +20,17 @@ def _resolve_path(value):
     return path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
-def _unpack_ragged(data, key):
-    packed = data[key]
-    lengths_key = f'{key}_lengths'
-    lengths = data[lengths_key]
-    return [packed[i, :int(length)].copy() for i, length in enumerate(lengths)]
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Replot TRACE JTP ablation figure from saved NPZ')
-    parser.add_argument('--figure-data', nargs='+', required=True, help='Three projection_ablation_geometry_<1..3>_data.npz files, or stability/control data files')
+    parser.add_argument('--figure-data', nargs='+', required=True, help='projection_ablation_stability_data.npz and/or projection_ablation_control_data.npz')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
 
     cases = {}
     for value in args.figure_data:
         with np.load(_resolve_path(value), allow_pickle=False) as data:
-            figure = {key: data[key].copy() for key in data.files
-                      if not key.endswith('_lengths') and key not in ('road_edge_world', 'road_safety_edge_world')}
-            figure['road_edge_world'] = _unpack_ragged(data, 'road_edge_world')
-            figure['road_safety_edge_world'] = _unpack_ragged(data, 'road_safety_edge_world')
-            kind = str(data['case_kind'])
-            if kind == 'geometry':
-                cases.setdefault(kind, []).append(figure)
-            else:
-                cases[kind] = figure
+            figure = {key: data[key].copy() for key in data.files}
+            cases[str(data['case_kind'])] = figure
     output = _resolve_path(args.output_dir)
     draw_projection_figures(output, cases)
     print(f'[COMPLETE] Wrote {", ".join(cases)} PDFs to {output}')

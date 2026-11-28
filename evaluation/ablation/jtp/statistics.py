@@ -5,50 +5,28 @@ from .reporting import _summary, write_csv, write_json, paper_table
 
 
 def step_records(collected, metadata, method, deviation):
-    """Align node constraints at steps 1..H and interval constraints at 2..H."""
     _, bad = collected
-    h = deviation.shape[1]
-    interval_constraints = ('curvature', 'acceleration_rate', 'steering_rate')
     records = []
     for i, base in enumerate(metadata):
-        for t in range(1, h+1):
-            row = {**base, 'method': method, 'prediction_step': t}
-            for k, flag in zip(KEYS, FLAGS):
-                if k in interval_constraints and t == 1:
-                    row[flag] = None
-                else:
-                    index = t-2 if k in interval_constraints else t-1
-                    row[flag] = bool(bad[k][i][index]) if index < len(bad[k][i]) else False
-            for name, components in (
-                    ('stability', ('yaw', 'sideslip', 'roll', 'ltr')),
-                    ('geometric', ('road', 'curvature')),
-                    ('collision', ('external_collision', 'intertruck_collision')),
-                    ('control_magnitude', ('acceleration', 'steering')),
-                    ('control_rate', ('acceleration_rate', 'steering_rate'))):
-                valid = [row[c+'_violation'] for c in components if row[c+'_violation'] is not None]
-                row[name+'_violation'] = any(valid) if valid else None
-            control = [row[k+'_violation'] for k in ('control_magnitude', 'control_rate')
-                       if row[k+'_violation'] is not None]
-            row['control_violation'] = any(control) if control else None
-            applicable = [row[k+'_violation'] for k in ('stability', 'geometric', 'collision', 'control')
-                          if row[k+'_violation'] is not None]
-            row['joint_feasible'] = not any(applicable)
-            row['deviation_m'] = float(deviation[i, t-1]) if method == 'Ours' else None
+        for t in range(deviation.shape[1]):
+            row = {**base, 'method': method, 'prediction_step': t+1,
+                   **{flag: bool(bad[key][i, t]) for key, flag in zip(KEYS, FLAGS)}}
+            row['stability_violation'] = any(row[flag] for flag in FLAGS[:4])
+            row['control_magnitude_violation'] = any(row[flag] for flag in FLAGS[4:])
+            row['control_violation'] = row['control_magnitude_violation']
+            row['joint_feasible'] = not (row['stability_violation'] or row['control_violation'])
+            row['deviation_m'] = float(deviation[i,t]) if method == 'Ours' else None
             records.append(row)
-    for t in range(1, h+1):
-        group = [r for r in records if r['prediction_step'] == t]
-        feasible = all(r['joint_feasible'] for r in group)
-        for row in group:
-            row['joint_frame_feasible'] = feasible
+    for t in range(1, deviation.shape[1]+1):
+        joint = all(r['joint_feasible'] for r in records if r['prediction_step'] == t)
+        for row in records:
+            if row['prediction_step'] == t:
+                row['joint_frame_feasible'] = joint
     return records
 
 
-RATE_KEYS = ('joint_feasibility_pct', 'feasibility_pct', 'geometric_violation_pct',
-             'stability_violation_pct', 'collision_violation_pct', 'control_violation_pct',
-             'control_rate_violation_pct', 'control_magnitude_violation_pct',
-             'external_collision_violation_pct', 'intertruck_collision_violation_pct') + tuple(
-                 flag+'_pct' for flag in FLAGS
-                 if flag+'_pct' not in ('external_collision_violation_pct', 'intertruck_collision_violation_pct'))
+RATE_KEYS = ('joint_feasibility_pct', 'feasibility_pct', 'stability_violation_pct',
+             'control_violation_pct', 'control_magnitude_violation_pct') + tuple(flag+'_pct' for flag in FLAGS)
 
 
 def summary(rows, unit):
@@ -153,8 +131,7 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
     summaries, deltas, confidence = report(rows, unit, repeats, bootstrap_seed)
     add_projection_timing(summaries, frame_diagnostics)
     empty_columns = ['seed', 'episode_index', 'frame_index', 'ego_index', 'method',
-                     'prediction_step', *FLAGS, 'stability_violation', 'geometric_violation',
-                     'collision_violation', 'control_magnitude_violation', 'control_rate_violation',
+                     'prediction_step', *FLAGS, 'stability_violation', 'control_magnitude_violation',
                      'control_violation', 'joint_feasible', 'joint_frame_feasible', 'deviation_m']
     write_csv(directory/f'jtp_per_vehicle_{unit}.csv', rows, empty_columns if not rows else None)
     write_csv(directory/f'jtp_summary_{unit}.csv', [{'method': m, **v} for m, v in summaries.items()])
@@ -169,7 +146,7 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
                'resampling_unit': 'physical episode/frame, preserving seeds, trucks and steps'})
     (directory/f'projection_ablation_table_{unit}.tex').write_text(paper_table(summaries, unit), encoding='utf-8')
     result = {'summary': summaries, 'paired_deltas': deltas,
-            'prediction_steps': '1..H; curvature and control rates 2..H' if unit == 'step' else '1..H; control rates 2..H',
+            'prediction_steps': '1..H',
             'denominator': 'synchronized platoon prediction steps for Joint; valid vehicle prediction steps per constraint otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
     result['timing'] = {
         'unit': 'ms_per_vehicle_projection',
@@ -178,7 +155,7 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
         'num_synchronized_frames': len(frame_diagnostics),
         'definition': (
             'Mean and P95 of cumulative OSQP solve time per vehicle, including all '
-            'iterations, control restoration and failed or timed-out QPs. Excludes '
+            'iterations and failed or timed-out QPs. Excludes '
             'linearization, QP construction, data transfer, backtracking and diagnostics. '
             'Baseline adds no optimization time; each QP has its own time limit.'
         ),

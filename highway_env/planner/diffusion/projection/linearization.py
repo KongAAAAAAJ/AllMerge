@@ -1,8 +1,6 @@
 """Shared K2 sensitivities. Cache lifetime is one project() invocation."""
 from __future__ import annotations
 import torch
-from .execution_adapter import KoopmanExecutionAdapter
-from highway_env.vehicle.koopman.models.base_model import rollout_pose
 
 
 def jacobian(fn, x):
@@ -51,62 +49,26 @@ class K2StaticCache:
             local = torch.stack([torch.autograd.grad(y[...,i].sum(), z, retain_graph=i<5)[0] for i in range(6)], -2)
         with torch.no_grad():
             outj = local @ self.sensitivity
-            sx = outj[:,:,:5]
-            states = states.detach()
-            pose = rollout_pose(states, self.pose0, self.dt)
-            # Exact derivative of rollout_pose's trapezoidal integration.
-            def integrate(v):
-                return torch.cat((torch.zeros_like(v[:,:1]), torch.cumsum((v[:,:-1]+v[:,1:])*(.5*self.dt), 1)), 1)
-            jyaw = integrate(sx[:,:,2])
-            yaw = pose[:,:,2:3]
-            c,s = yaw.cos(), yaw.sin()
-            vx,vy = states[:,:,0:1], states[:,:,1:2]
-            jvx,jvy = sx[:,:,0], sx[:,:,1]
-            jwx = c*jvx-s*jvy+(-vx*s-vy*c)*jyaw
-            jwy = s*jvx+c*jvy+(vx*c-vy*s)*jyaw
-            jp = torch.stack((integrate(jwx),integrate(jwy),jyaw),2)
-            return {'trajectory':jp, 'states':sx, 'ltr':outj[:,:,5]}
+            return {'states': outj[:, :, :5], 'ltr': outj[:, :, 5]}
 
 
-def shared_linearization(projector, controls, context, roads, current, selected, cache, *, build_metric=True):
-    """Use one output sensitivity and one frozen association per outer iterate."""
-    active_names = [name for name, ids in selected.items() if ids.numel()]
-    if not active_names and not build_metric:
-        return {}, None, 'no_state_active_rows'
+def shared_linearization(projector, controls, context, current, selected, cache):
+    """Differentiate only stability rows; no pose, geometry or control-rate Jacobians."""
     flat = controls.detach().flatten().requires_grad_(True)
     if cache is not None:
         outj = cache.output_jacobians(controls)
-        method = 'structured_k2'
     else:
-        # Shared callable adapter path for synthetic tests and non-K2 execution models.
-        # The resulting constraint Jacobians are consumed by either solver backend.
-        keys = ('trajectory','states','ltr')
-        sizes = [current.rollout[key].numel() for key in keys]
-        def f(v):
-            out = projector._rollout(v.reshape_as(controls), context)
-            return torch.cat([out[key].reshape(-1) for key in keys])
-        j = jacobian(f, flat)
-        outj = {key: part.reshape(*current.rollout[key].shape,flat.numel()) for key,part in zip(keys,j.split(sizes,0))}
-        method = 'callable_autograd'
-    if active_names:
-        def residual(v):
-            dv = v - flat.detach()
-            out = {key: current.rollout[key].detach() + (j.reshape(-1,flat.numel()) @ dv).reshape_as(current.rollout[key]) for key,j in outj.items()}
-            _, groups, _ = projector._constraint_groups(
-                v.reshape_as(controls), context, roads, current.associations, rollout=out)
-            return torch.cat([groups[name][selected[name]] for name in active_names])
-        j = jacobian(residual, flat)
-        sizes = [selected[name].numel() for name in active_names]
-        rows = dict(zip(active_names, j.split(sizes, 0)))
-    else:
-        rows = {}
-    if not build_metric:
-        return rows, None, method
-    jtau = outj['trajectory'].reshape(-1,flat.numel())
-    weights = controls.new_tensor(projector.cfg['optimization']['trajectory_weights']).repeat(controls.shape[0]*(projector.horizon+1))
-    opt=projector.cfg['optimization']; cfg=projector.cfg['projection']
-    wu=controls.new_tensor(opt['control_weights']).repeat(controls.numel()//2)
-    scales=controls.new_tensor(projector.cfg['control']['trust_scale']).repeat(controls.numel()//2)
-    metric=jtau.T @ (weights[:,None]*jtau)+torch.diag(float(opt['lambda_u'])*wu+float(cfg['metric_regularization'])/scales.square())
-    metric=(metric+metric.T)*.5
-    return rows,metric,method
+        def output(v):
+            rollout = projector._rollout(v.reshape_as(controls), context)
+            return torch.cat((rollout['states'].reshape(-1), rollout['ltr'].reshape(-1)))
+        j = jacobian(output, flat)
+        size = current.rollout['states'].numel()
+        outj = {'states': j[:size].reshape(*current.rollout['states'].shape, flat.numel()),
+                'ltr': j[size:].reshape(*current.rollout['ltr'].shape, flat.numel())}
+    def residual(v):
+        dv = v - flat.detach()
+        out = {key: current.rollout[key].detach() +
+               (j.reshape(-1, flat.numel()) @ dv).reshape_as(current.rollout[key])
+               for key, j in outj.items()}
+        return projector._stability(out, context)[selected]
+    return jacobian(residual, flat)

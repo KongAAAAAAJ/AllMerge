@@ -39,78 +39,44 @@ control:
   acceleration_max_mps2: 2.5
   steering_min_rad: -0.61  # -35°
   steering_max_rad: 0.61  # 35°
-  # First differences include the previously applied control at t=0.
-  acceleration_rate_max_mps3: 20
-  steering_rate_max_rad_s: 20
-  rate_tolerance_si: 0.01
   # Characteristic scales used to normalize control-space updates.
   trust_scale: [2.5, 0.08]
 
 optimization:
-  lambda_u: 0.10
-  trajectory_weights: [1.0, 1.0, 0.25]
   control_weights: [0.16, 156.25]
 
 projection:
-  # solver_method: damped_least_squares or constrained_qp
-  solver_method: constrained_qp
   qp:
     backend: osqp
     control_correction_weight: 1.0
-    # Initial values for the first QP smoke test; calibrate from matched-frame diagnostics.
     state_slack:
       linear_penalty: 10.0
       quadratic_penalty: 1.0
-    protection_slack:
-      linear_penalty: 1000.0
-      quadratic_penalty: 100.0
-    eps_abs: 1.0e-3
-    eps_rel: 1.0e-3
+    eps_abs: 0.001
+    eps_rel: 0.001
     max_iter: 20000
-    time_limit_ms: 50.0  # Per-QP OSQP time limit; excludes linearization and backtracking.
+    time_limit_ms: 50.0
     polishing: true
     adaptive_rho: true
     verbose: false
-    diagnostics:
-      save_primal_infeasible: true
-      output_dir: outputs/jtp_qp_diagnostics_G123
-  # QP group order: stability, road_curvature, control_rate; all six permutations are supported.
-  qp_group_order: [stability, road_curvature, control_rate]
   constraint_sampling_stride: 4
-  protection_max_sweeps: 32
-  protection_tolerance: 1.0e-6
-  nondegradation_tolerance: 1.0e-6
-  max_iterations: 2
+  nondegradation_tolerance: 1.0e-06
+  max_iterations: 10
   max_stalled_iterations: 3
-  max_active_per_group:
-    stability: 24
-    road: 30
-    curvature: 16
-    control_rate: 64
-  constraint_tolerance: 1.0e-4
-  residual_scales:
-    stability: [0.5, 0.0872665, 0.0872665, 0.80]
-    road_m: 0.5
-    curvature_per_m2: 0.000625
-    control_rate: [2.5, 0.12]
-  violation_weight_beta: 2.0
-  damping: 1.0e-4
-  damping_retries: 6
-  trust_damping_retries: 2
-  metric_regularization: 1.0e-5
-  initial_trust_radius: 0.25
-  minimum_trust_radius: 0.01
-  maximum_trust_radius: 0.75
-  max_step_norm: 0.20
-  trust_shrink_factor: 0.5
-  trust_grow_factor: 1.5
+  constraint_tolerance: 0.0001
   alpha_initial: 1.0
   alpha_minimum: 0.0625
   alpha_shrink_factor: 0.5
-  minimum_violation_improvement: 1.0e-6
-  change_tolerance: 1.0e-6  # normalized control correction used only for projection-applied diagnostics
+  minimum_violation_improvement: 1.0e-06
+  change_tolerance: 1.0e-06
+  residual_scales:
+    stability:
+    - 0.5
+    - 0.0872665
+    - 0.0872665
+    - 0.8
 
-# Online K2 history and road-context construction (shared execution above).
+# Online K2 history construction.
 runtime:
   context:
     sample_dt_s: 0.1
@@ -118,9 +84,3 @@ runtime:
     history_state_steps: 5
     payload_kg: null       # scalar or per-controlled-vehicle list
     road_mu: null          # scalar or per-controlled-vehicle list, in (0,1]
-  road:
-    sample_points: 64
-    backward_range_m: 20.0
-    forward_range_m: 180.0
-    include_connected_road_segments: true
-    search_lateral_range_m: 40.0

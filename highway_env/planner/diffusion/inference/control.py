@@ -188,16 +188,13 @@ class ControlDiffusionRuntime:
         if self.jtp_enabled:
             if not isinstance(jtp_inputs, dict) or not jtp_inputs.get('ready', False):
                 raise RuntimeError(
-                    'JTP is enabled but synchronized live K2/road context is not ready. '
+                    'JTP is enabled but synchronized live K2 context is not ready. '
                     'The environment must warm up five 10-Hz state samples before inference.'
                 )
-            if 'road_geometry' not in jtp_inputs:
-                raise KeyError('JTP runtime inputs are missing road_geometry')
             jtp_start = time.perf_counter()
             projected = self.jtp_projector.project(
                 nominal_controls=nominal_control,
                 context=context,
-                road_geometry=jtp_inputs['road_geometry'],
             )
             self.last_jtp_latency_ms = (time.perf_counter() - jtp_start) * 1000.0
             jtp_status = str(projected.status)
