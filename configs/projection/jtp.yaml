@@ -70,7 +70,8 @@ projection:
     polishing: true
     adaptive_rho: true
     verbose: false
-  # G1 stability, G2 road/curvature, G3 control-rate.
+  # QP group order: stability, road_curvature, control_rate; all six permutations are supported.
+  qp_group_order: [road_curvature, stability, control_rate]
   constraint_sampling_stride: 4
   protection_max_sweeps: 32
   protection_tolerance: 1.0e-6

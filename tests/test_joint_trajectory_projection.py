@@ -75,7 +75,7 @@ def _ls_config(stride=2):
     return cfg
 
 
-def test_config_has_two_solver_backends_fixed_priority_and_sparse_sampling():
+def test_config_has_two_solver_backends_configurable_qp_priority_and_sparse_sampling():
     cfg = load_jtp_config()
     assert cfg["execution"]["horizon_steps"] == 40
     assert cfg["projection"]["solver_method"] in {"damped_least_squares", "constrained_qp"}
@@ -87,8 +87,36 @@ def test_config_has_two_solver_backends_fixed_priority_and_sparse_sampling():
     assert "priority_weights" not in cfg["projection"]
     assert "group_count" not in cfg["projection"]
     assert cfg["projection"]["qp"]["backend"] == "osqp"
-    order, _ = build_priority_groups({}, {}, {})
-    assert order == [["stability"], ["road", "curvature"], ["control_rate"]]
+    assert cfg["projection"]["qp_group_order"] == [
+        "road_curvature", "stability", "control_rate"]
+    order, _ = build_priority_groups({}, cfg["projection"], {})
+    assert order == [["road", "curvature"], ["stability"], ["control_rate"]]
+
+    permutations = [
+        ["stability", "road_curvature", "control_rate"],
+        ["stability", "control_rate", "road_curvature"],
+        ["road_curvature", "stability", "control_rate"],
+        ["road_curvature", "control_rate", "stability"],
+        ["control_rate", "stability", "road_curvature"],
+        ["control_rate", "road_curvature", "stability"],
+    ]
+    family_map = {
+        "stability": ["stability"],
+        "road_curvature": ["road", "curvature"],
+        "control_rate": ["control_rate"],
+    }
+    for names in permutations:
+        qp_projection_cfg = dict(cfg["projection"])
+        qp_projection_cfg["qp_group_order"] = names
+        qp_order, _ = build_priority_groups({}, qp_projection_cfg, {})
+        assert qp_order == [family_map[name] for name in names]
+
+    ls_projection_cfg = dict(cfg["projection"])
+    ls_projection_cfg["solver_method"] = "damped_least_squares"
+    ls_projection_cfg["qp_group_order"] = [
+        "control_rate", "road_curvature", "stability"]
+    ls_order, _ = build_priority_groups({}, ls_projection_cfg, {})
+    assert ls_order == [["stability"], ["road", "curvature"], ["control_rate"]]
 
 
 def test_road_and_curvature_constraints_are_differentiable():
@@ -258,7 +286,7 @@ def test_qp_max_iterations_one_runs_one_linearization_and_one_group_pass_per_veh
 
     assert len(calls) == 1
     assert calls[0]["shape"] == (1, 40, 2)
-    assert calls[0]["order"] == [["stability"], ["road", "curvature"], ["control_rate"]]
+    assert calls[0]["order"] == [["road", "curvature"], ["stability"], ["control_rate"]]
     per_vehicle = result.diagnostics["per_vehicle"]
     assert per_vehicle[0]["linearization_count"] == 1
     assert len(per_vehicle[0]["projection"]) == 1
@@ -311,12 +339,13 @@ def test_qp_backend_uses_all_sparse_rows_without_active_set_truncation(monkeypat
     monkeypatch.setattr(qp_solver, "_solve_osqp", fake_solve)
     delta, info = qp_solver.solve_groups_qp(
         controls, groups, selected, rows, thresholds,
-        [["stability"], ["road", "curvature"], ["control_rate"]], cfg,
+        [["road", "curvature"], ["stability"], ["control_rate"]], cfg,
         torch.tensor([-4.0, -0.08]), torch.tensor([2.5, 0.08]), [0.16, 156.25])
     assert delta.shape == controls.shape
     assert info["constraint_rows_by_family"] == {
         "stability": 3, "road": 4, "curvature": 2, "control_rate": 5}
-    assert [group["constraint_rows"] for group in info["groups"]] == [3, 6, 5]
+    assert [group["families"] for group in info["groups"]] == [["road", "curvature"], ["stability"], ["control_rate"]]
+    assert [group["constraint_rows"] for group in info["groups"]] == [6, 3, 5]
     assert len(captured) == 3
 
 

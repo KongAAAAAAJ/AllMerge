@@ -4,10 +4,21 @@ from __future__ import annotations
 import torch
 
 
-def build_priority_groups(groups, cfg=None, thresholds=None):
-    """Return the fixed JTP priority order: stability, geometry, control rate."""
-    order = [["stability"], ["road", "curvature"], ["control_rate"]]
-    scores = {"G1_stability": 1.0, "G2_road_curvature": 2.0, "G3_control_rate": 3.0}
+_PRIORITY_GROUP_FAMILIES = {
+    "stability": ["stability"],
+    "road_curvature": ["road", "curvature"],
+    "control_rate": ["control_rate"],
+}
+_DLS_PRIORITY_ORDER = ("stability", "road_curvature", "control_rate")
+
+
+def build_priority_groups(groups, cfg, thresholds=None):
+    """Build QP groups from YAML order; keep the original fixed DLS order."""
+    group_names = (cfg["qp_group_order"] if cfg["solver_method"] == "constrained_qp"
+                   else _DLS_PRIORITY_ORDER)
+    order = [_PRIORITY_GROUP_FAMILIES[name] for name in group_names]
+    scores = {f"G{index}_{name}": float(index)
+              for index, name in enumerate(group_names, start=1)}
     return order, scores
 
 

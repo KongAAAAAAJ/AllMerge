@@ -61,6 +61,16 @@ def candidate_key(candidate):
     return candidate['rank'] + tuple(-int(v) for v in candidate['identity'])
 
 
+def select_geometry_cases(candidates):
+    """Keep the three highest-ranked repairs from distinct physical frames."""
+    selected = {}
+    for candidate in sorted(candidates, key=candidate_key, reverse=True):
+        frame = candidate['identity'][1:3]
+        if frame not in selected:
+            selected[frame] = candidate
+    return list(selected.values())[:3]
+
+
 def save_case(path, figure):
     arrays = {k: np.asarray(v) for k, v in figure.items()
               if k not in ('road_edge_world', 'road_safety_edge_world')}

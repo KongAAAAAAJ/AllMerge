@@ -4,12 +4,11 @@ JTP 对三辆受控车辆分别执行独立投影。每辆车优化自己的 40 
 
 预测时域为 `H=40`、`dt=0.1 s`。QP/LS 的状态约束候选点由 `projection.constraint_sampling_stride` 控制。`stride=1/2/4` 分别对应初始 40/20/10 个预测时刻。采样时刻为 `stride, 2*stride, ...`，并始终包含终点 `H`。Stage 2 仍在完整 40 个预测时刻验证所有非线性约束。
 
-| 优先级 | 约束族 | 约束量 | 采样范围 | 求解处理 |
-| --- | --- | --- | --- | --- |
-| G1 | 稳定性 `stability` | 横摆角速度、质心侧偏角、侧倾角、LTR | 按 `constraint_sampling_stride` 采样 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
-| G2 | 道路 `road` | 车身五个覆盖圆心的左右道路边界距离 | 按 `constraint_sampling_stride` 采样，每个采样时刻保留全部圆心和两侧边界 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
-| G2 | 曲率 `curvature` | 相邻未来轨迹点的离散曲率 | 对应稀疏采样时刻的曲率区间 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
-| G3 | 控制连续性 `control_rate` | 加速度变化率、前轮转角变化率 | 完整 40 个控制间隔 | DLS 活跃集筛选；QP 使用全部 40 步 |
+| QP 组标识 | 约束族 | 约束量 | 采样范围 | 求解处理 |
+| `road_curvature` | 道路 `road` | 车身五个覆盖圆心的左右道路边界距离 | 按 `constraint_sampling_stride` 采样，每个采样时刻保留全部圆心和两侧边界 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| `road_curvature` | 曲率 `curvature` | 相邻未来轨迹点的离散曲率 | 对应稀疏采样时刻的曲率区间 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| `stability` | 稳定性 `stability` | 横摆角速度、质心侧偏角、侧倾角、LTR | 按 `constraint_sampling_stride` 采样 | DLS 活跃集筛选；QP 使用全部稀疏采样行 |
+| `control_rate` | 控制连续性 `control_rate` | 加速度变化率、前轮转角变化率 | 完整 40 个控制间隔 | DLS 活跃集筛选；QP 使用全部 40 步 |
 | 硬约束 | 控制幅值 `control` | 加速度、前轮转角上下界 | 完整 40 个控制点 | LS 与 QP 均作为硬边界施加 |
 
 ## 稳定性约束
@@ -37,7 +36,7 @@ JTP 对三辆受控车辆分别执行独立投影。每辆车优化自己的 40 
 
 ## 固定优先级与求解器
 
-优先级固定为 G1 稳定性、G2 道路与曲率、G3 控制连续性。`projection.solver_method` 保留两种取值：
+本轮 constrained_qp 顺序对比实验采用 G1 道路与曲率、G2 稳定性、G3 控制连续性；damped_least_squares 保持原有 G1 稳定性、G2 道路与曲率、G3 控制连续性的顺序。`projection.solver_method` 保留两种取值：
 
 - `damped_least_squares`：保留阻尼加权最小二乘、有界活动集、Top-K 活跃约束、Trust Region、度量半空间跨组保护及 Backtracking。
 - `constrained_qp`：使用 OSQP Full-Group QP，不进行活跃集 Top-K 截断；保留统一松弛容差、跨组保护和控制幅值硬约束，不启用 Trust Region。

@@ -312,7 +312,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     units = ('trajectory', 'step') if statistics_unit == 'both' else (statistics_unit,)
     from .distributions import collect, KEYS, FLAGS
     from .statistics import step_records, write_reports
-    from .cases import KINDS, frame_candidates, candidate_key, save_case
+    from .cases import frame_candidates, candidate_key, save_case, select_geometry_cases
     config_path=resolve_repo_file(evaluation_config)
     ev=yaml.safe_load(config_path.read_text(encoding='utf-8'))
     if not isinstance(ev,dict): raise ValueError('JTP ablation config must be a YAML mapping')
@@ -358,6 +358,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
     best_cases = {}
     case_figures = {}
+    geometry_cases = []
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     from .parallel import frame_results
     jobs = ((seed, index, key, entries) for seed in seed_values
@@ -430,7 +431,12 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             })
             candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg)
             improved = {kind: c for kind, c in candidates.items()
-                        if kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind])}
+                        if kind != 'geometry' and
+                        (kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind]))}
+            geometry_candidate = candidates['geometry']
+            ranked = select_geometry_cases([*geometry_cases, geometry_candidate])
+            if any(c is geometry_candidate for c in ranked):
+                improved['geometry'] = geometry_candidate
             if improved:
                 nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
                 for i in range(len(entries)):
@@ -468,7 +474,10 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                                              [pair[1] for pair in safety_edge_pairs],
                     'road_safety_envelope_valid_by_vehicle':[pair[2] for pair in safety_edge_pairs],
                     'road_safety_margin_m':safety_margin,
-                    'external_actors':[a.pose for a in actors]}
+                    'external_actors':[a.pose for a in actors],
+                    'vehicle_sizes_m':np.tile([model.loss_config['safety']['vehicle_length_m'],
+                                               model.loss_config['safety']['vehicle_width_m']], (len(entries), 1)),
+                    'external_actor_sizes_m':np.asarray([[a.length_m, a.width_m] for a in actors]).reshape(-1, 2)}
                 for kind, candidate in improved.items():
                     i = candidate['exemplar_index']
                     chosen = {**frame_figure, 'case_kind': kind, 'exemplar_index': i,
@@ -477,17 +486,17 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                               'before_violation_steps': candidate['before_count'],
                               'after_violation_steps': candidate['after_count']}
                     if kind == 'geometry':
-                        road_before = -collected_pair['Baseline'][0]['road'][i]
-                        road_after = -collected_pair['Ours'][0]['road'][i]
-                        gain = np.maximum(road_before-ev['tolerances']['road_m'], 0)-np.maximum(road_after-ev['tolerances']['road_m'], 0)
-                        focus = max(range(len(gain)), key=lambda t: (gain[t], abs(road_before[t]-road_after[t]), -t))
-                        chosen.update(focus_step=focus+1, nominal_road_residual=road_before,
-                                      projected_road_residual=road_after)
-                    best_cases[kind] = candidate
-                    case_figures[kind] = chosen
+                        geometry_cases = select_geometry_cases(
+                            [*geometry_cases, {**candidate, 'figure': chosen}])
+                    else:
+                        best_cases[kind] = candidate
+                        case_figures[kind] = chosen
             print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
+    if len(geometry_cases) != 3:
+        raise ValueError('Geometry figure requires three distinct scene frames')
+    case_figures['geometry'] = [c['figure'] for c in geometry_cases]
     evaluation_wall_s = time.perf_counter() - evaluation_start
     if not frame_diagnostics:raise RuntimeError('No valid paired JTP observations')
     output.mkdir(parents=True,exist_ok=True)
@@ -502,8 +511,19 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_solver_summary.json',solver_summary)
     write_json(output/'jtp_excluded_frames.json',errors)
     draw_projection_figures(output, case_figures)
-    for kind in KINDS:
+    for index, figure in enumerate(case_figures['geometry'], 1):
+        save_case(output/f'projection_ablation_geometry_{index}_data.npz', figure)
+    for kind in ('stability', 'control'):
         save_case(output/f'projection_ablation_{kind}_data.npz', case_figures[kind])
+    def selection_metadata(c):
+        return {'seed': c['identity'][0], 'episode_index': c['identity'][1],
+                'frame_index': c['identity'][2], 'ego_index': c['identity'][3],
+                'grade': c['grade'], 'score': c['rank'],
+                'before_violation_steps': c['before_count'],
+                'after_violation_steps': c['after_count']}
+
+    selection_cases = {kind: selection_metadata(c) for kind, c in best_cases.items()}
+    selection_cases['geometry'] = [selection_metadata(c) for c in geometry_cases]
     manifest={'execution': {'workers': workers, 'worker_threads': worker_threads if workers > 1 else torch.get_num_threads(),
                            'device': str(device), 'evaluation_wall_s': evaluation_wall_s,
                            'frame_seed_pairs_per_second': len(frame_diagnostics)/evaluation_wall_s,
@@ -538,12 +558,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
               'included_frames_across_seeds':len(frame_diagnostics),
               'excluded_frames':len(errors),'plot_selection':{
                    'method':'independent ranked repair examples; not representative aggregate performance',
-                   'cases':{kind:{'seed':c['identity'][0], 'episode_index':c['identity'][1],
-                                  'frame_index':c['identity'][2], 'ego_index':c['identity'][3],
-                                  'grade':c['grade'], 'score':c['rank'],
-                                  'before_violation_steps':c['before_count'],
-                                  'after_violation_steps':c['after_count']}
-                            for kind,c in best_cases.items()}},
+                   'cases':selection_cases},
               'checkpoint':{'path':str(checkpoint_path),'sha256':_sha256(checkpoint_path),
                   'model_execution':model.vehicle_model.kind,'anchor_strategy':model.anchors_config.get('strategy')},
               'configs':{'diffusion':str(diffusion_path),'jtp':str(jtp_path),

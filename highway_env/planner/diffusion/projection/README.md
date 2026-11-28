@@ -9,6 +9,7 @@ JTP keeps the batch `[N,40,2]` runtime interface and projects each vehicle indep
 ```yaml
 projection:
   solver_method: constrained_qp  # damped_least_squares | constrained_qp
+  qp_group_order: [road_curvature, stability, control_rate]
   constraint_sampling_stride: 2  # 1, 2, or 4
 ```
 
@@ -19,7 +20,7 @@ Stride 1/2/4 initially samples 40/20/10 G1/G2 time points. The terminal point is
 - `damped_least_squares`: retains the existing weighted damped least-squares backend, active-set/Top-K row selection, bounded Cholesky active-set solve, Trust Region, metric half-space protection, and Backtracking.
 - `constrained_qp`: retains the OSQP Full-Group QP backend. Every row in the current sparse temporal pool is included for its priority group; there is no Top-K truncation or Trust Region. State slack, common tolerance handling, cross-group protection, and hard control bounds remain enabled.
 
-Both backends use fixed priority groups: G1 stability, G2 road and curvature, G3 control continuity. The K2 execution model, dynamic road association, Backtracking, and complete Stage-2 nonlinear acceptance are shared.
+For `constrained_qp`, `projection.qp_group_order` selects the order of `stability`, `road_curvature`, and `control_rate`; all six permutations are supported. The default is `[road_curvature, stability, control_rate]`. Group labels G1/G2/G3 follow the configured list positions. The DLS backend always retains its original order: stability, road and curvature, then control continuity. The K2 execution model, dynamic road association, Backtracking, and complete Stage-2 nonlinear acceptance are shared.
 
 ## API
 
