@@ -24,10 +24,8 @@ def _trajectory_band(ax, path, width, color, *, alpha=(.45, .04), zorder=1):
     left = path[:, :2] + normal * width / 2
     right = path[:, :2] - normal * width / 2
     boundary = np.vstack((left, right[::-1]))
-    ax.update_datalim(boundary)
-    ax.autoscale_view()
     low, high = boundary.min(axis=0), boundary.max(axis=0)
-    pixel_size = np.ptp(ax.get_xlim()) / (ax.figure.get_figwidth() * 300)
+    pixel_size = np.ptp(ax.get_xlim()) / (ax.get_position().width * ax.figure.get_figwidth() * 300)
     nx, ny = np.ceil((high - low) / pixel_size).astype(int)
     renderer = RendererAgg(int(nx), int(ny), 300)
     transform = Affine2D().translate(*-low).scale(nx / (high[0] - low[0]),
@@ -61,15 +59,19 @@ def _trajectory_band(ax, path, width, color, *, alpha=(.45, .04), zorder=1):
               interpolation='bilinear', zorder=zorder)
 
 
-def _vehicle_rectangle(ax, pose, size, color):
-    from matplotlib.patches import Polygon
-
+def _vehicle_corners(pose, size):
     length, width = size
     corners = np.array([[-length, -width], [length, -width],
                         [length, width], [-length, width]]) / 2
     c, s = np.cos(pose[2]), np.sin(pose[2])
-    corners = corners @ np.array([[c, s], [-s, c]]) + pose[:2]
-    ax.add_patch(Polygon(corners, facecolor=color, edgecolor=color, alpha=.50, zorder=4))
+    return corners @ np.array([[c, s], [-s, c]]) + pose[:2]
+
+
+def _vehicle_rectangle(ax, pose, size, color):
+    from matplotlib.patches import Polygon
+
+    ax.add_patch(Polygon(_vehicle_corners(pose, size), facecolor=color,
+                         edgecolor=color, alpha=.50, zorder=4))
 
 
 def _draw_geometry(output_dir, figures):
@@ -80,8 +82,29 @@ def _draw_geometry(output_dir, figures):
     if len(figures) != 3:
         raise ValueError('Geometry figure requires three distinct scene frames')
     orange, blue, grey = '#ea580c', '#2563eb', '#737373'
-    fig, axes = plt.subplots(3, 1, figsize=(15, 7), layout='compressed')
-    for panel, (ax, data) in enumerate(zip(axes, figures)):
+    bounds = []
+    for data in figures:
+        i = int(data['exemplar_index'])
+        size = np.asarray(data['vehicle_sizes_m'])[i]
+        paths = np.concatenate((data['nominal_world'][i], data['projected_world'][i]))
+        normal = np.column_stack((-np.sin(paths[:, 2]), np.cos(paths[:, 2])))
+        points = np.vstack((paths[:, :2] - normal * size[1] / 2,
+                            paths[:, :2] + normal * size[1] / 2,
+                            _vehicle_corners(data['projected_world'][i, 0], size)))
+        bounds.append((points.min(axis=0), points.max(axis=0)))
+    span = np.max([high - low for low, high in bounds], axis=0) + 4
+    plot_width = 2.95
+    plot_height = plot_width * span[1] / span[0]
+    bottom, gap, top = .95, .60, .28
+    height = bottom + 3 * plot_height + 2 * gap + top
+    fig = plt.figure(figsize=(3.5, height))
+    for panel, (data, (low, high)) in enumerate(zip(figures, bounds)):
+        ax = fig.add_axes([.43 / 3.5,
+                           (bottom + (2 - panel) * (plot_height + gap)) / height,
+                           plot_width / 3.5, plot_height / height])
+        center = (low + high) / 2
+        ax.set_xlim(center[0] - span[0] / 2, center[0] + span[0] / 2)
+        ax.set_ylim(center[1] - span[1] / 2, center[1] + span[1] / 2)
         original = np.asarray(data['nominal_world'])
         projected = np.asarray(data['projected_world'])
         exemplar = int(data['exemplar_index'])
@@ -108,25 +131,27 @@ def _draw_geometry(output_dir, figures):
                          alpha=(.60, .20), zorder=3)
         for i, (path, size) in enumerate(zip(projected, sizes)):
             if i != exemplar:
-                _vehicle_rectangle(ax, path[0], size, orange)
+                _vehicle_rectangle(ax, path[0], size, grey)
         for path, size in zip(data['external_actors'], data['external_actor_sizes_m']):
-            _vehicle_rectangle(ax, path[0], size, blue)
+            _vehicle_rectangle(ax, path[0], size, grey)
         _vehicle_rectangle(ax, projected[exemplar, 0], sizes[exemplar], orange)
         ax.set(title=f'({chr(97 + panel)}) Episode {data["episode_index"]}, '
                      f'frame {data["frame_index"]}, truck {data["ego_index"]}',
                xlabel='World X (m)', ylabel='World Y (m)')
         ax.set_aspect('equal', adjustable='box')
-        ax.autoscale_view()
-        ax.margins(.05)
+        ax.tick_params(labelsize=7, pad=2)
+        ax.title.set_fontsize(8)
+        ax.xaxis.label.set_size(7)
+        ax.yaxis.label.set_size(7)
         ax.grid(alpha=.2)
     fig.legend(handles=[Patch(facecolor=orange, alpha=.60, label='Selected truck JTP'),
                         Patch(facecolor=blue, alpha=.60, label='Selected truck baseline'),
                         Patch(facecolor=grey, alpha=.45, label='Other vehicle trajectories'),
                         Line2D([0], [0], color='#6b7280', label='Road boundary'),
                         Line2D([0], [0], color='#15803d', ls='--', label='Safety inset')],
-               loc='lower center', ncol=5, frameon=False)
-    fig.get_layout_engine().set(rect=(0, .07, 1, .93), h_pad=.02, hspace=.02)
-    fig.savefig(output_dir / 'projection_ablation_geometry.pdf', dpi=300, bbox_inches='tight')
+               loc='lower center', ncol=2, fontsize=7, frameon=False,
+               handlelength=1.4, columnspacing=.8)
+    fig.savefig(output_dir / 'projection_ablation_geometry.pdf', dpi=300)
     plt.close(fig)
 
 
