@@ -25,7 +25,7 @@ def _expert_stability_bad(state, ltr, payload, mu, jtp_config, tolerances):
 
 def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_seed: int,
                     jtp_config: dict, tolerances: dict):
-    """Sample N frames per payload stratum, 70% currently unstable; N=0 selects all."""
+    """Sample up to N frames per stratum at rounded 70% unstable; N=0 selects all."""
     ds = RawExpertDataset(dataset_root, split=split)
     by_shard = defaultdict(list)
     for global_i, (shard_idx, sample_i) in enumerate(ds._index):
@@ -73,21 +73,32 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         pool = [frame for frame in complete if meta[frame[1][0]]['payload_group'] == group]
         violating = [frame for frame in pool if any(meta[i]['stability_violation'] for i in frame[1])]
         compliant = [frame for frame in pool if not any(meta[i]['stability_violation'] for i in frame[1])]
-        n_violating = math.floor(num_frames * .70 + .5) if num_frames else len(violating)
-        n_compliant = num_frames - n_violating if num_frames else len(compliant)
-        if len(violating) < n_violating or len(compliant) < n_compliant:
-            raise ValueError(
-                f'{group} payload expert stability sampling needs {n_violating} violating and '
-                f'{n_compliant} compliant frames; available: '
-                f'{len(violating)} violating and {len(compliant)} compliant')
+        if num_frames:
+            count = min(num_frames, len(pool))
+            while count:
+                n_violating = math.floor(count * .70 + .5)
+                n_compliant = count - n_violating
+                if n_violating <= len(violating) and n_compliant <= len(compliant):
+                    break
+                count -= 1
+            if not count:
+                raise ValueError(f'{group} payload has no frames satisfying the rounded 70% stability quota')
+            if count < num_frames:
+                print(f'[JTP] WARNING: {group} payload sampling reduced from {num_frames} to {count} frames: '
+                      f'{n_violating} violating + {n_compliant} compliant; '
+                      f'actual violating ratio={100*n_violating/count:.2f}%', flush=True)
+        else:
+            n_violating, n_compliant = len(violating), len(compliant)
         chosen = ([violating[int(i)] for i in rng.choice(len(violating), n_violating, replace=False)] +
                   [compliant[int(i)] for i in rng.choice(len(compliant), n_compliant, replace=False)]
                   if num_frames else pool)
         selected.extend(chosen)
         strata[group] = dict(payload_kg=list(PAYLOAD_KG[group]),
+                            requested_frames=num_frames,
                             violating_frames_available=len(violating), compliant_frames_available=len(compliant),
                             selected_frames=len(chosen), selected_violating_frames=n_violating,
                             selected_compliant_frames=n_compliant,
+                            actual_expert_stability_fraction=n_violating/len(chosen) if chosen else None,
                             selected_frame_keys=[list(frame[0]) for frame in sorted(chosen)])
     selected.sort(key=lambda frame: frame[0])
 
