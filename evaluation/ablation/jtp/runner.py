@@ -24,6 +24,7 @@ from .data import selected_frames, collate_frame, local_to_world
 from .metrics import evaluate_group, trajectory_deviation_m, validate_evaluation_config
 from .reporting import write_json
 from .visualization import draw_projection_figures
+from .payload import PAYLOAD_GROUPS, payload_group
 
 
 def parse_seeds(value):
@@ -208,8 +209,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                                          jtp_config=jtp_cfg,tolerances=ev["tolerances"])
     if not frames:raise RuntimeError('No complete synchronized frames to evaluate')
     print(f'[JTP] device={device} workers={workers} frame/seed pairs={len(frames)*len(seed_values)}', flush=True)
-    best_cases = {}
-    case_figures = {}
+    best_cases = {kind: {} for kind in ('stability', 'control')}
+    case_figures = {kind: {} for kind in ('stability', 'control')}
     rows=[]; step_rows=[]; errors=[]; frame_diagnostics=[]
     from .parallel import frame_results
     jobs = ((seed, index, key, entries) for seed in seed_values
@@ -223,9 +224,12 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             seed, frame_index, key, entries = job
             episode, frame = key
             context, meta, data = result
+            group = payload_group(context['koopman_payload_kg'][0].item())
             collected_pair = {}
             step_metadata = [{'seed': seed, 'episode_index': episode, 'frame_index': frame,
-                              'ego_index': int(item['ego_index'])} for item in meta]
+                              'ego_index': int(item['ego_index']), 'payload_group': group,
+                              'payload_kg': float(context['koopman_payload_kg'][i].item())}
+                             for i, item in enumerate(meta)]
             deviation_xy = np.linalg.norm(
                 data['projected']['trajectory'].detach().cpu().numpy()[:, 1:, :2] -
                 data['nominal']['trajectory'].detach().cpu().numpy()[:, 1:, :2], axis=-1)
@@ -246,6 +250,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                     step_rows.extend(step_records(collected, step_metadata, method, deviation_xy))
             for i, item in enumerate(meta):
                 base={'seed':seed,'episode_index':episode,'frame_index':frame,
+                      'payload_group':group,
                       'ego_index':int(item['ego_index']),
                       'dataset_seed':int(item.get('seed',-1)),
                       'payload_kg':float(context['koopman_payload_kg'][i].item()),
@@ -266,6 +271,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                         rows.append(record)
             frame_diagnostics.append({
                 'seed': seed, 'episode_index': episode, 'frame_index': frame,
+                'payload_group': group,
                 'projection_status': data['projection_status'],
                 'projector_constraints_satisfied': data['projector_constraints_satisfied'],
                 'projector_constraints_satisfied_by_vehicle': data['projector_constraints_satisfied_by_vehicle'],
@@ -281,7 +287,7 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
             })
             candidates = frame_candidates(data, collected_pair, meta, seed, episode, frame, jtp_cfg)
             improved = {kind: c for kind, c in candidates.items()
-                        if kind not in best_cases or candidate_key(c) > candidate_key(best_cases[kind])}
+                        if group not in best_cases[kind] or candidate_key(c) > candidate_key(best_cases[kind][group])}
             if improved:
                 nom=data['nominal'];post=data['projected'];bounds_a=[];bounds_b=[]
                 for i in range(len(entries)):
@@ -308,13 +314,14 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 for kind, candidate in improved.items():
                     i = candidate['exemplar_index']
                     chosen = {**frame_figure, 'case_kind': kind, 'exemplar_index': i,
+                              'payload_group': group, 'payload_kg': float(context['koopman_payload_kg'][i].item()),
                               'ego_index': int(meta[i]['ego_index']),
                               'selection_grade': candidate['grade'], 'selection_score': candidate['rank'],
                               'before_violation_steps': candidate['before_count'],
                               'after_violation_steps': candidate['after_count']}
-                    best_cases[kind] = candidate
-                    case_figures[kind] = chosen
-            print(f'[JTP] seed={seed} frame={episode}/{frame} cars={len(entries)} '
+                    best_cases[kind][group] = candidate
+                    case_figures[kind][group] = chosen
+            print(f'[JTP] payload={group} seed={seed} frame={episode}/{frame} cars={len(entries)} '
                   f'projection={data["projection_status"]} before={sum(x["joint_feasible"] for x in data["before"])}/{len(entries)} '
                   f'after={sum(x["joint_feasible"] for x in data["after"])}/{len(entries)}',flush=True)
     evaluation_wall_s = time.perf_counter() - evaluation_start
@@ -335,7 +342,8 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
     write_json(output/'jtp_excluded_frames.json',errors)
     draw_projection_figures(output, case_figures)
     for kind in ('stability', 'control'):
-        save_case(output/f'projection_ablation_{kind}_data.npz', case_figures[kind])
+        for group in PAYLOAD_GROUPS:
+            save_case(output/f'projection_ablation_{kind}_{group}_data.npz', case_figures[kind][group])
     def selection_metadata(c):
         return {'seed': c['identity'][0], 'episode_index': c['identity'][1],
                 'frame_index': c['identity'][2], 'ego_index': c['identity'][3],
@@ -343,7 +351,9 @@ def evaluate(*, checkpoint: str, diffusion_config: str, evaluation_config: str,
                 'before_violation_steps': c['before_count'],
                 'after_violation_steps': c['after_count']}
 
-    selection_cases = {kind: selection_metadata(c) for kind, c in best_cases.items()}
+    selection_cases = {kind: {group: {**selection_metadata(c),
+                                    'payload_kg': case_figures[kind][group]['payload_kg']}
+                             for group, c in strata.items()} for kind, strata in best_cases.items()}
     manifest = dict(
         study='Single-QP stability and control-magnitude ablation',
         projection_method='Independent single-vehicle stability QP with hard control bounds',
@@ -376,7 +386,7 @@ def main(argv=None):
     parser.add_argument('--jtp-config',default='configs/projection/jtp.yaml')
     parser.add_argument('--dataset-root',default=None)
     parser.add_argument('--split',choices=('train','val','test'),default=None)
-    parser.add_argument('--num-frames',type=int,default=None,help='0=all complete synchronized frames')
+    parser.add_argument('--num-frames',type=int,default=None,help='Frames per payload stratum (total 3N); 0=all complete synchronized frames')
     parser.add_argument('--seeds',default=None,help='Comma-separated diffusion noise seeds')
     parser.add_argument('--device',default=None)
     parser.add_argument('--output-dir',default=None)

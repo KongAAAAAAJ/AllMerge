@@ -2,6 +2,7 @@
 import numpy as np
 from .distributions import KEYS, FLAGS
 from .reporting import _summary, write_csv, write_json, paper_table
+from .payload import PAYLOAD_GROUPS
 
 
 def step_records(collected, metadata, method, deviation):
@@ -144,8 +145,21 @@ def write_reports(output, rows, unit, seeds, repeats, bootstrap_seed, frame_diag
     write_json(directory/f'jtp_paired_statistics_{unit}.json', {'statistics_unit': unit,
                'difference_ours_minus_baseline_pp': deltas, 'paired_cluster_bootstrap': confidence,
                'resampling_unit': 'physical episode/frame, preserving seeds, trucks and steps'})
-    (directory/f'projection_ablation_table_{unit}.tex').write_text(paper_table(summaries, unit), encoding='utf-8')
-    result = {'summary': summaries, 'paired_deltas': deltas,
+    by_payload, paired_payload = {}, {}
+    for group in PAYLOAD_GROUPS:
+        group_summary, group_delta, group_confidence = report(
+            [r for r in rows if r['payload_group'] == group], unit, repeats, bootstrap_seed)
+        add_projection_timing(group_summary, [f for f in frame_diagnostics if f['payload_group'] == group])
+        by_payload[group] = group_summary
+        paired_payload[group] = dict(difference_ours_minus_baseline_pp=group_delta,
+                                     paired_cluster_bootstrap=group_confidence)
+    write_csv(directory/f'jtp_summary_{unit}_payload.csv',
+              [dict(payload_group=g, method=m, **v) for g, methods in by_payload.items() for m, v in methods.items()])
+    write_json(directory/f'jtp_paired_statistics_{unit}_payload.json',
+               dict(statistics_unit=unit, resampling_unit='physical episode/frame, preserving seeds, trucks and steps',
+                    by_payload=paired_payload))
+    (directory/f'projection_ablation_table_{unit}.tex').write_text(paper_table(by_payload, unit), encoding='utf-8')
+    result = {'summary': summaries, 'paired_deltas': deltas, 'by_payload': by_payload,
             'prediction_steps': '1..H',
             'denominator': 'synchronized platoon prediction steps for Joint; valid vehicle prediction steps per constraint otherwise' if unit == 'step' else 'synchronized platoon trajectories for Joint; vehicle trajectories otherwise'}
     result['timing'] = {

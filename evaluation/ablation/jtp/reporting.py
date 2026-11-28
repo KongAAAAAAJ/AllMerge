@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from .payload import PAYLOAD_GROUPS, PAYLOAD_LABELS
 
 
 def write_csv(path: Path, rows: list[dict], columns=None):
@@ -86,10 +87,10 @@ def _summary(rows):
     return summary
 
 
-def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
-    """Generate the six-constraint table for the requested statistics unit."""
-    methods = ('Expert', 'Baseline', 'Ours') if 'Expert' in by_method else ('Baseline', 'Ours')
-    ncols = len(methods)+1
+def paper_table(by_payload: dict, unit: str = 'trajectory', *, expert=False) -> str:
+    """Generate the six-constraint table with three payload column groups."""
+    methods = ('Expert', 'Baseline', 'Ours') if expert else ('Baseline', 'Ours')
+    ncols = len(methods)*len(PAYLOAD_GROUPS)+1
     groups = (
         ('Stability', (('Yaw rate satisfaction (%)', 'yaw_violation_pct'),
                        ('Sideslip angle satisfaction (%)', 'sideslip_violation_pct'),
@@ -110,17 +111,20 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
         r'\scriptsize',
         r'\renewcommand{\arraystretch}{1.12}',
         r'\setlength{\tabcolsep}{4pt}',
-        r'\begin{tabular}{@{}l' + 'c'*len(methods) + '@{}}',
+        r'\begin{tabular}{@{}l' + 'c'*(ncols-1) + '@{}}',
         r'\hline',
-        r'\textbf{Constraint / Metric} & ' + ' & '.join(r'\textbf{' + ('JTP' if m=='Ours' else m) + '}' for m in methods) + r' \\',
+        r' & ' + ' & '.join(r'\multicolumn{' + str(len(methods)) + r'}{c}{\textbf{' + PAYLOAD_LABELS[g] + '}}'
+                            for g in PAYLOAD_GROUPS) + r' \\',
+        r'\textbf{Constraint / Metric} & ' + ' & '.join(r'\textbf{' + ('JTP' if m=='Ours' else m) + '}'
+                                                       for g in PAYLOAD_GROUPS for m in methods) + r' \\',
         r'\hline',
     ]
     for group, metrics in groups:
         lines.append(r'\multicolumn{' + str(ncols) + r'}{@{}l}{\textbf{' + group + r'}} \\')
         for label, metric in metrics:
             cells = []
-            for method in methods:
-                value = by_method[method].get(metric)
+            for payload, method in ((g, m) for g in PAYLOAD_GROUPS for m in methods):
+                value = by_payload[payload][method].get(metric)
                 if value is None:
                     cell = 'N/A'
                 elif metric.endswith('_violation_pct'):
@@ -132,8 +136,9 @@ def paper_table(by_method: dict, unit: str = 'trajectory') -> str:
                 cells.append(cell)
             lines.append(label + ' & ' + ' & '.join(cells) + r' \\')
     note = 'Feasibility includes stability and control magnitude only; timing is per vehicle.'
-    if 'Expert' in by_method:
-        note = f"Paired complete frames: {by_method['Expert']['num_physical_frames']}; Expert is recorded TruckSim truth; Expert optimization time N/A."
+    if expert:
+        counts = ', '.join(f"{g}={by_payload[g]['Expert']['num_physical_frames']}" for g in PAYLOAD_GROUPS)
+        note = f"Paired complete frames: {counts}; Expert is recorded TruckSim truth; Expert optimization time N/A."
         lines = [line.replace('tab:projection_ablation_step','tab:projection_ablation_step_expert') for line in lines]
     lines.extend([
         r'\hline',

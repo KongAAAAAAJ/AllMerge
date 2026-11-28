@@ -10,6 +10,7 @@ import torch
 
 from data_pipeline.raw_expert_dataset import RawExpertDataset
 from highway_env.planner.diffusion.projection.constraints import stability_limits
+from .payload import PAYLOAD_GROUPS, PAYLOAD_KG, payload_group
 
 
 def _expert_stability_bad(state, ltr, payload, mu, jtp_config, tolerances):
@@ -24,7 +25,7 @@ def _expert_stability_bad(state, ltr, payload, mu, jtp_config, tolerances):
 
 def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_seed: int,
                     jtp_config: dict, tolerances: dict):
-    """Sample 60% expert-current stability-violating frames, or all when N=0."""
+    """Sample N frames per payload stratum, 70% currently unstable; N=0 selects all."""
     ds = RawExpertDataset(dataset_root, split=split)
     by_shard = defaultdict(list)
     for global_i, (shard_idx, sample_i) in enumerate(ds._index):
@@ -51,6 +52,7 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
                     "episode_index": episode,
                     "frame_index": frame,
                     "ego_index": ego,
+                    "payload_group": payload_group(payload[sample_i]),
                     "stability_violation": _expert_stability_bad(
                         states[sample_i], ltr[sample_i], payload[sample_i], mu[sample_i],
                         jtp_config, tolerances),
@@ -65,27 +67,29 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         raise RuntimeError(f"No complete synchronized frames found in split={split}")
 
     complete.sort(key=lambda x: x[0])
-    violating = [frame for frame in complete
-                 if any(meta[i]['stability_violation'] for i in frame[1])]
-    compliant = [frame for frame in complete
-                 if not any(meta[i]['stability_violation'] for i in frame[1])]
-    if num_frames > 0:
-        n_violating = math.floor(num_frames * .70 + .5)
-        n_compliant = num_frames - n_violating
+    selected, strata = [], {}
+    rng = np.random.default_rng(int(sample_seed))
+    for group in PAYLOAD_GROUPS:
+        pool = [frame for frame in complete if meta[frame[1][0]]['payload_group'] == group]
+        violating = [frame for frame in pool if any(meta[i]['stability_violation'] for i in frame[1])]
+        compliant = [frame for frame in pool if not any(meta[i]['stability_violation'] for i in frame[1])]
+        n_violating = math.floor(num_frames * .70 + .5) if num_frames else len(violating)
+        n_compliant = num_frames - n_violating if num_frames else len(compliant)
         if len(violating) < n_violating or len(compliant) < n_compliant:
             raise ValueError(
-                f'Expert stability sampling needs {n_violating} violating and '
+                f'{group} payload expert stability sampling needs {n_violating} violating and '
                 f'{n_compliant} compliant frames; available: '
                 f'{len(violating)} violating and {len(compliant)} compliant')
-        rng = np.random.default_rng(int(sample_seed))
-        selected = [violating[int(i)] for i in rng.choice(
-            len(violating), size=n_violating, replace=False)]
-        selected += [compliant[int(i)] for i in rng.choice(
-            len(compliant), size=n_compliant, replace=False)]
-        selected.sort(key=lambda frame: frame[0])
-    else:
-        selected = complete
-        n_violating, n_compliant = len(violating), len(compliant)
+        chosen = ([violating[int(i)] for i in rng.choice(len(violating), n_violating, replace=False)] +
+                  [compliant[int(i)] for i in rng.choice(len(compliant), n_compliant, replace=False)]
+                  if num_frames else pool)
+        selected.extend(chosen)
+        strata[group] = dict(payload_kg=list(PAYLOAD_KG[group]),
+                            violating_frames_available=len(violating), compliant_frames_available=len(compliant),
+                            selected_frames=len(chosen), selected_violating_frames=n_violating,
+                            selected_compliant_frames=n_compliant,
+                            selected_frame_keys=[list(frame[0]) for frame in sorted(chosen)])
+    selected.sort(key=lambda frame: frame[0])
 
     samples = []
     selected_keys = []
@@ -105,11 +109,13 @@ def selected_frames(dataset_root: Path, split: str, *, num_frames: int, sample_s
         "selected_samples": sum(len(x[1]) for x in samples),
         "sample_seed": int(sample_seed),
         "selected_frame_keys": [list(x) for x in selected_keys],
-        "frame_sampling": "expert_current_stability_60pct" if num_frames > 0 else "all_frames",
+        "frame_sampling": "payload_stratified_expert_current_stability_70pct" if num_frames > 0 else "all_frames",
         "sampling_basis": "Any vehicle current yaw rate, sideslip, roll or LTR violation; expert truth, not model prediction",
-        "expert_stability_fraction": .60,
-        "selected_expert_stability_violating_frames": n_violating,
-        "selected_expert_stability_compliant_frames": n_compliant,
+        "expert_stability_fraction": .70,
+        "requested_frames_per_payload": num_frames,
+        "payload_strata": strata,
+        "selected_expert_stability_violating_frames": sum(s['selected_violating_frames'] for s in strata.values()),
+        "selected_expert_stability_compliant_frames": sum(s['selected_compliant_frames'] for s in strata.values()),
     }
     return samples, manifest
 
