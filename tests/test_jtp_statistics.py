@@ -10,7 +10,7 @@ def make_records():
     bad = {k: np.zeros((2,4),dtype=bool) for k in KEYS}
     bad['yaw'][0,0] = True
     bad['steering'][1,2] = True
-    meta = [dict(seed=0,episode_index=1,frame_index=2,ego_index=i) for i in range(2)]
+    meta = [dict(seed=0,episode_index=1,frame_index=2,ego_index=i,payload_group='low') for i in range(2)]
     rows = []
     for method in ('Baseline','Ours'):
         rows.extend(step_records((values,bad),meta,method,np.zeros((2,4))))
@@ -34,7 +34,7 @@ def test_six_constraints_include_first_step_and_joint_feasibility():
 
 def test_report_timing_table_and_saved_columns(tmp_path):
     rows = make_records()
-    frames = [dict(seed=0,optimization_time_ms_by_vehicle=[10.,20.])]
+    frames = [dict(seed=0,payload_group='low',optimization_time_ms_by_vehicle=[10.,20.])]
     result = write_reports(tmp_path,rows,'step',[0],5,0,frames)
     assert result['prediction_steps']=='1..H'
     assert result['summary']['Ours']['optimization_time_ms_mean']==15.
@@ -62,3 +62,33 @@ def test_cli_statistics_selection(monkeypatch,unit):
     monkeypatch.setattr(runner,'evaluate',lambda **kwargs:args.update(kwargs))
     runner.main(['--checkpoint','unused.pt','--statistics-unit',unit])
     assert args['statistics_unit']==unit
+
+
+def test_payload_summaries_use_independent_denominators(tmp_path):
+    import json
+    groups = ('low', 'medium', 'high')
+    rows, frames = [], []
+    for i, group in enumerate(groups):
+        for frame in range(i+1):
+            for row in make_records():
+                row.update(payload_group=group, episode_index=i, frame_index=frame)
+                if group == 'high':
+                    row['yaw_violation'] = False
+                rows.append(row)
+            frames.append(dict(seed=0,payload_group=group,optimization_time_ms_by_vehicle=[10.*(i+1)]*2))
+    result=write_reports(tmp_path,rows,'step',[0],5,0,frames)
+    for i, group in enumerate(groups):
+        methods=result['by_payload'][group]
+        assert methods['Baseline']['num_samples']==8*(i+1)
+        assert methods['Ours']['num_joint_samples']==4*(i+1)
+        assert methods['Ours']['optimization_time_ms_mean']==10.*(i+1)
+    assert result['by_payload']['high']['Baseline']['yaw_violation_pct']==0
+    assert result['by_payload']['low']['Baseline']['yaw_violation_pct']==12.5
+    table=(tmp_path/'step/projection_ablation_table_step.tex').read_text()
+    assert '@{}lcccccc@{}' in table
+    assert all(label in table for label in ('Low load','Medium load','High load'))
+    assert table.count('Yaw rate satisfaction')==1
+    pairs=json.loads((tmp_path/'step/jtp_paired_statistics_step_payload.json').read_text())
+    assert set(pairs['by_payload'])==set(groups)
+    with (tmp_path/'step/jtp_summary_step_payload.csv').open(encoding='utf-8-sig') as f:
+        assert len(list(csv.DictReader(f)))==6

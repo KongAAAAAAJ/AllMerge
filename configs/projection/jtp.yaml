@@ -60,7 +60,7 @@ projection:
     eps_abs: 0.001
     eps_rel: 0.001
     max_iter: 20000
-    time_limit_ms: 50.0
+    time_limit_ms: 30.0
     polishing: true
     adaptive_rho: true
     verbose: false
