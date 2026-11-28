@@ -29,7 +29,7 @@ def _unpack_ragged(data, key):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Replot TRACE JTP ablation figure from saved NPZ')
-    parser.add_argument('--figure-data', nargs='+', required=True, help='projection_ablation_<kind>_data.npz files')
+    parser.add_argument('--figure-data', nargs='+', required=True, help='Three projection_ablation_geometry_<1..3>_data.npz files, or stability/control data files')
     parser.add_argument('--output-dir', required=True)
     args = parser.parse_args(argv)
 
@@ -40,7 +40,11 @@ def main(argv=None):
                       if not key.endswith('_lengths') and key not in ('road_edge_world', 'road_safety_edge_world')}
             figure['road_edge_world'] = _unpack_ragged(data, 'road_edge_world')
             figure['road_safety_edge_world'] = _unpack_ragged(data, 'road_safety_edge_world')
-            cases[str(data['case_kind'])] = figure
+            kind = str(data['case_kind'])
+            if kind == 'geometry':
+                cases.setdefault(kind, []).append(figure)
+            else:
+                cases[kind] = figure
     output = _resolve_path(args.output_dir)
     draw_projection_figures(output, cases)
     print(f'[COMPLETE] Wrote {", ".join(cases)} PDFs to {output}')

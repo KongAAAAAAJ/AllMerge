@@ -26,7 +26,7 @@ python evaluation/ablation/run_jtp.py ^
   --seeds "0" ^
   --workers 1 ^
   --worker-threads 1 ^
-  --output-dir outputs/jtp_ablation/A0_stride_4_eps3_iter_6 ^
+  --output-dir outputs/jtp_ablation/A0_stride_4_eps3_iter_6_G213 ^
   --constraint-distributions
 
 

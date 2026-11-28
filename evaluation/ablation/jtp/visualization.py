@@ -43,6 +43,8 @@ def _draw_geometry(output_dir, figures):
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
+    if len(figures) != 3:
+        raise ValueError('Geometry figure requires three distinct scene frames')
     orange, blue, grey = '#ea580c', '#2563eb', '#737373'
     fig, axes = plt.subplots(1, 3, figsize=(21, 6))
     for panel, (ax, data) in enumerate(zip(axes, figures)):
